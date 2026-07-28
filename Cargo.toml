@@ -1,0 +1,37 @@
+[package]
+name = "invenqor-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Portable, progressively degrading Linux asset inventory agent"
+license = "Apache-2.0"
+
+[[bin]]
+name = "invenqor-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+hex = "0.4"
+# Direct compatibility constraints keep a fresh resolver on the Rust 1.85 ICU graph.
+idna = "=1.0.3"
+idna_adapter = "=1.2.0"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.38", features = ["macros", "rt-multi-thread", "signal", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Keep reqwest's URL graph on the Rust 1.85-compatible ICU generation.
+url = "=2.5.4"
+uuid = { version = "1.8", features = ["serde", "v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+name="Invenqor asset inventory agent"
+description="$name"
+command="/opt/invenqor-agent/bin/invenqor-agent"
+command_args="--config /etc/invenqor-agent/config.toml"
+command_user="invenqor-agent:invenqor-agent"
+command_background="yes"
+pidfile="/run/invenqor-agent.pid"
+output_log="/var/log/invenqor-agent.log"
+error_log="/var/log/invenqor-agent.log"
+
+depend() {
+    need net
+    after firewall
+}
+

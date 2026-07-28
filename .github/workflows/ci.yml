@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  static-build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            cpu: x86-64
+          - target: aarch64-unknown-linux-musl
+            cpu: generic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: houseabsolute/actions-rust-cross@v1
+        env:
+          RUSTFLAGS: -C target-cpu=${{ matrix.cpu }}
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --locked --release
+      - run: file target/${{ matrix.target }}/release/invenqor-agent

@@ -1,0 +1,34 @@
+[server]
+# HTTPS endpoint of the inventory gateway. When omitted, events remain in the
+# durable local queue and `--once` still prints the snapshot.
+# url = "https://inventory.example.internal"
+# bearer_token = "replace-with-provisioned-device-token"
+# ca_file = "/etc/invenqor-agent/ca.pem"
+# A single PEM containing the client certificate chain and private key.
+# client_identity_pem = "/etc/invenqor-agent/device.pem"
+timeout_seconds = 30
+
+[agent]
+state_dir = "/var/lib/invenqor-agent"
+interval_seconds = 900
+heartbeat_seconds = 300
+max_backoff_seconds = 3600
+max_queue_bytes = 104857600
+
+[collectors]
+os = true
+cpu = true
+memory = true
+disk = true
+network = true
+process = true
+packages = true
+services = true
+accounts = true
+containers = true
+
+# Command lines can contain credentials. Keep this disabled unless the data
+# classification and gateway access policy explicitly permit collection.
+include_process_cmdline = false
+max_processes = 10000
+

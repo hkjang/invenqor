@@ -1,0 +1,23 @@
+[server]
+timeout_seconds = 5
+
+[agent]
+state_dir = "/tmp/invenqor-agent-smoke-v3"
+interval_seconds = 60
+heartbeat_seconds = 60
+max_backoff_seconds = 60
+max_queue_bytes = 10485760
+
+[collectors]
+os = true
+cpu = true
+memory = true
+disk = true
+network = true
+process = true
+packages = true
+services = true
+accounts = true
+containers = true
+include_process_cmdline = false
+max_processes = 1000

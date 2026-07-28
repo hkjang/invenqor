@@ -1,0 +1,33 @@
+[Unit]
+Description=Invenqor Asset Inventory Agent
+Documentation=file:/opt/invenqor-agent/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=invenqor-agent
+Group=invenqor-agent
+ExecStart=/opt/invenqor-agent/bin/invenqor-agent --config /etc/invenqor-agent/config.toml
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/invenqor-agent
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+
