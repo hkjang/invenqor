@@ -1,0 +1,8 @@
+.git
+target
+target-*
+web/node_modules
+web/dist
+server/invenqor-server
+*.tar.gz
+*.pdf

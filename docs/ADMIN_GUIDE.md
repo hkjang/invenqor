@@ -10,6 +10,22 @@
   </div>
 </div>
 
+> v0.2.0 중앙 Server 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
+> Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
+
+## 중앙 Server 운영 핵심
+
+- 관리 콘솔은 자산·원천·변경 이력, 관계 그래프, Agent, Query DSL, 설정 버전,
+  감사 로그를 역할 권한에 따라 제공합니다.
+- PostgreSQL은 운영 Primary이고 SQLite는 기동 시 연결 실패에만 사용하는
+  대체 모드입니다. 운영 중 PostgreSQL 장애에서는 SQLite로 전환하지 않습니다.
+- 비밀 설정은 AES-256-GCM으로 암호화되고 API에는 구성 여부만 표시됩니다.
+- 로컬 인증은 Argon2id, 계정 잠금, TOTP와 Recovery Code를 지원하며 Keycloak은
+  Authorization Code+PKCE, State, Nonce와 Role/Group Mapping을 검증합니다.
+- Event ID는 Agent별 멱등 키입니다. Collector 오류로 삭제를 추론하지 않고
+  `removed` 변경만 논리 삭제합니다.
+
 ## 문서 범위와 독자
 
 이 문서는 Invenqor Agent v0.1.0을 운영 환경에 배포하는 Linux, 보안, 네트워크,

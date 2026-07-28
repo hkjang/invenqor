@@ -1,0 +1,332 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/auth"
+	"github.com/hkjang/invenqor/server/internal/bootstrap"
+	"github.com/hkjang/invenqor/server/internal/ingest"
+	"github.com/hkjang/invenqor/server/internal/spool"
+	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/version"
+	"github.com/hkjang/invenqor/server/internal/webui"
+)
+
+type Server struct {
+	router           chi.Router
+	database         *storage.Runtime
+	authService      *auth.Service
+	oidcService      *auth.OIDCService
+	totpService      *auth.TOTPService
+	bootstrapManager *auth.BootstrapManager
+	agentService     *agents.Service
+	ingestService    *ingest.Service
+	agentRateLimit   *agentRateLimiter
+	spool            *spool.Manager
+	bootstrapStore   *bootstrap.Store
+	logger           *slog.Logger
+}
+
+type Options struct {
+	Database         *storage.Runtime
+	AuthService      *auth.Service
+	OIDCService      *auth.OIDCService
+	TOTPService      *auth.TOTPService
+	BootstrapManager *auth.BootstrapManager
+	AgentService     *agents.Service
+	IngestService    *ingest.Service
+	Spool            *spool.Manager
+	BootstrapStore   *bootstrap.Store
+	Logger           *slog.Logger
+}
+
+func New(options Options) *Server {
+	if options.AgentService == nil {
+		options.AgentService = agents.NewService(options.Database.DB())
+	}
+	if options.IngestService == nil {
+		options.IngestService = ingest.NewService(options.Database.DB())
+	}
+	server := &Server{
+		router:           chi.NewRouter(),
+		database:         options.Database,
+		authService:      options.AuthService,
+		oidcService:      options.OIDCService,
+		totpService:      options.TOTPService,
+		bootstrapManager: options.BootstrapManager,
+		agentService:     options.AgentService,
+		ingestService:    options.IngestService,
+		agentRateLimit:   newAgentRateLimiter(120, time.Minute),
+		spool:            options.Spool,
+		bootstrapStore:   options.BootstrapStore,
+		logger:           options.Logger,
+	}
+	server.routes()
+	return server
+}
+
+func (s *Server) Handler() http.Handler {
+	return s.router
+}
+
+func (s *Server) routes() {
+	s.router.Use(middleware.RequestID)
+	s.router.Use(middleware.RealIP)
+	s.router.Use(middleware.Recoverer)
+	s.router.Use(s.securityHeaders)
+	s.router.Use(s.requestLog)
+
+	s.router.Get("/", webui.Handler().ServeHTTP)
+	s.router.Get("/health/live", s.live)
+	s.router.Get("/health/ready", s.ready)
+	s.router.Get("/health/database", s.databaseHealth)
+	s.router.Get("/api/v1/system/info", s.systemInfo)
+	s.router.Get("/api/v1/bootstrap/status", s.bootstrapStatus)
+	s.router.Post("/api/v1/bootstrap/admin", s.createInitialAdmin)
+	s.router.Post("/api/v1/auth/local/login", s.localLogin)
+	s.router.Get("/api/v1/auth/methods", s.authMethods)
+	s.router.Get("/api/v1/auth/keycloak/start", s.keycloakStart)
+	s.router.Get("/api/v1/auth/keycloak/callback", s.keycloakCallback)
+	s.router.Post("/v1/agent/events", s.receiveAgentEvent)
+	s.router.Group(func(protected chi.Router) {
+		protected.Use(s.authenticate)
+		protected.Get("/api/v1/auth/me", s.me)
+		protected.With(s.requireCSRF).Post("/api/v1/auth/logout", s.logout)
+		protected.With(s.requireCSRF).Post(
+			"/api/v1/auth/password/change",
+			s.changePassword,
+		)
+		protected.With(s.requireCSRF).Post(
+			"/api/v1/auth/totp/setup",
+			s.setupTOTP,
+		)
+		protected.With(s.requireCSRF).Post(
+			"/api/v1/auth/totp/enable",
+			s.enableTOTP,
+		)
+		protected.With(s.requireCSRF).Delete(
+			"/api/v1/auth/totp",
+			s.disableTOTP,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/keycloak",
+			s.getKeycloakSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/keycloak",
+			s.updateKeycloakSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/keycloak/test",
+			s.testKeycloakSettings,
+		)
+		protected.With(s.requirePermission("agents.read")).Get(
+			"/api/v1/admin/agents",
+			s.listAgents,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agents",
+			s.provisionAgent,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agents/{agentID}/tokens/rotate",
+			s.rotateAgentToken,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agents/{agentID}/block",
+			s.blockAgent,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agents/{agentID}/unblock",
+			s.unblockAgent,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agents/{agentID}/certificates",
+			s.registerAgentCertificate,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets", s.listAssets,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
+			"/api/v1/assets", s.createAsset,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets/{assetID}", s.getAsset,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Patch(
+			"/api/v1/assets/{assetID}", s.updateAsset,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.delete")).Delete(
+			"/api/v1/assets/{assetID}", s.deleteAsset,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
+			"/api/v1/assets/{assetID}/restore", s.restoreAsset,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets/{assetID}/history", s.assetHistory,
+		)
+		protected.With(s.requirePermission("relations.read")).Get(
+			"/api/v1/assets/{assetID}/relations", s.assetRelations,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("relations.write")).Post(
+			"/api/v1/assets/{assetID}/relations", s.createAssetRelation,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("relations.write")).Delete(
+			"/api/v1/assets/{assetID}/relations/{relationID}", s.deleteAssetRelation,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.merge")).Post(
+			"/api/v1/assets/merge", s.mergeAssets,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("assets.merge")).Post(
+			"/api/v1/assets/{assetID}/split", s.splitAsset,
+		)
+		protected.With(s.requirePermission("queries.execute")).Post(
+			"/api/v1/query/validate", s.validateQuery,
+		)
+		protected.With(s.requirePermission("queries.execute")).Post(
+			"/api/v1/query/execute", s.executeQuery,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings", s.listSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings", s.updateSettings,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/history", s.settingHistory,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/rollback", s.rollbackSetting,
+		)
+		protected.With(s.requirePermission("audit.read")).Get(
+			"/api/v1/admin/audit", s.listAudit,
+		)
+	})
+	s.router.NotFound(webui.Handler().ServeHTTP)
+}
+
+func (s *Server) root(response http.ResponseWriter, _ *http.Request) {
+	writeJSON(response, http.StatusOK, map[string]any{
+		"name":    "Invenqor Server",
+		"version": version.Version,
+		"status":  "running",
+	})
+}
+
+func (s *Server) live(response http.ResponseWriter, _ *http.Request) {
+	writeJSON(response, http.StatusOK, map[string]any{
+		"status": "UP",
+	})
+}
+
+func (s *Server) ready(response http.ResponseWriter, request *http.Request) {
+	context, cancel := context.WithTimeout(request.Context(), time.Second)
+	defer cancel()
+	if err := s.database.Ping(context); err != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]any{
+			"status":        "NOT_READY",
+			"database_mode": s.database.Mode(),
+		})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{
+		"status":        "READY",
+		"database_mode": s.database.Mode(),
+	})
+}
+
+func (s *Server) databaseHealth(response http.ResponseWriter, request *http.Request) {
+	context, cancel := context.WithTimeout(request.Context(), time.Second)
+	defer cancel()
+	status := http.StatusOK
+	health := "UP"
+	if err := s.database.Ping(context); err != nil {
+		status = http.StatusServiceUnavailable
+		health = "DOWN"
+	}
+	payload := map[string]any{
+		"status":    health,
+		"mode":      s.database.Mode(),
+		"opened_at": s.database.OpenedAt(),
+	}
+	if failure := s.database.PostgresFailure(); failure != nil {
+		payload["postgres_startup_failure"] = failure
+	}
+	writeJSON(response, status, payload)
+}
+
+func (s *Server) systemInfo(response http.ResponseWriter, _ *http.Request) {
+	payload := map[string]any{
+		"product":        "Invenqor",
+		"server_version": version.Version,
+		"commit":         version.Commit,
+		"build_time":     version.BuildTime,
+		"database_mode":  s.database.Mode(),
+	}
+	if failure := s.database.PostgresFailure(); failure != nil {
+		payload["postgres_startup_failure"] = failure
+	}
+	writeJSON(response, http.StatusOK, payload)
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		response.Header().Set("X-Frame-Options", "DENY")
+		response.Header().Set("Referrer-Policy", "no-referrer")
+		response.Header().Set(
+			"Content-Security-Policy",
+			"default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+		)
+		if request.TLS != nil {
+			response.Header().Set(
+				"Strict-Transport-Security",
+				"max-age=31536000; includeSubDomains",
+			)
+		}
+		next.ServeHTTP(response, request)
+	})
+}
+
+func (s *Server) requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		wrapped := middleware.NewWrapResponseWriter(response, request.ProtoMajor)
+		next.ServeHTTP(wrapped, request)
+		s.logger.Info(
+			"http_request",
+			"request_id", middleware.GetReqID(request.Context()),
+			"method", request.Method,
+			"path", request.URL.Path,
+			"status", wrapped.Status(),
+			"bytes", wrapped.BytesWritten(),
+			"duration_ms", time.Since(started).Milliseconds(),
+			"remote_ip", request.RemoteAddr,
+		)
+	})
+}
+
+func writeJSON(response http.ResponseWriter, status int, payload any) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.WriteHeader(status)
+	encoder := json.NewEncoder(response)
+	encoder.SetEscapeHTML(true)
+	_ = encoder.Encode(payload)
+}
+
+func bearerToken(request *http.Request) string {
+	header := request.Header.Get("Authorization")
+	scheme, token, found := strings.Cut(header, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}

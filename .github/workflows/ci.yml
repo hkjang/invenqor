@@ -8,6 +8,30 @@ permissions:
   contents: read
 
 jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: go test ./...
+        working-directory: server
+      - run: go vet ./...
+        working-directory: server
+      - run: go build ./cmd/invenqor-server
+        working-directory: server
+
   test:
     runs-on: ubuntu-latest
     steps:

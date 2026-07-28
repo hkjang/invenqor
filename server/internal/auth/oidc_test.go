@@ -1,0 +1,290 @@
+package auth
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/hkjang/invenqor/server/internal/bootstrap"
+)
+
+func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) {
+	runtime, admin := setupAuthUser(t)
+	defer runtime.Close()
+	root := filepath.Dir(runtime.SQLitePath())
+	bootstrapStore, err := bootstrap.Open(root)
+	if err != nil {
+		t.Fatalf("bootstrap.Open() error = %v", err)
+	}
+	localAuth, err := NewService(runtime.DB(), DefaultServiceOptions())
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+	provider := newMockOIDCProvider(t, key)
+	defer provider.Close()
+
+	service := NewOIDCService(runtime.DB(), bootstrapStore, localAuth)
+	settings := DefaultOIDCSettings()
+	settings.Enabled = true
+	settings.IssuerURL = provider.URL
+	settings.ClientID = "invenqor-test"
+	settings.RedirectURI = "https://invenqor.example.test/api/v1/auth/keycloak/callback"
+	settings.PrivateCAPEM = provider.CAPEM
+	settings.RoleMappings = map[string]string{"inventory-view": "viewer"}
+	settings.AllowedEmailDomains = []string{"example.test"}
+	clientSecret := "oidc-client-secret"
+	if err := service.SaveSettings(
+		context.Background(),
+		settings,
+		&clientSecret,
+		admin,
+		"test configuration",
+	); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+	start, err := service.Start(
+		context.Background(),
+		"/assets",
+		"192.0.2.20",
+		"test-agent",
+	)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	authorizationURL, err := url.Parse(start.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	query := authorizationURL.Query()
+	if query.Get("code_challenge_method") != "S256" ||
+		query.Get("code_challenge") == "" ||
+		query.Get("nonce") == "" ||
+		query.Get("state") == "" {
+		t.Fatalf("authorization URL omitted PKCE/state/nonce: %s", start.AuthorizationURL)
+	}
+	provider.SetAuthorization(
+		query.Get("nonce"),
+		query.Get("code_challenge"),
+	)
+	session, returnTo, err := service.Callback(
+		context.Background(),
+		query.Get("state"),
+		"valid-code",
+		"192.0.2.20",
+		"test-agent",
+		"request-oidc",
+	)
+	if err != nil {
+		t.Fatalf("Callback() error = %v", err)
+	}
+	if returnTo != "/assets" {
+		t.Fatalf("Callback() returnTo = %q, want /assets", returnTo)
+	}
+	if session.User.Username != "oidc.user" ||
+		!containsString(session.User.Roles, "viewer") ||
+		!containsString(session.User.Permissions, "assets.read") {
+		t.Fatalf("provisioned OIDC user = %#v", session.User)
+	}
+	if session.Token == "" || session.CSRFToken == "" {
+		t.Fatal("OIDC callback omitted session tokens")
+	}
+	if _, _, err := service.Callback(
+		context.Background(),
+		query.Get("state"),
+		"valid-code",
+		"192.0.2.20",
+		"test-agent",
+		"request-replay",
+	); err == nil {
+		t.Fatal("Callback() accepted a replayed OIDC state")
+	}
+	var linkedIdentities int
+	if err := runtime.DB().QueryRow(
+		"SELECT COUNT(*) FROM external_identities WHERE provider = 'keycloak'",
+	).Scan(&linkedIdentities); err != nil {
+		t.Fatalf("count external identities error = %v", err)
+	}
+	if linkedIdentities != 1 {
+		t.Fatalf("external identity count = %d, want 1", linkedIdentities)
+	}
+	values, err := bootstrapStore.Load()
+	if err != nil {
+		t.Fatalf("bootstrapStore.Load() error = %v", err)
+	}
+	if values.KeycloakClientSecret != clientSecret {
+		t.Fatal("Keycloak client secret was not stored in encrypted bootstrap settings")
+	}
+}
+
+func TestOIDCSettingsValidationAndRoleMapping(t *testing.T) {
+	settings := DefaultOIDCSettings()
+	settings.Enabled = true
+	settings.IssuerURL = "http://insecure.example.test"
+	settings.ClientID = "client"
+	settings.RedirectURI = "https://invenqor.example.test/callback"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("Validate() accepted an insecure issuer")
+	}
+	settings.IssuerURL = "https://keycloak.example.test"
+	settings.Realm = "inventory"
+	if issuer := settings.EffectiveIssuer(); issuer != "https://keycloak.example.test/realms/inventory" {
+		t.Fatalf("EffectiveIssuer() = %q", issuer)
+	}
+	settings.RoleMappings = map[string]string{"kc-admin": "asset_manager"}
+	settings.GroupMappings = map[string]string{"/audit": "auditor"}
+	roles := mappedRoles(settings, map[string]any{
+		"roles":  []any{"kc-admin"},
+		"groups": []any{"/audit"},
+	})
+	if strings.Join(roles, ",") != "asset_manager,auditor" {
+		t.Fatalf("mappedRoles() = %v", roles)
+	}
+	if !allowedEmail("user@example.test", []string{"example.test"}) ||
+		allowedEmail("user@other.test", []string{"example.test"}) {
+		t.Fatal("allowedEmail() domain policy mismatch")
+	}
+}
+
+type mockOIDCProvider struct {
+	*httptest.Server
+	URL           string
+	CAPEM         string
+	key           *rsa.PrivateKey
+	mutex         sync.Mutex
+	nonce         string
+	codeChallenge string
+}
+
+func newMockOIDCProvider(t *testing.T, key *rsa.PrivateKey) *mockOIDCProvider {
+	t.Helper()
+	provider := &mockOIDCProvider{key: key}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		provider.ServeHTTP(response, request)
+	}))
+	provider.Server = server
+	provider.URL = server.URL
+	provider.CAPEM = string(pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: server.Certificate().Raw,
+	}))
+	return provider
+}
+
+func (provider *mockOIDCProvider) SetAuthorization(nonce, challenge string) {
+	provider.mutex.Lock()
+	defer provider.mutex.Unlock()
+	provider.nonce = nonce
+	provider.codeChallenge = challenge
+}
+
+func (provider *mockOIDCProvider) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	switch request.URL.Path {
+	case "/.well-known/openid-configuration":
+		writeMockJSON(response, map[string]any{
+			"issuer":                                provider.URL,
+			"authorization_endpoint":                provider.URL + "/auth",
+			"token_endpoint":                        provider.URL + "/token",
+			"jwks_uri":                              provider.URL + "/jwks",
+			"response_types_supported":              []string{"code"},
+			"subject_types_supported":               []string{"public"},
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+			"code_challenge_methods_supported":      []string{"S256"},
+		})
+	case "/jwks":
+		exponent := big.NewInt(int64(provider.key.PublicKey.E)).Bytes()
+		writeMockJSON(response, map[string]any{
+			"keys": []map[string]string{{
+				"kty": "RSA",
+				"kid": "test-key",
+				"use": "sig",
+				"alg": "RS256",
+				"n":   base64.RawURLEncoding.EncodeToString(provider.key.PublicKey.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(exponent),
+			}},
+		})
+	case "/token":
+		if err := request.ParseForm(); err != nil {
+			http.Error(response, "invalid form", http.StatusBadRequest)
+			return
+		}
+		provider.mutex.Lock()
+		nonce := provider.nonce
+		challenge := provider.codeChallenge
+		provider.mutex.Unlock()
+		actualChallenge := sha256.Sum256([]byte(request.Form.Get("code_verifier")))
+		if request.Form.Get("code") != "valid-code" ||
+			base64.RawURLEncoding.EncodeToString(actualChallenge[:]) != challenge {
+			writeMockJSONStatus(response, http.StatusBadRequest, map[string]string{
+				"error": "invalid_grant",
+			})
+			return
+		}
+		now := time.Now().UTC()
+		idToken := signTestJWT(provider.key, map[string]any{
+			"iss":                provider.URL,
+			"sub":                "subject-123",
+			"aud":                "invenqor-test",
+			"iat":                now.Unix(),
+			"exp":                now.Add(5 * time.Minute).Unix(),
+			"nonce":              nonce,
+			"preferred_username": "oidc.user",
+			"email":              "oidc.user@example.test",
+			"name":               "OIDC User",
+			"roles":              []string{"inventory-view"},
+		})
+		writeMockJSON(response, map[string]any{
+			"access_token": "access-token",
+			"token_type":   "Bearer",
+			"expires_in":   300,
+			"id_token":     idToken,
+		})
+	default:
+		http.NotFound(response, request)
+	}
+}
+
+func signTestJWT(key *rsa.PrivateKey, claims map[string]any) string {
+	header, _ := json.Marshal(map[string]string{
+		"alg": "RS256",
+		"kid": "test-key",
+		"typ": "JWT",
+	})
+	payload, _ := json.Marshal(claims)
+	signingInput := base64.RawURLEncoding.EncodeToString(header) + "." +
+		base64.RawURLEncoding.EncodeToString(payload)
+	digest := sha256.Sum256([]byte(signingInput))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		panic(fmt.Sprintf("sign test JWT: %v", err))
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func writeMockJSON(response http.ResponseWriter, payload any) {
+	writeMockJSONStatus(response, http.StatusOK, payload)
+}
+
+func writeMockJSONStatus(response http.ResponseWriter, status int, payload any) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(status)
+	_ = json.NewEncoder(response).Encode(payload)
+}

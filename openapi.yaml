@@ -1,0 +1,60 @@
+openapi: 3.1.0
+info:
+  title: Invenqor Server API
+  version: 0.2.0
+servers: [{url: /}]
+paths:
+  /health/ready:
+    get:
+      summary: Readiness and database mode
+      responses: {"200": {description: Ready}, "503": {description: Not ready}}
+  /v1/agent/events:
+    post:
+      summary: Receive the unchanged Invenqor Agent envelope
+      security: [{agentBearer: []}, {agentMTLS: []}]
+      parameters:
+        - {in: header, name: X-Invenqor-Agent-Id, required: true, schema: {type: string, format: uuid}}
+        - {in: header, name: X-Invenqor-Event-Id, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Envelope"}
+      responses:
+        "200": {description: Persisted}
+        "202": {description: Durably spooled during PostgreSQL degradation}
+        "400": {description: Invalid event}
+        "401": {description: Invalid credential}
+  /api/v1/assets:
+    get:
+      summary: Search representative assets
+      security: [{session: []}]
+      responses: {"200": {description: Asset page}}
+    post:
+      summary: Create manual asset
+      security: [{session: []}]
+      responses: {"201": {description: Created}}
+  /api/v1/query/execute:
+    post:
+      summary: Execute a validated, parameter-bound Query DSL expression
+      security: [{session: []}]
+      responses: {"200": {description: Query results}, "400": {description: Unsafe or invalid query}}
+components:
+  securitySchemes:
+    agentBearer: {type: http, scheme: bearer}
+    agentMTLS: {type: mutualTLS}
+    session: {type: apiKey, in: cookie, name: invenqor_session}
+  schemas:
+    Envelope:
+      type: object
+      required: [schema_version, event_id, agent_id, created_at, kind, snapshot_hash]
+      properties:
+        schema_version: {type: integer, const: 1}
+        event_id: {type: string, format: uuid}
+        agent_id: {type: string, format: uuid}
+        created_at: {type: integer}
+        kind: {type: string, enum: [inventory, heartbeat]}
+        snapshot_hash: {type: string}
+        snapshot: {type: object}
+        changes: {type: array, items: {type: object}}
+        collection_errors: {type: array, items: {type: object}}

@@ -1,0 +1,17 @@
+replicaCount: 1
+image:
+  repository: ghcr.io/hkjang/invenqor-server
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 8080
+persistence:
+  enabled: true
+  size: 5Gi
+postgresDsnSecret:
+  name: invenqor-database
+  key: dsn
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}

@@ -1,5 +1,22 @@
 # Invenqor Agent
 
+Invenqor는 Linux 자산 수집 Agent와 Go 기반 중앙 Server, React 관리 콘솔을
+제공합니다. Server는 PostgreSQL Primary와 안전한 SQLite 기동 대체 모드,
+로컬/Keycloak 인증, RBAC, 자산 정규화·이력·관계, Query DSL과 장애 이벤트
+spool을 포함합니다.
+
+빠른 시작:
+
+```bash
+export POSTGRES_PASSWORD='change-me-with-a-long-random-value'
+docker compose up -d --build
+open http://127.0.0.1:8080
+```
+
+상세 절차는 [Server 설치 및 운영 가이드](docs/SERVER_INSTALLATION.md),
+[사용자 가이드](docs/USER_GUIDE.md), [관리자 가이드](docs/ADMIN_GUIDE.md),
+[임원 보고서](docs/EXECUTIVE_REPORT.md)를 참조하십시오.
+
 Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 실행되는 자산 수집
 에이전트입니다. Linux의 `/proc`, `/sys`, `/etc`를 우선 사용하고, 사용할 수 없는
 기능은 해당 수집기만 실패 처리하는 점진적 기능 저하(progressive degradation)를
