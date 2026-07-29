@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.7 · Agent 버전: v0.2.7 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.8 · Agent 버전: v0.2.8 · 기준일: 2026-07-30
 
 ## 1. 운영 구조와 단일 포트
 
@@ -66,17 +66,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.7.tar.gz`
-- `invenqor-0.2.7.tar.gz.sha256`
+- `invenqor-0.2.8.tar.gz`
+- `invenqor-0.2.8.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.7.tar.gz.sha256
-gzip -t invenqor-0.2.7.tar.gz
-docker load < invenqor-0.2.7.tar.gz
-docker image inspect invenqor-server:0.2.7 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.8.tar.gz.sha256
+gzip -t invenqor-0.2.8.tar.gz
+docker load < invenqor-0.2.8.tar.gz
+docker image inspect invenqor-server:0.2.8 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -96,7 +96,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.7
+./scripts/build-offline-images.sh 0.2.8
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -111,7 +111,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.7
+  invenqor-server:0.2.8
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -207,8 +207,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.8/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.8/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -430,7 +430,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.7`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.8`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -439,7 +439,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.7 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.8 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -632,7 +632,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.7
+  invenqor-server:0.2.8
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
