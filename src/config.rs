@@ -151,7 +151,42 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
+}
 
+/// What the process can tell about a configuration file before reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigAvailability {
+    Readable,
+    Missing,
+    /// The path exists but this account cannot read it, or cannot traverse a
+    /// directory on the way to it.
+    Unreadable,
+}
+
+impl ConfigAvailability {
+    /// `Path::exists()` answers false for a file that is present but denied,
+    /// because it treats every stat failure as absence. That turned a
+    /// permission problem into "no configuration file was found", and the Agent
+    /// then ran on built-in defaults - collecting into the local queue with no
+    /// Server for as long as nobody noticed. The two cases need different
+    /// answers, so they need different names.
+    pub fn inspect(path: &Path) -> Self {
+        match std::fs::File::open(path) {
+            Ok(_) => Self::Readable,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Self::Unreadable,
+            // Anything else - a broken symlink target, a directory in the way -
+            // is not "absent" either, so it must not silently become defaults.
+            Err(_) => Self::Unreadable,
+        }
+    }
+
+    pub fn is_readable(self) -> bool {
+        self == Self::Readable
+    }
+}
+
+impl Config {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             self.agent.interval_seconds > 0,

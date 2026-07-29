@@ -28,7 +28,12 @@ if ! getent passwd invenqor-agent >/dev/null 2>&1; then
 fi
 
 install -d -m 0755 "$BIN_DIR"
-install -d -m 0750 "$CONFIG_DIR"
+# The service group must be able to enter this directory. Created without an
+# explicit group it was root:root 0750, so the unprivileged service could not
+# traverse it and every read of the configuration failed with EACCES - which the
+# Agent reported as "no configuration file was found" while it quietly ran on
+# built-in defaults and collected into the local queue forever.
+install -d -m 0750 -o root -g invenqor-agent "$CONFIG_DIR"
 install -d -m 0700 -o invenqor-agent -g invenqor-agent "$STATE_DIR"
 install -m 0755 "$PACKAGE_DIR/bin/invenqor-agent" "$BIN_DIR/invenqor-agent"
 install -m 0644 "$PACKAGE_DIR/README.md" /opt/invenqor-agent/README.md
@@ -36,7 +41,20 @@ install -m 0644 "$PACKAGE_DIR/README.md" /opt/invenqor-agent/README.md
 if [ ! -e "$CONFIG_DIR/config.toml" ]; then
     install -m 0640 -o root -g invenqor-agent \
         "$PACKAGE_DIR/config/config.toml" "$CONFIG_DIR/config.toml"
+else
+    # An upgrade over an installation that created the directory or the file
+    # unreadable has to repair it, or the service keeps running on defaults.
+    chown root:invenqor-agent "$CONFIG_DIR/config.toml"
+    chmod 0640 "$CONFIG_DIR/config.toml"
 fi
+for extra in enrollment.token ca.pem device.pem; do
+    # Operators install these by hand and a wrong group makes the Agent fall back
+    # silently, so make the ones that are present readable by the service.
+    if [ -f "$CONFIG_DIR/$extra" ]; then
+        chown root:invenqor-agent "$CONFIG_DIR/$extra"
+        chmod 0640 "$CONFIG_DIR/$extra"
+    fi
+done
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     install -m 0644 "$PACKAGE_DIR/service/invenqor-agent.service" \

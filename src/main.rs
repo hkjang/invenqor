@@ -1,5 +1,5 @@
 use anyhow::Result;
-use invenqor_agent::config::Config;
+use invenqor_agent::config::{Config, ConfigAvailability};
 use invenqor_agent::diagnose;
 use invenqor_agent::identity;
 use invenqor_agent::scheduler::Agent;
@@ -65,13 +65,38 @@ async fn run() -> Result<i32> {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
     reject_unknown_arguments(&args)?;
 
-    let config_present = config_path.exists();
-    let config = if config_present {
-        Config::load(&config_path)?
-    } else if config_path == Path::new(DEFAULT_CONFIG) {
-        Config::default()
-    } else {
-        anyhow::bail!("config file does not exist: {}", config_path.display());
+    let availability = ConfigAvailability::inspect(&config_path);
+    let config_present = availability.is_readable();
+    let config = match availability {
+        ConfigAvailability::Readable => Config::load(&config_path)?,
+        // --diagnose and --status exist to explain a broken installation, so they
+        // must produce their report rather than exit on the very fault they are
+        // there to name. They run on defaults and the report says why.
+        ConfigAvailability::Unreadable if diagnose_flag || status_flag => Config::default(),
+        // Running on built-in defaults because the file could not be *read* is
+        // the failure that hides itself: the Agent collects into its queue,
+        // never registers, and the only clue is a warning that says the file
+        // was not found. Refuse to start instead, and name the fix.
+        ConfigAvailability::Unreadable => anyhow::bail!(
+            "cannot read config {path}: the file or a directory on the way to it \
+             denies access to this account ({account}). The service account needs \
+             read access:\n  \
+             sudo chown root:invenqor-agent {parent} {path}\n  \
+             sudo chmod 0750 {parent}\n  \
+             sudo chmod 0640 {path}",
+            path = config_path.display(),
+            parent = config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/etc/invenqor-agent"))
+                .display(),
+            account = current_account(),
+        ),
+        ConfigAvailability::Missing if config_path == Path::new(DEFAULT_CONFIG) => {
+            Config::default()
+        }
+        ConfigAvailability::Missing => {
+            anyhow::bail!("config file does not exist: {}", config_path.display())
+        }
     };
     config.validate()?;
     if validate {
@@ -216,6 +241,23 @@ fn record_applied_update(config: &Config, version: &str) {
     };
     status.record_update_applied(version, invenqor_agent::model::unix_time());
     let _ = store.write_status(&status);
+}
+
+/// The account the process is running as, so a permission message names who was
+/// denied rather than leaving the reader to guess.
+fn current_account() -> String {
+    // No libc dependency: the effective user is what the kernel reports here.
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Uid:").map(|rest| {
+                    let effective = rest.split_whitespace().nth(1).unwrap_or("?");
+                    format!("uid {effective}")
+                })
+            })
+        })
+        .unwrap_or_else(|| "the current account".to_string())
 }
 
 fn print_status(config: &Config, json: bool) -> Result<i32> {

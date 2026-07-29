@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, ConfigAvailability};
 use crate::health::format_unix_utc;
 use crate::identity;
 use crate::model::unix_time;
@@ -177,21 +177,7 @@ pub async fn run(config: &Config, config_path: &Path, config_present: bool) -> R
     let mut checks = Vec::new();
     let mut agent_id = None;
 
-    checks.push(if config_present {
-        Check::pass(
-            "configuration file",
-            format!("read {}", config_path.display()),
-        )
-    } else {
-        Check::warn(
-            "configuration file",
-            format!(
-                "{} does not exist; built-in defaults are in use",
-                config_path.display()
-            ),
-            "Install the packaged config.toml and set server.url in it.",
-        )
-    });
+    checks.push(config_file_check(config_path, config_present));
 
     match identity::load_or_create(&config.agent.state_dir) {
         Ok(identity) => {
@@ -542,6 +528,155 @@ fn resolve_check(url: &Url) -> Check {
     }
 }
 
+/// The service account the packaged unit runs the Agent as. The diagnosis is
+/// usually run with sudo, so "I can read it" says nothing about whether the
+/// service can - and that difference is exactly the failure being diagnosed.
+const SERVICE_ACCOUNT: &str = "invenqor-agent";
+
+fn config_file_check(config_path: &Path, config_present: bool) -> Check {
+    if !config_present {
+        return match ConfigAvailability::inspect(config_path) {
+            ConfigAvailability::Unreadable => Check::fail(
+                "configuration file",
+                format!(
+                    "{} exists but this account cannot read it",
+                    config_path.display()
+                ),
+                config_permission_remedy(config_path),
+            ),
+            _ => Check::warn(
+                "configuration file",
+                format!(
+                    "{} does not exist; built-in defaults are in use",
+                    config_path.display()
+                ),
+                "Install the packaged config.toml and set server.url in it.",
+            ),
+        };
+    }
+    // Reading it as root proves nothing about the service. Report what the
+    // service account will meet, because a PASS here while the service runs on
+    // built-in defaults is the report that sends an operator looking in the
+    // wrong place.
+    match service_account_can_read(config_path) {
+        ServiceAccess::Readable | ServiceAccess::Unknown => Check::pass(
+            "configuration file",
+            format!("read {}", config_path.display()),
+        ),
+        ServiceAccess::Denied { detail } => Check::fail(
+            "configuration file",
+            format!(
+                "{} is readable by this account but not by the {SERVICE_ACCOUNT} \
+                 service account ({detail}); the service runs on built-in \
+                 defaults and never registers",
+                config_path.display()
+            ),
+            config_permission_remedy(config_path),
+        ),
+    }
+}
+
+fn config_permission_remedy(config_path: &Path) -> String {
+    let parent = config_path
+        .parent()
+        .map(|value| value.display().to_string())
+        .unwrap_or_else(|| "/etc/invenqor-agent".to_string());
+    format!(
+        "Grant the service account read access, then restart the service: \
+         sudo chown root:{SERVICE_ACCOUNT} {parent} {path}; \
+         sudo chmod 0750 {parent}; sudo chmod 0640 {path}",
+        path = config_path.display(),
+    )
+}
+
+enum ServiceAccess {
+    Readable,
+    Denied {
+        detail: String,
+    },
+    /// The service account does not exist on this host, or the platform does not
+    /// expose what is needed to judge. Nothing to report either way.
+    Unknown,
+}
+
+/// Decides whether SERVICE_ACCOUNT can read the file, by checking the owner,
+/// group and mode of the file and of every directory leading to it.
+fn service_account_can_read(config_path: &Path) -> ServiceAccess {
+    #[cfg(unix)]
+    {
+        match service_account_ids() {
+            Some((uid, gid)) => service_access_for(config_path, uid, gid),
+            None => ServiceAccess::Unknown,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config_path;
+        ServiceAccess::Unknown
+    }
+}
+
+/// The permission decision, separated from looking the account up so it can be
+/// exercised for any uid/gid rather than only the one this host happens to have.
+#[cfg(unix)]
+fn service_access_for(config_path: &Path, service_uid: u32, service_gid: u32) -> ServiceAccess {
+    use std::os::unix::fs::MetadataExt;
+    // Root reads regardless of mode, so a root service account is always fine.
+    if service_uid == 0 {
+        return ServiceAccess::Readable;
+    }
+    let mut ancestors: Vec<&Path> = config_path.ancestors().collect();
+    ancestors.reverse();
+    for path in ancestors {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return ServiceAccess::Unknown;
+        };
+        // A directory needs execute to traverse; the file itself needs read.
+        let (owner_bit, group_bit, other_bit) = if metadata.is_dir() {
+            (0o100, 0o010, 0o001)
+        } else {
+            (0o400, 0o040, 0o004)
+        };
+        let mode = metadata.mode();
+        let permitted = if metadata.uid() == service_uid {
+            mode & owner_bit != 0
+        } else if metadata.gid() == service_gid {
+            mode & group_bit != 0
+        } else {
+            mode & other_bit != 0
+        };
+        if !permitted {
+            return ServiceAccess::Denied {
+                detail: format!(
+                    "{} is mode {:04o} owned by uid {} gid {}",
+                    path.display(),
+                    mode & 0o7777,
+                    metadata.uid(),
+                    metadata.gid()
+                ),
+            };
+        }
+    }
+    ServiceAccess::Readable
+}
+
+/// Reads the service account's uid and gid from /etc/passwd. Parsing the file
+/// avoids a libc dependency and works the same in a container.
+#[cfg(unix)]
+fn service_account_ids() -> Option<(u32, u32)> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        if fields.next()? != SERVICE_ACCOUNT {
+            return None;
+        }
+        let _password = fields.next()?;
+        let uid = fields.next()?.parse().ok()?;
+        let gid = fields.next()?.parse().ok()?;
+        Some((uid, gid))
+    })
+}
+
 fn failure_check(name: &'static str, error: &anyhow::Error) -> Check {
     match failure_of(error) {
         Some(failure) => {
@@ -655,5 +790,136 @@ mod tests {
         assert!(rendered.contains("[SKIP] c"));
         assert!(!report.failed());
         assert!(rendered.contains("OK - the Agent can reach the Server"));
+    }
+
+    /// The report is normally produced with sudo while the service runs as
+    /// invenqor-agent. A PASS earned by root's own access, for a file the
+    /// service cannot read, sends the operator looking in the wrong place - the
+    /// service is on built-in defaults and the diagnosis says the config is fine.
+    #[test]
+    fn a_config_the_service_account_cannot_read_is_a_failure_not_a_pass() {
+        let directory = std::env::temp_dir().join(format!("iq-cfg-{}", unix_time()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+
+        // Readable by everyone: nothing to report.
+        set_mode(&directory, 0o755);
+        set_mode(&path, 0o644);
+        let check = config_file_check(&path, true);
+        assert_eq!(check.outcome, Outcome::Pass, "{}", check.detail);
+
+        // A service account that is neither the owner nor in the owning group -
+        // which is what a packaged install produces - falls on the "other" bits.
+        let (other_uid, other_gid) = (own_uid() + 1_000, own_gid() + 1_000);
+
+        // Only the owner may read the file.
+        set_mode(&path, 0o600);
+        assert!(
+            matches!(
+                service_access_for(&path, other_uid, other_gid),
+                ServiceAccess::Denied { .. }
+            ),
+            "a file readable only by its owner must be reported as denied"
+        );
+
+        // The directory the file sits in cannot be traversed. This is exactly
+        // what the packaged installer created: 0750 root:root with the config
+        // inside owned root:invenqor-agent, so the mode on the file was right
+        // and the service still could not reach it.
+        set_mode(&path, 0o644);
+        set_mode(&directory, 0o750);
+        match service_access_for(&path, other_uid, other_gid) {
+            ServiceAccess::Denied { detail } => {
+                assert!(
+                    detail.contains(&directory.display().to_string()),
+                    "the failing path must be named: {detail}"
+                );
+                assert!(
+                    detail.contains("0750"),
+                    "the mode must be reported: {detail}"
+                );
+            }
+            _ => panic!("an untraversable parent directory must be reported as denied"),
+        }
+
+        // Group access is what the fixed installer grants.
+        assert!(
+            matches!(
+                service_access_for(&path, other_uid, own_gid()),
+                ServiceAccess::Readable
+            ),
+            "membership of the owning group must be accepted"
+        );
+
+        // The remedy has to be the command that repairs it.
+        let remedy = config_permission_remedy(&path);
+        assert!(remedy.contains("chown root:invenqor-agent"), "{remedy}");
+        assert!(remedy.contains("chmod 0750"), "{remedy}");
+        assert!(remedy.contains("chmod 0640"), "{remedy}");
+
+        set_mode(&directory, 0o755);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Present-but-denied and absent are different problems with different
+    /// fixes, and Path::exists() reports both as absent.
+    #[test]
+    fn a_denied_config_is_not_reported_as_missing() {
+        let directory = std::env::temp_dir().join(format!("iq-deny-{}", unix_time()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        set_mode(&directory, 0o000);
+
+        // config_present is false because opening it failed, which is exactly
+        // what the running Agent sees.
+        let check = config_file_check(&path, false);
+        set_mode(&directory, 0o755);
+        if own_uid() != 0 {
+            assert_eq!(check.outcome, Outcome::Fail, "{}", check.detail);
+            assert!(
+                check.detail.contains("cannot read it"),
+                "a denied file must not be reported as missing: {}",
+                check.detail
+            );
+        }
+
+        // Genuinely absent stays a warning: built-in defaults are a legitimate
+        // first-run state.
+        let missing = directory.join("absent.toml");
+        let check = config_file_check(&missing, false);
+        assert_eq!(check.outcome, Outcome::Warn, "{}", check.detail);
+        assert!(check.detail.contains("does not exist"));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn own_gid() -> u32 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("Gid:")
+                        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+                })
+            })
+            .unwrap_or(u32::MAX)
+    }
+
+    fn own_uid() -> u32 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    line.strip_prefix("Uid:")
+                        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+                })
+            })
+            .unwrap_or(u32::MAX)
     }
 }
