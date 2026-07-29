@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 )
 
 var (
@@ -40,16 +41,16 @@ var scopeCatalog = []Scope{
 }
 
 type Key struct {
-	ID         string   `json:"id"`
-	UserID     string   `json:"user_id,omitempty"`
-	Name       string   `json:"name"`
-	Prefix     string   `json:"prefix"`
-	Scopes     []string `json:"scopes"`
-	ExpiresAt  any      `json:"expires_at,omitempty"`
-	LastUsedAt any      `json:"last_used_at,omitempty"`
-	CreatedAt  any      `json:"created_at"`
-	UpdatedAt  any      `json:"updated_at"`
-	RevokedAt  any      `json:"revoked_at,omitempty"`
+	ID         string       `json:"id"`
+	UserID     string       `json:"user_id,omitempty"`
+	Name       string       `json:"name"`
+	Prefix     string       `json:"prefix"`
+	Scopes     []string     `json:"scopes"`
+	ExpiresAt  apitime.Time `json:"expires_at,omitempty"`
+	LastUsedAt apitime.Time `json:"last_used_at,omitempty"`
+	CreatedAt  apitime.Time `json:"created_at"`
+	UpdatedAt  apitime.Time `json:"updated_at"`
+	RevokedAt  apitime.Time `json:"revoked_at,omitempty"`
 }
 
 type Credential struct {

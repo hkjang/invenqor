@@ -16,6 +16,11 @@ var (
 	safePath = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
 )
 
+const (
+	maxClauses = 20
+	maxLength  = 4096
+)
+
 type Clause struct {
 	Field    string `json:"field"`
 	Operator string `json:"operator"`
@@ -31,15 +36,15 @@ func Parse(input string) (Query, error) {
 	if input == "" {
 		return Query{}, errors.New("query is empty")
 	}
-	if len(input) > 4096 {
-		return Query{}, errors.New("query exceeds 4096 characters")
+	if len(input) > maxLength {
+		return Query{}, fmt.Errorf("query exceeds %d characters", maxLength)
 	}
 	parts, err := splitAND(input)
 	if err != nil {
 		return Query{}, err
 	}
-	if len(parts) > 20 {
-		return Query{}, errors.New("query has more than 20 clauses")
+	if len(parts) > maxClauses {
+		return Query{}, fmt.Errorf("query has more than %d clauses", maxClauses)
 	}
 	result := Query{Clauses: make([]Clause, 0, len(parts))}
 	for _, part := range parts {
@@ -105,12 +110,65 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 	return strings.Join(conditions, " AND "), args, nil
 }
 
+// Field describes one queryable field for the console's reference panel. The
+// grammar was only discoverable by trial and error: an operator had to guess a
+// field name, read "field ... is not allowed", and guess again.
+type Field struct {
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Description string `json:"description"`
+	Example     string `json:"example"`
+}
+
+// fields is the single source for both the parser's allowlist and the published
+// reference, so the two cannot disagree.
+var fields = []Field{
+	{"name", "text", "자산 이름", `name = "web-01"`},
+	{"asset_key", "text", "수집 원천이 부여한 고유 키", `asset_key = "host:web-01"`},
+	{"id", "text", "자산 UUID", `id = "0d0f…"`},
+	{"type", "text", "자산 유형", `type = "host"`},
+	{"status", "text", "수명주기 상태", `status = "active"`},
+	{"environment", "text", "분류가 판정한 운영 환경", `environment = "production"`},
+	{"criticality", "text", "분류가 판정한 중요도", `criticality = "critical"`},
+	{"owner_department", "text", "담당 부서", `owner_department = "플랫폼"`},
+	{"location", "text", "위치", `location = "IDC-1"`},
+	{"source", "text", "수집 원천", `source = "agent"`},
+	{"confidence", "number", "분류 확신도 0~1", "confidence >= 0.8"},
+	{"first_seen_at", "time", "최초 확인 시각", `first_seen_at >= "now - 168h"`},
+	{"last_seen_at", "time", "최근 확인 시각", `last_seen_at < "now - 24h"`},
+	{
+		"attributes.*", "path",
+		"수집 속성 경로. 예: attributes.os_name",
+		`attributes.os_name = "Ubuntu"`,
+	},
+}
+
+// Grammar is everything the console needs to explain the query language.
+type Grammar struct {
+	Fields      []Field  `json:"fields"`
+	Operators   []string `json:"operators"`
+	Combinator  string   `json:"combinator"`
+	MaxClauses  int      `json:"max_clauses"`
+	MaxLength   int      `json:"max_length"`
+	RelativeNow string   `json:"relative_now"`
+}
+
+func Describe() Grammar {
+	return Grammar{
+		Fields:      fields,
+		Operators:   []string{"=", "!=", "<", "<=", ">", ">="},
+		Combinator:  "AND",
+		MaxClauses:  maxClauses,
+		MaxLength:   maxLength,
+		RelativeNow: `"now - 24h"`,
+	}
+}
+
 func allowedField(field string) bool {
-	switch field {
-	case "id", "asset_key", "name", "type", "status", "criticality",
-		"environment", "owner_department", "location", "source",
-		"confidence", "first_seen_at", "last_seen_at":
-		return true
+	for _, candidate := range fields {
+		if candidate.Name == field {
+			return true
+		}
 	}
 	return strings.HasPrefix(field, "attributes.") &&
 		safePath.MatchString(strings.TrimPrefix(field, "attributes."))

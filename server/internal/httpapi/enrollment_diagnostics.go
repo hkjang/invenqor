@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"net/http"
 	"sort"
 	"time"
@@ -13,40 +14,40 @@ var enrollmentDiagnosticComponents = []string{
 }
 
 type enrollmentCodeSummary struct {
-	EventCode      string `json:"event_code"`
-	Level          string `json:"level"`
-	Count          int    `json:"count"`
-	Message        string `json:"message"`
-	Remediation    string `json:"remediation"`
-	LastOccurredAt any    `json:"last_occurred_at"`
-	LastRequestID  string `json:"last_request_id"`
+	EventCode      string       `json:"event_code"`
+	Level          string       `json:"level"`
+	Count          int          `json:"count"`
+	Message        string       `json:"message"`
+	Remediation    string       `json:"remediation"`
+	LastOccurredAt apitime.Time `json:"last_occurred_at"`
+	LastRequestID  string       `json:"last_request_id"`
 }
 
 type enrollmentSourceSummary struct {
-	SourceIP       string `json:"source_ip"`
-	AgentID        string `json:"agent_id"`
-	Attempts       int    `json:"attempts"`
-	Failures       int    `json:"failures"`
-	LastEventCode  string `json:"last_event_code"`
-	LastLevel      string `json:"last_level"`
-	LastMessage    string `json:"last_message"`
-	LastRequestID  string `json:"last_request_id"`
-	LastInstanceID string `json:"last_instance_id"`
-	LastOccurredAt any    `json:"last_occurred_at"`
-	Remediation    string `json:"remediation"`
-	AgentVersion   string `json:"agent_version"`
+	SourceIP       string       `json:"source_ip"`
+	AgentID        string       `json:"agent_id"`
+	Attempts       int          `json:"attempts"`
+	Failures       int          `json:"failures"`
+	LastEventCode  string       `json:"last_event_code"`
+	LastLevel      string       `json:"last_level"`
+	LastMessage    string       `json:"last_message"`
+	LastRequestID  string       `json:"last_request_id"`
+	LastInstanceID string       `json:"last_instance_id"`
+	LastOccurredAt apitime.Time `json:"last_occurred_at"`
+	Remediation    string       `json:"remediation"`
+	AgentVersion   string       `json:"agent_version"`
 }
 
 type enrollmentAgentSummary struct {
-	ID              string `json:"id"`
-	AgentID         string `json:"agent_id"`
-	Hostname        string `json:"hostname"`
-	Status          string `json:"status"`
-	AuthMethod      string `json:"auth_method"`
-	Version         string `json:"version"`
-	CreatedAt       any    `json:"created_at"`
-	LastSeenAt      any    `json:"last_seen_at"`
-	LastInventoryAt any    `json:"last_inventory_at"`
+	ID              string       `json:"id"`
+	AgentID         string       `json:"agent_id"`
+	Hostname        string       `json:"hostname"`
+	Status          string       `json:"status"`
+	AuthMethod      string       `json:"auth_method"`
+	Version         string       `json:"version"`
+	CreatedAt       apitime.Time `json:"created_at"`
+	LastSeenAt      apitime.Time `json:"last_seen_at"`
+	LastInventoryAt apitime.Time `json:"last_inventory_at"`
 }
 
 // enrollmentDiagnostics answers the question an operator actually has when a

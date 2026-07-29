@@ -144,7 +144,20 @@ func (service *Service) Authenticate(
 				return Session{}, ErrMFARequired
 			}
 			if err := service.totp.Verify(ctx, user.ID, input.TOTPCode); err != nil {
+				// A wrong second factor is a failed login. Without recording it
+				// here, neither the lockout counter nor the per-IP rate limit
+				// saw the attempt, which left the second factor open to
+				// unlimited guessing once a password was known.
+				if err := service.recordLoginAttempt(ctx, normalized, sourceIP, false, now); err != nil {
+					return Session{}, err
+				}
+				if err := service.recordLoginFailure(ctx, user, now); err != nil {
+					return Session{}, err
+				}
 				service.recordLoginAudit(ctx, &user, user.Username, sourceIP, userAgent, requestID, "mfa_failure")
+				if user.FailedLoginCount+1 >= service.options.LockoutThreshold {
+					return Session{}, ErrAccountLocked
+				}
 				return Session{}, ErrMFAInvalid
 			}
 		}
@@ -302,7 +315,10 @@ func (service *Service) ChangePassword(
 	if err := service.policy.Validate(input.NewPassword); err != nil {
 		return err
 	}
-	var currentHash string
+	// An account provisioned through Keycloak holds no local password, so the
+	// column is NULL. Reading it into a plain string turned an ordinary
+	// situation into a scan failure and a 500.
+	var currentHash sql.NullString
 	if err := service.db.QueryRowContext(
 		ctx,
 		"SELECT password_hash FROM users WHERE id = $1 AND active = TRUE AND deleted_at IS NULL",
@@ -312,7 +328,10 @@ func (service *Service) ChangePassword(
 	} else if err != nil {
 		return fmt.Errorf("load current password: %w", err)
 	}
-	valid, err := VerifyPassword(input.CurrentPassword, currentHash)
+	if !currentHash.Valid || currentHash.String == "" {
+		return ErrPasswordUnavailable
+	}
+	valid, err := VerifyPassword(input.CurrentPassword, currentHash.String)
 	if err != nil {
 		return fmt.Errorf("verify current password: %w", err)
 	}
@@ -366,6 +385,26 @@ func (service *Service) ChangePassword(
 		return fmt.Errorf("commit password change: %w", err)
 	}
 	return nil
+}
+
+// PasswordConfigured reports whether the account can change a local password at
+// all. The console asks so it can explain a federated account rather than
+// offering a form that must fail.
+func (service *Service) PasswordConfigured(
+	ctx context.Context,
+	userID string,
+) (bool, error) {
+	var hash sql.NullString
+	if err := service.db.QueryRowContext(
+		ctx,
+		"SELECT password_hash FROM users WHERE id = $1 AND deleted_at IS NULL",
+		userID,
+	).Scan(&hash); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("read password state: %w", err)
+	}
+	return hash.Valid && hash.String != "", nil
 }
 
 func (service *Service) findUserByUsername(

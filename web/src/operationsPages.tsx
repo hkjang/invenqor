@@ -5,6 +5,7 @@ import {
   Boxes,
   CheckCircle2,
   Copy,
+  Download,
   FileSearch,
   GitMerge,
   KeyRound,
@@ -20,6 +21,16 @@ import {
   X,
 } from "lucide-react";
 import {api} from "./api";
+import {
+  downloadPath,
+  formatDate,
+  formatRelative,
+  formatSecond,
+  number,
+  percentOf,
+  withinMinutes,
+} from "./format";
+import {consoleHashQuery} from "./navigationState";
 import type {SystemInfo} from "./productVersion";
 
 export type Asset = {
@@ -187,12 +198,10 @@ export function OperationsDashboard({
     const timer = window.setInterval(load, refreshSeconds * 1000);
     return () => window.clearInterval(timer);
   }, [load, refreshSeconds]);
-  const freshRate = statistics?.assets.total
-    ? Math.round(statistics.assets.seen_24h / statistics.assets.total * 100)
-    : 100;
-  const healthyRate = statistics?.agents.total
-    ? Math.round(statistics.agents.healthy / statistics.agents.total * 100)
-    : 100;
+  // Reporting 100% for an empty inventory reads as a healthy system rather than
+  // an empty one, which is the opposite of what an operator needs to know.
+  const freshRate = percentOf(statistics?.assets.seen_24h, statistics?.assets.total);
+  const healthyRate = percentOf(statistics?.agents.healthy, statistics?.agents.total);
   return <section>
     <PageTitle kicker="ASSET INTELLIGENCE" title="운영 통계"
       subtitle="자산 최신성, 수집 건전성, 구성 분포를 한 화면에서 판단합니다."
@@ -205,10 +214,10 @@ export function OperationsDashboard({
     <div className="metrics executive">
       <Metric label="관리 자산" value={number(statistics?.assets.total)}
         note={`24시간 내 확인 ${number(statistics?.assets.seen_24h)}`} icon={Boxes}/>
-      <Metric label="자산 최신성" value={`${freshRate}%`}
+      <Metric label="자산 최신성" value={freshRate}
         note={`점검 필요 ${number(statistics?.assets.stale)}`} icon={CheckCircle2}/>
       <Metric label="정상 Agent" value={`${number(statistics?.agents.healthy)} / ${number(statistics?.agents.total)}`}
-        note={`건전성 ${healthyRate}%`} icon={Activity}/>
+        note={`건전성 ${healthyRate}`} icon={Activity}/>
       <Metric label="24시간 수집" value={number(statistics?.collection.events_24h)}
         note={`실패 ${number(statistics?.collection.failed_24h)}`} icon={Network}/>
     </div>
@@ -236,9 +245,9 @@ export function OperationsDashboard({
       <Panel title="최근 확인 자산" action="최근 확인 순"><AssetTable items={recent}/></Panel>
       <Panel title="Agent 상태" action="30분 기준">
         <div className="agent-list">{agents.slice(0, 8).map(agent =>
-          <div key={agent.id}><i className={recentEnough(agent.last_seen_at, 30) ? "ok" : ""}/>
+          <div key={agent.id}><i className={withinMinutes(agent.last_seen_at, 30) ? "ok" : ""}/>
             <div><strong>{agent.hostname || agent.agent_id}</strong>
-              <span>{agent.os_name || "운영체제 확인 전"} · {formatDate(agent.last_seen_at)}</span></div>
+              <span>{agent.os_name || "운영체제 확인 전"} · {formatRelative(agent.last_seen_at)}</span></div>
             <Badge value={agent.status}/></div>)}
           {!agents.length && <Empty icon={Activity} text="등록된 Agent가 없습니다."/>}
         </div>
@@ -247,11 +256,17 @@ export function OperationsDashboard({
   </section>;
 }
 
+const assetPageSize = 50;
+
 export function AssetsPage({csrf, access}: {csrf: string; access: PermissionContext}) {
   const [items, setItems] = React.useState<Asset[]>([]);
+  const [total, setTotal] = React.useState(0);
   const [query, setQuery] = React.useState("");
   const [type, setType] = React.useState("");
   const [status, setStatus] = React.useState("");
+  const [environment, setEnvironment] = React.useState("");
+  const [criticality, setCriticality] = React.useState("");
+  const [sort, setSort] = React.useState("recent");
   const [includeDeleted, setIncludeDeleted] = React.useState(false);
   const [offset, setOffset] = React.useState(0);
   const [hasMore, setHasMore] = React.useState(false);
@@ -259,20 +274,37 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
   const [detailID, setDetailID] = React.useState<string|null>(null);
   const [creating, setCreating] = React.useState(false);
   const [error, setError] = React.useState("");
+  // Held in one place so the CSV export downloads exactly the rows on screen.
+  const parameters = React.useMemo(() => {
+    const values = new URLSearchParams();
+    if (query) values.set("q", query);
+    if (type) values.set("type", type);
+    if (status) values.set("status", status);
+    if (environment) values.set("environment", environment);
+    if (criticality) values.set("criticality", criticality);
+    if (sort) values.set("sort", sort);
+    if (includeDeleted) values.set("include_deleted", "true");
+    return values;
+  }, [criticality, environment, includeDeleted, query, sort, status, type]);
   const load = React.useCallback(async () => {
-    const params = new URLSearchParams({
-      limit: "50", offset: String(offset), q: query, type, status,
-      include_deleted: String(includeDeleted),
-    });
+    const values = new URLSearchParams(parameters);
+    values.set("limit", String(assetPageSize));
+    values.set("offset", String(offset));
     try {
-      const result = await api<{items: Asset[]; has_more: boolean}>(`/api/v1/assets?${params}`);
-      setItems(result.items); setHasMore(result.has_more); setError("");
+      const result = await api<{items: Asset[]; has_more: boolean; total: number}>(
+        `/api/v1/assets?${values}`);
+      setItems(result.items); setHasMore(result.has_more);
+      setTotal(result.total); setError("");
     } catch (reason) { setError((reason as Error).message); }
-  }, [includeDeleted, offset, query, status, type]);
+  }, [offset, parameters]);
   React.useEffect(() => {
     const timer = window.setTimeout(load, 180);
     return () => window.clearTimeout(timer);
   }, [load]);
+  // Any filter change makes the current page meaningless, so the page resets.
+  const changeFilter = <T,>(apply: (value: T) => void) => (value: T) => {
+    apply(value); setOffset(0);
+  };
   const merge = async () => {
     if (selected.length < 2) return;
     const reason = window.prompt("병합 사유를 입력하십시오.", "중복 자산 정리");
@@ -284,30 +316,59 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
       setSelected([]); await load();
     } catch (reason) { setError((reason as Error).message); }
   };
+  const first = total ? offset + 1 : 0;
+  const last = offset + items.length;
   return <section>
     <PageTitle kicker="CONFIGURATION ITEMS" title="자산 인벤토리"
       subtitle="검색부터 생성·수정·계보·관계·병합·분할까지 자산 수명주기를 관리합니다."
       action={<>{can(access, "assets.merge") && <button className="secondary" disabled={selected.length < 2} onClick={merge}><GitMerge size={15}/>선택 병합</button>}
+        <button className="secondary" onClick={() => downloadPath(`/api/v1/assets.csv?${parameters}`)}>
+          <Download size={15}/>CSV 내려받기</button>
         {can(access, "assets.write") && <button className="primary compact" onClick={() => setCreating(true)}><Plus size={15}/>자산 등록</button>}</>}/>
-    <div className="filter-bar">
+    <div className="filter-bar asset-filters">
       <div className="search"><Search size={18}/><input placeholder="이름 또는 자산 키" value={query}
-        onChange={event => {setQuery(event.target.value); setOffset(0);}}/></div>
-      <input placeholder="유형" value={type} onChange={event => {setType(event.target.value); setOffset(0);}}/>
-      <select value={status} onChange={event => {setStatus(event.target.value); setOffset(0);}}>
+        onChange={event => changeFilter(setQuery)(event.target.value)}/></div>
+      <input placeholder="유형" value={type}
+        onChange={event => changeFilter(setType)(event.target.value)}/>
+      {/* Environment and criticality are what classification sets, so the
+          inventory has to be filterable by them. */}
+      <select value={environment}
+        onChange={event => changeFilter(setEnvironment)(event.target.value)}>
+        <option value="">전체 환경</option><option value="production">production</option>
+        <option value="staging">staging</option><option value="development">development</option>
+        <option value="other">other</option>
+      </select>
+      <select value={criticality}
+        onChange={event => changeFilter(setCriticality)(event.target.value)}>
+        <option value="">전체 중요도</option><option value="critical">critical</option>
+        <option value="high">high</option><option value="normal">normal</option>
+        <option value="low">low</option>
+      </select>
+      <select value={status} onChange={event => changeFilter(setStatus)(event.target.value)}>
         <option value="">전체 상태</option><option value="active">active</option>
         <option value="discovered">discovered</option><option value="deleted">deleted</option>
       </select>
-      <label><input type="checkbox" checked={includeDeleted} onChange={event => setIncludeDeleted(event.target.checked)}/>삭제 포함</label>
+      <select value={sort} onChange={event => changeFilter(setSort)(event.target.value)}>
+        <option value="recent">최근 확인 순</option><option value="oldest">오래된 확인 순</option>
+        <option value="discovered">최근 발견 순</option><option value="name">이름 순</option>
+        <option value="type">유형 순</option><option value="criticality">중요도 순</option>
+      </select>
+      <label><input type="checkbox" checked={includeDeleted}
+        onChange={event => changeFilter(setIncludeDeleted)(event.target.checked)}/>삭제 포함</label>
       <button className="secondary" onClick={load}><RefreshCw size={15}/></button>
     </div>
     {error && <div className="error action-message">{error}</div>}
-    <Panel title={`${items.length}개 자산`} action={`offset ${offset}`}>
+    {/* "50개 자산 · offset 0" said nothing about the size of the result. */}
+    <Panel title={`자산 ${number(total)}건`}
+      action={total ? `${number(first)}–${number(last)} 표시` : "결과 없음"}>
       <AssetTable items={items} selected={selected} onToggle={id =>
         setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id])}
         onSelect={setDetailID}/>
       <div className="pagination">
-        <button className="secondary" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 50))}>이전</button>
-        <button className="secondary" disabled={!hasMore} onClick={() => setOffset(offset + 50)}>다음</button>
+        <button className="secondary" disabled={!offset}
+          onClick={() => setOffset(Math.max(0, offset - assetPageSize))}>이전</button>
+        <button className="secondary" disabled={!hasMore}
+          onClick={() => setOffset(offset + assetPageSize)}>다음</button>
       </div>
     </Panel>
     {creating && <AssetEditor csrf={csrf} onClose={() => setCreating(false)} onSaved={async () => {
@@ -536,7 +597,7 @@ export function AgentsPage({
       {!!releaseInfo?.agent_versions.length && <div className="breakdown version-breakdown">
         {releaseInfo.agent_versions.slice(0, 6).map((bucket, index) =>
           <div key={bucket.label}>
-            <span className={`chart-color c${index % 6}`}/>
+            <span className={`chart-color c${index % 8}`}/>
             <strong>{bucket.label}</strong><b>{bucket.count.toLocaleString("ko-KR")}</b>
           </div>)}
       </div>}
@@ -637,7 +698,7 @@ function EnrollmentDiagnosticsPanel() {
     {!!data?.by_event_code.length && <div className="breakdown enrollment-code-breakdown">
       {data.by_event_code.slice(0, 8).map((code, index) =>
         <div key={code.event_code} title={code.remediation}>
-          <span className={`chart-color c${index % 6}`}/>
+          <span className={`chart-color c${index % 8}`}/>
           <strong>{code.event_code}</strong><b>{number(code.count)}</b>
         </div>)}
     </div>}
@@ -656,12 +717,30 @@ function EnrollmentDiagnosticsPanel() {
   </Panel>;
 }
 
+// Recipes for the questions this inventory is actually asked, so the page starts
+// from a working query rather than a blank box.
+const queryExamples: {label: string; query: string}[] = [
+  {label: "운영 환경의 치명 자산", query: 'environment = "production" AND criticality = "critical"'},
+  {label: "24시간 이상 미확인", query: 'last_seen_at < "now - 24h"'},
+  {label: "최근 7일 신규 발견", query: 'first_seen_at >= "now - 168h"'},
+  {label: "분류 확신도가 낮은 자산", query: "confidence < 0.6"},
+  {label: "담당 부서가 없는 운영 자산", query: 'environment = "production" AND owner_department = ""'},
+  {label: "특정 운영체제", query: 'attributes.os_name = "Ubuntu"'},
+];
+
 export function QueryPage({csrf}: {csrf: string}) {
   const [query, setQuery] = React.useState('type = "host" AND environment = "production"');
   const [limit, setLimit] = React.useState(100);
   const [result, setResult] = React.useState<Asset[]>([]);
+  const [ran, setRan] = React.useState(false);
+  const [grammar, setGrammar] = React.useState<QueryGrammar|null>(null);
   const [validation, setValidation] = React.useState<{valid: boolean; error?: string; ast?: unknown}|null>(null);
   const [error, setError] = React.useState("");
+  // The grammar comes from the Server, so the reference cannot drift from the
+  // parser that rejects a query.
+  React.useEffect(() => {
+    api<QueryGrammar>("/api/v1/query/schema").then(setGrammar).catch(() => {});
+  }, []);
   const validate = async () => {
     try {
       setValidation(await api("/api/v1/query/validate", jsonRequest(csrf, {query, limit})));
@@ -672,8 +751,13 @@ export function QueryPage({csrf}: {csrf: string}) {
     try {
       const value = await api<{items: Asset[]; ast: unknown}>("/api/v1/query/execute",
         jsonRequest(csrf, {query, limit}));
-      setResult(value.items); setValidation({valid: true, ast: value.ast}); setError("");
-    } catch (reason) { setError((reason as Error).message); }
+      setResult(value.items); setValidation({valid: true, ast: value.ast});
+      setRan(true); setError("");
+    } catch (reason) { setError((reason as Error).message); setRan(true); }
+  };
+  const insert = (text: string) => {
+    setQuery(current => current.trim() ? `${current.trim()} AND ${text}` : text);
+    setValidation(null);
   };
   return <section>
     <PageTitle kicker="SAFE DISCOVERY" title="Query DSL"
@@ -689,57 +773,183 @@ export function QueryPage({csrf}: {csrf: string}) {
         <button className="primary compact" onClick={run}>질의 실행</button>
       </div>
     </div>
+    <div className="query-aids">
+      <Panel title="자주 쓰는 질의" action="눌러서 편집기에 넣기">
+        <div className="query-examples">{queryExamples.map(example =>
+          <button key={example.label} onClick={() => {setQuery(example.query); setValidation(null);}}>
+            <strong>{example.label}</strong><code>{example.query}</code></button>)}</div>
+      </Panel>
+      <Panel title="사용 가능한 필드"
+        action={grammar ? `${grammar.combinator} 결합 · 최대 ${grammar.max_clauses}절` : "Server 기준"}>
+        <div className="query-fields">{(grammar?.fields || []).map(field =>
+          <button key={field.name} onClick={() => insert(field.example)} title={field.example}>
+            <code>{field.name}</code><span>{field.description}</span>
+            <em>{field.kind}</em></button>)}</div>
+        <p className="hint">연산자 {(grammar?.operators || []).join(" ")} · 시각 필드는
+          {" "}{grammar?.relative_now || '"now - 24h"'} 형태의 상대 시간을 받습니다.
+          조건은 {grammar?.combinator || "AND"}로만 결합됩니다.</p>
+      </Panel>
+    </div>
     {validation?.ast != null && <details className="json-details"><summary>파싱된 AST</summary><pre>{pretty(validation.ast)}</pre></details>}
-    <Panel title={`결과 ${result.length}건`} action={`limit ${limit}`}><AssetTable items={result}/></Panel>
+    <Panel title={`결과 ${number(result.length)}건`}
+      action={result.length === limit ? `limit ${limit}에서 잘렸을 수 있음` : `limit ${limit}`}>
+      <AssetTable items={result}/>
+      {ran && !result.length && !error && <p className="hint">
+        구문은 유효하지만 조건에 맞는 자산이 없습니다.</p>}
+    </Panel>
   </section>;
 }
 
+const auditPageSize = 100;
+
 export function AuditPage() {
   const [items, setItems] = React.useState<AuditEvent[]>([]);
+  const [total, setTotal] = React.useState(0);
+  const [facets, setFacets] = React.useState<AuditFacets|null>(null);
   const [query, setQuery] = React.useState("");
-  const [limit, setLimit] = React.useState(200);
+  const [action, setAction] = React.useState("");
+  const [resourceType, setResourceType] = React.useState("");
+  const [result, setResult] = React.useState("");
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
+  const [offset, setOffset] = React.useState(0);
+  const [hasMore, setHasMore] = React.useState(false);
   const [error, setError] = React.useState("");
-  const load = React.useCallback(() =>
-    api<{items: AuditEvent[]}>(`/api/v1/admin/audit?limit=${limit}`)
-      .then(value => {setItems(value.items); setError("");})
-      .catch(reason => setError((reason as Error).message)),
-  [limit]);
-  React.useEffect(() => { load(); }, [load]);
-  const visible = items.filter(item =>
-    `${item.action} ${item.actor_name} ${item.resource_type} ${item.resource_id || ""}`
-      .toLowerCase().includes(query.toLowerCase()));
+  const parameters = React.useMemo(() => {
+    const values = new URLSearchParams();
+    if (query.trim()) values.set("q", query.trim());
+    if (action) values.set("action", action);
+    if (resourceType) values.set("resource_type", resourceType);
+    if (result) values.set("result", result);
+    if (from) values.set("from", from);
+    if (to) values.set("to", to);
+    return values;
+  }, [action, from, query, resourceType, result, to]);
+  const load = React.useCallback(async () => {
+    const values = new URLSearchParams(parameters);
+    values.set("limit", String(auditPageSize));
+    values.set("offset", String(offset));
+    try {
+      const value = await api<{
+        items: AuditEvent[]; total: number; has_more: boolean; facets: AuditFacets;
+      }>(`/api/v1/admin/audit?${values}`);
+      setItems(value.items); setTotal(value.total);
+      setHasMore(value.has_more); setFacets(value.facets); setError("");
+    } catch (reason) { setError((reason as Error).message); }
+  }, [offset, parameters]);
+  // Debounced so typing a request ID does not fire a query per keystroke.
+  React.useEffect(() => {
+    const timer = window.setTimeout(load, 200);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+  const changeFilter = <T,>(apply: (value: T) => void) => (value: T) => {
+    apply(value); setOffset(0);
+  };
+  const clear = () => {
+    setQuery(""); setAction(""); setResourceType(""); setResult("");
+    setFrom(""); setTo(""); setOffset(0);
+  };
+  const filtered = [...parameters.keys()].length > 0;
+  const first = total ? offset + 1 : 0;
   return <section>
     <PageTitle kicker="ACCOUNTABILITY" title="감사 로그"
       subtitle="행위자·대상·요청·변경 전후 값을 추적해 운영 책임성과 조사 가능성을 확보합니다."
-      action={<button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>}/>
-    <div className="filter-bar"><div className="search"><Search size={16}/><input value={query}
-      onChange={event => setQuery(event.target.value)} placeholder="행위, 사용자, 자원 검색"/></div>
-      <select value={limit} onChange={event => setLimit(Number(event.target.value))}>
-        <option value="100">100건</option><option value="200">200건</option><option value="500">500건</option>
-      </select></div>
+      action={<>
+        <button className="secondary"
+          onClick={() => downloadPath(`/api/v1/admin/audit.csv?${parameters}`)}>
+          <Download size={15}/>CSV 내려받기</button>
+        <button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>
+      </>}/>
+    {/* Every one of these used to filter only the rows already downloaded, so a
+        search for an older event found nothing and read as "no such record". */}
+    <div className="filter-bar audit-filters">
+      <div className="search"><Search size={16}/><input value={query}
+        onChange={event => changeFilter(setQuery)(event.target.value)}
+        placeholder="행위, 사용자, 자원, request ID, IP, 사유 검색"/></div>
+      <select value={action} onChange={event => changeFilter(setAction)(event.target.value)}>
+        <option value="">모든 행위</option>
+        {(facets?.actions || []).map(bucket =>
+          <option key={bucket.label} value={bucket.label}>
+            {bucket.label} ({bucket.count})</option>)}
+      </select>
+      <select value={resourceType}
+        onChange={event => changeFilter(setResourceType)(event.target.value)}>
+        <option value="">모든 자원</option>
+        {(facets?.resource_types || []).map(bucket =>
+          <option key={bucket.label} value={bucket.label}>
+            {bucket.label} ({bucket.count})</option>)}
+      </select>
+      <select value={result} onChange={event => changeFilter(setResult)(event.target.value)}>
+        <option value="">모든 결과</option>
+        {(facets?.results || []).map(bucket =>
+          <option key={bucket.label} value={bucket.label}>
+            {bucket.label} ({bucket.count})</option>)}
+      </select>
+      <label>부터<input type="date" value={from}
+        onChange={event => changeFilter(setFrom)(event.target.value)}/></label>
+      <label>까지<input type="date" value={to}
+        onChange={event => changeFilter(setTo)(event.target.value)}/></label>
+      {filtered && <button className="secondary" onClick={clear}><X size={15}/>조건 해제</button>}
+    </div>
     {error && <div className="error">{error}</div>}
-    <Panel title={`${visible.length}개 이벤트`} action="최신 순">
-      <div className="audit-table">{visible.map(item => <details key={item.id}>
+    <Panel title={`이벤트 ${number(total)}건`}
+      action={total ? `${number(first)}–${number(offset + items.length)} 표시` : "결과 없음"}>
+      <div className="audit-table">{items.map(item => <details key={item.id}>
         <summary><i className={item.result === "success" ? "ok" : "bad"}/>
-          <time>{formatDate(item.occurred_at)}</time><strong>{item.action}</strong>
+          <time>{formatSecond(item.occurred_at)}</time><strong>{item.action}</strong>
           <span>{item.actor_name || item.actor_type} → {item.resource_type}</span><Badge value={item.result}/></summary>
         <div className="audit-detail">
           <DataRow label="Resource" value={`${item.resource_type} / ${item.resource_id || "—"}`}/>
           <DataRow label="Request ID" value={item.request_id || "—"}/>
           <DataRow label="Source IP" value={item.source_ip || "—"}/>
           <DataRow label="Reason" value={item.reason || "—"}/>
+          {/* The same request ID identifies the Server-side diagnostic entries
+              for this action, which is the next thing an investigator wants. */}
+          {item.request_id && <div className="audit-cross-link">
+            <a href={`#/logs?request_id=${encodeURIComponent(item.request_id)}`}>
+              이 요청의 Server 진단 로그 보기</a></div>}
           <pre>{pretty({before: item.before, after: item.after, metadata: item.metadata})}</pre>
         </div>
-      </details>)}</div>
+      </details>)}
+        {!items.length && <Empty icon={FileSearch}
+          text={filtered
+            ? "조건에 맞는 감사 이벤트가 없습니다. 기간과 행위 조건을 확인하십시오."
+            : "감사 이벤트가 없습니다."}/>}</div>
+      <div className="pagination">
+        <button className="secondary" disabled={!offset}
+          onClick={() => setOffset(Math.max(0, offset - auditPageSize))}>이전</button>
+        <button className="secondary" disabled={!hasMore}
+          onClick={() => setOffset(offset + auditPageSize)}>다음</button>
+      </div>
     </Panel>
   </section>;
 }
 
+// A component name written into the console drifts the moment the server starts
+// recording a new one: agent_preflight and keycloak were both being recorded and
+// neither could be selected. Known names get a label; anything else still
+// appears, under its own name.
+const diagnosticComponentLabels: Record<string, string> = {
+  agent_enrollment: "Agent 등록",
+  agent_transport: "Agent 전송",
+  agent_preflight: "Agent 사전 점검",
+  keycloak: "Keycloak 로그인",
+  http: "Server HTTP",
+  server: "Server 일반",
+};
+
 export function ServerLogsPage() {
   const [items, setItems] = React.useState<DiagnosticLog[]>([]);
-  const [instances, setInstances] = React.useState<string[]>([]);
+  const [total, setTotal] = React.useState(0);
+  const [facets, setFacets] = React.useState<DiagnosticFacets>({
+    instances: [], components: [], event_codes: [],
+  });
   const [retention, setRetention] = React.useState({days: 30, maximum_events: 10000});
-  const [query, setQuery] = React.useState("");
+  // Opened from an audit row as "#/logs?request_id=…", the page starts scoped to
+  // that request rather than making the investigator paste the ID again.
+  const [query, setQuery] = React.useState(
+    () => consoleHashQuery().get("request_id") || "",
+  );
   const [level, setLevel] = React.useState("");
   const [component, setComponent] = React.useState("");
   const [instance, setInstance] = React.useState("");
@@ -755,18 +965,24 @@ export function ServerLogsPage() {
     try {
       const value = await api<{
         items: DiagnosticLog[];
-        instances: string[];
+        total: number;
+        facets: DiagnosticFacets;
         retention: {days: number; maximum_events: number};
       }>(`/api/v1/admin/diagnostics/logs?${parameters}`);
       setItems(value.items);
-      setInstances(value.instances);
+      setTotal(value.total ?? value.items.length);
+      setFacets(value.facets || {instances: [], components: [], event_codes: []});
       setRetention(value.retention);
       setError("");
     } catch (reason) {
       setError((reason as Error).message);
     }
   }, [component, instance, level, limit, query]);
-  React.useEffect(() => { load(); }, [load]);
+  // Debounced: a pasted request ID should not fire a query per character.
+  React.useEffect(() => {
+    const timer = window.setTimeout(load, 200);
+    return () => window.clearTimeout(timer);
+  }, [load]);
   React.useEffect(() => {
     if (!autoRefresh) return;
     const timer = window.setInterval(load, 15_000);
@@ -774,6 +990,7 @@ export function ServerLogsPage() {
   }, [autoRefresh, load]);
   const errors = items.filter(item => item.level === "error").length;
   const warnings = items.filter(item => item.level === "warning").length;
+  const truncated = total > items.length;
   return <section>
     <PageTitle
       kicker="MULTI-POD DIAGNOSTICS"
@@ -782,10 +999,10 @@ export function ServerLogsPage() {
       action={<button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>}
     />
     <div className="status-grid diagnostic-summary">
-      <div><span>조회 이벤트</span><strong>{items.length}</strong></div>
+      <div><span>조건 일치</span><strong>{number(total)}</strong></div>
       <div><span>Error</span><strong>{errors}</strong></div>
       <div><span>Warning</span><strong>{warnings}</strong></div>
-      <div><span>확인된 Pod</span><strong>{instances.length}</strong></div>
+      <div><span>확인된 Pod</span><strong>{facets.instances.length}</strong></div>
     </div>
     <div className="filter-bar diagnostic-filters">
       <div className="search"><Search size={16}/><input value={query}
@@ -798,13 +1015,12 @@ export function ServerLogsPage() {
       </select>
       <select value={component} onChange={event => setComponent(event.target.value)}>
         <option value="">모든 구성요소</option>
-        <option value="agent_enrollment">Agent 등록</option>
-        <option value="agent_transport">Agent 전송</option>
-        <option value="http">Server HTTP</option>
+        {facets.components.map(value => <option value={value} key={value}>
+          {diagnosticComponentLabels[value] || value}</option>)}
       </select>
       <select value={instance} onChange={event => setInstance(event.target.value)}>
         <option value="">모든 Pod</option>
-        {instances.map(value => <option value={value} key={value}>{value}</option>)}
+        {facets.instances.map(value => <option value={value} key={value}>{value}</option>)}
       </select>
       <select value={limit} onChange={event => setLimit(Number(event.target.value))}>
         <option value="100">100건</option><option value="200">200건</option>
@@ -814,14 +1030,18 @@ export function ServerLogsPage() {
         onChange={event => setAutoRefresh(event.target.checked)}/>15초 자동 갱신</label>
     </div>
     {error && <div className="error">{error}</div>}
-    <Panel title={`${items.length}개 진단 이벤트`} action={`보존 ${retention.days}일 · 최대 ${retention.maximum_events.toLocaleString()}건`}>
+    {/* Without this, a truncated page looks like the whole answer. */}
+    {truncated && <Notice tone="info" title={`조건에 ${number(total)}건이 일치하며 최신 ${number(items.length)}건만 표시합니다.`}>
+      조건을 좁히거나 표시 건수를 늘리십시오.
+    </Notice>}
+    <Panel title={`${number(items.length)}개 진단 이벤트`} action={`보존 ${retention.days}일 · 최대 ${retention.maximum_events.toLocaleString()}건`}>
       <div className="audit-table diagnostic-log-table">
         {items.map(item => <details key={item.id}>
           <summary>
             <i className={item.level === "info" ? "ok" : "bad"}/>
-            <time>{formatDate(item.occurred_at)}</time>
+            <time>{formatSecond(item.occurred_at)}</time>
             <strong>{item.event_code}</strong>
-            <span>{item.instance_id} · {item.component}</span>
+            <span>{item.instance_id} · {diagnosticComponentLabels[item.component] || item.component}</span>
             <Badge value={item.level}/>
           </summary>
           <div className="audit-detail">
@@ -831,6 +1051,9 @@ export function ServerLogsPage() {
             <DataRow label="Agent ID" value={item.agent_id || "—"}/>
             <DataRow label="Source IP" value={item.source_ip || "—"}/>
             <DataRow label="Component" value={item.component}/>
+            {item.request_id && <div className="audit-cross-link">
+              <button className="link" onClick={() => setQuery(item.request_id)}>
+                같은 request ID의 이벤트만 보기</button></div>}
             <pre>{pretty(item.details)}</pre>
           </div>
         </details>)}
@@ -989,15 +1212,34 @@ function AssetTable({items, selected, onToggle, onSelect}: {
     <td onClick={() => onSelect?.(asset.id)}><strong>{asset.name}</strong><span>{asset.asset_key || asset.id}</span></td>
     <td onClick={() => onSelect?.(asset.id)}>{asset.type}</td><td onClick={() => onSelect?.(asset.id)}>{asset.environment}</td>
     <td onClick={() => onSelect?.(asset.id)}>{asset.criticality}</td><td onClick={() => onSelect?.(asset.id)}><Badge value={asset.status}/></td>
-    <td onClick={() => onSelect?.(asset.id)}>{formatDate(asset.last_seen_at)}</td></tr>)}</tbody></table>
+    {/* "3분 전" answers the freshness question directly, and the exact instant
+        stays available on hover instead of being cut off by the column. */}
+    <td onClick={() => onSelect?.(asset.id)} title={formatDate(asset.last_seen_at)}>
+      {formatRelative(asset.last_seen_at)}</td></tr>)}</tbody></table>
     {!items.length && <Empty icon={Boxes} text="표시할 자산이 없습니다."/>}
   </div>;
 }
 
+/**
+ * Assigns the eight validated hues in fixed order and folds everything past
+ * them into one "기타" row. Showing the top seven and dropping the rest silently
+ * meant the visible percentages did not add up to 100 and nothing said why.
+ */
+export const breakdownRows = (items: Bucket[], slots = 8): Bucket[] => {
+  if (items.length <= slots) return items;
+  const shown = items.slice(0, slots - 1);
+  const rest = items.slice(slots - 1);
+  return [...shown, {
+    label: `기타 ${rest.length}종`,
+    count: rest.reduce((sum, item) => sum + item.count, 0),
+  }];
+};
+
 function Breakdown({items}: {items: Bucket[]}) {
   const total = items.reduce((sum, item) => sum + item.count, 0);
-  return <div className="breakdown">{items.slice(0, 7).map((item, index) =>
-    <div key={item.label}><span className={`chart-color c${index % 6}`}/><strong>{item.label}</strong>
+  const rows = breakdownRows(items);
+  return <div className="breakdown">{rows.map((item, index) =>
+    <div key={item.label}><span className={`chart-color c${index % 8}`}/><strong>{item.label}</strong>
       <div><i style={{width: `${total ? item.count / total * 100 : 0}%`}}/></div>
       <b>{number(item.count)}</b><small>{total ? Math.round(item.count / total * 100) : 0}%</small></div>)}
     {!items.length && <Empty icon={Boxes} text="집계 데이터가 없습니다."/>}</div>;
@@ -1061,6 +1303,24 @@ function DataRow({label, value}: {label: string; value: string}) {
 type AssetSource = {id: string; category: string; source_name: string; payload: unknown; last_seen_at: string};
 type AssetHistory = {id: string; change_type: string; before: unknown; after: unknown; actor_type: string; reason: string; occurred_at: string};
 type AssetRelation = {id: string; relation_type: string; confidence: number; source_asset: {name: string}; target_asset: {name: string}};
+type QueryGrammar = {
+  fields: {name: string; kind: string; description: string; example: string}[];
+  operators: string[];
+  combinator: string;
+  max_clauses: number;
+  max_length: number;
+  relative_now: string;
+};
+type AuditFacets = {
+  actions: Bucket[];
+  resource_types: Bucket[];
+  results: Bucket[];
+};
+type DiagnosticFacets = {
+  instances: string[];
+  components: string[];
+  event_codes: string[];
+};
 type AuditEvent = {
   id: string; occurred_at: string; actor_type: string; actor_name: string; action: string;
   resource_type: string; resource_id?: string; request_id: string; source_ip: string;
@@ -1081,17 +1341,3 @@ type DiagnosticLog = {
   details: Record<string, unknown>;
 };
 const pretty = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
-// The SQLite start-up fallback renders timestamps in Go's own layout, which
-// Date cannot parse. Showing the raw value beats showing "Invalid Date".
-const formatDate = (value?: string|null) => {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "2-digit", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit",
-  }).format(parsed);
-};
-const number = (value?: number) => (value || 0).toLocaleString("ko-KR");
-const recentEnough = (value: string|undefined, minutes: number) =>
-  !!value && Date.now() - new Date(value).getTime() <= minutes * 60_000;

@@ -898,8 +898,24 @@ paths:
     get:
       operationId: listAssets
       summary: Search representative assets
+      description: >-
+        Filters run in the query and the response carries the total the filter
+        matches, so a page can be navigated without guessing its size.
       security: [{session: []}]
-      responses: {"200": {description: Asset page}, "401": {description: Authentication required}}
+      parameters:
+        - {in: query, name: q, schema: {type: string}, description: Name or asset key}
+        - {in: query, name: type, schema: {type: string}}
+        - {in: query, name: status, schema: {type: string}}
+        - {in: query, name: environment, schema: {type: string, enum: [production, staging, development, other]}}
+        - {in: query, name: criticality, schema: {type: string, enum: [critical, high, normal, low]}}
+        - {in: query, name: owner_department, schema: {type: string}}
+        - {in: query, name: include_deleted, schema: {type: boolean}}
+        - in: query
+          name: sort
+          schema: {type: string, enum: [recent, oldest, discovered, name, type, criticality]}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses: {"200": {description: Asset page with the filtered total}, "401": {description: Authentication required}}
     post:
       operationId: createAsset
       summary: Create manual asset
@@ -914,6 +930,80 @@ paths:
         "200": {description: Current aggregates and seven-day collection trend}
         "401": {description: Authentication required}
         "403": {description: Missing assets.read permission}
+  /api/v1/assets.csv:
+    get:
+      operationId: exportAssets
+      summary: Download the filtered inventory as CSV
+      description: >-
+        Accepts the same filters as listAssets and writes a UTF-8 CSV with a byte
+        order mark so it opens correctly in a spreadsheet.
+      security: [{session: []}]
+      responses:
+        "200": {description: CSV inventory extract, content: {text/csv: {schema: {type: string}}}}
+        "403": {description: Missing assets.read permission}
+  /api/v1/admin/audit:
+    get:
+      operationId: listAudit
+      summary: Search the audit log
+      description: >-
+        Every filter is applied in the query, and the response reports the total
+        the filter matches together with the values present for each filterable
+        column, so the console's controls cannot drift from what is recorded.
+      security: [{session: []}]
+      parameters:
+        - {in: query, name: q, schema: {type: string}, description: Action, actor, resource, request ID, IP or reason}
+        - {in: query, name: action, schema: {type: string}}
+        - {in: query, name: actor, schema: {type: string}}
+        - {in: query, name: resource_type, schema: {type: string}}
+        - {in: query, name: result, schema: {type: string}}
+        - in: query
+          name: from
+          schema: {type: string}
+          description: RFC 3339 timestamp or YYYY-MM-DD. A bare date starts at midnight UTC.
+        - in: query
+          name: to
+          schema: {type: string}
+          description: RFC 3339 timestamp or YYYY-MM-DD. A bare date includes the whole day.
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses:
+        "200": {description: Audit page with total and facets}
+        "400": {description: Unusable date window}
+        "403": {description: Missing audit.read permission}
+  /api/v1/admin/audit.csv:
+    get:
+      operationId: exportAudit
+      summary: Download the filtered audit log as CSV
+      description: Taking an extract is itself recorded as audit.export.
+      security: [{session: []}]
+      responses:
+        "200": {description: CSV audit extract, content: {text/csv: {schema: {type: string}}}}
+        "400": {description: Unusable date window}
+        "403": {description: Missing audit.read permission}
+  /api/v1/query/schema:
+    get:
+      operationId: getQueryGrammar
+      summary: Describe the Query DSL fields and operators
+      description: >-
+        Published from the parser's own allowlist so a reference cannot describe
+        a field the parser rejects.
+      security: [{session: []}]
+      responses:
+        "200": {description: Queryable fields, operators and limits}
+        "403": {description: Missing queries.execute permission}
+  /api/v1/auth/totp/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Issue a new set of recovery codes
+      description: >-
+        Requires a current authenticator code; a recovery code is not accepted,
+        so one leaked code cannot be used to mint more. The previous set stops
+        working immediately.
+      security: [{session: []}]
+      responses:
+        "200": {description: The new codes, shown once}
+        "400": {description: The authenticator code is invalid}
+        "409": {description: The account has no enabled second factor}
   /api/v1/query/execute:
     post:
       operationId: executeQuery

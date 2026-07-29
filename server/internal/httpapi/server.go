@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +51,7 @@ type Server struct {
 	databaseSchema               string
 	databaseTimeout              time.Duration
 	diagnosticStore              *diagnostics.Store
+	listenAddress                string
 }
 
 type Options struct {
@@ -70,6 +73,10 @@ type Options struct {
 	DatabaseTimeout             time.Duration
 	AgentAutoEnrollment         bool
 	AgentEnrollmentToken        string
+	// ListenAddress is reported by /api/v1/system/info. The console used to
+	// print a hard-coded 7070 on its runtime panel, which was simply false for
+	// any installation that had changed the address.
+	ListenAddress string
 }
 
 func New(options Options) *Server {
@@ -105,6 +112,7 @@ func New(options Options) *Server {
 		databaseSchema:              options.DatabaseSchema,
 		databaseTimeout:             options.DatabaseTimeout,
 		diagnosticStore:             diagnostics.NewStore(options.Database.DB()),
+		listenAddress:               options.ListenAddress,
 	}
 	if options.AgentEnrollmentToken != "" {
 		server.agentEnrollmentTokenHash = sha256.Sum256(
@@ -210,6 +218,10 @@ func (s *Server) routes() {
 			"/api/v1/auth/totp/enable",
 			s.enableTOTP,
 		)
+		protected.With(s.requireCSRF).Post(
+			"/api/v1/auth/totp/recovery-codes",
+			s.regenerateRecoveryCodes,
+		)
 		protected.With(s.requireCSRF).Delete(
 			"/api/v1/auth/totp",
 			s.disableTOTP,
@@ -274,6 +286,9 @@ func (s *Server) routes() {
 			"/api/v1/assets", s.listAssets,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets.csv", s.exportAssets,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/dashboard/statistics", s.dashboardStatistics,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
@@ -334,6 +349,9 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("queries.execute")).Post(
 			"/api/v1/query/validate", s.validateQuery,
 		)
+		protected.With(s.requirePermission("queries.execute")).Get(
+			"/api/v1/query/schema", s.queryGrammar,
+		)
 		protected.With(s.requirePermission("queries.execute")).Post(
 			"/api/v1/query/execute", s.executeQuery,
 		)
@@ -360,6 +378,9 @@ func (s *Server) routes() {
 		)
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/audit", s.listAudit,
+		)
+		protected.With(s.requirePermission("audit.read")).Get(
+			"/api/v1/admin/audit.csv", s.exportAudit,
 		)
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/diagnostics/logs", s.listDiagnosticLogs,
@@ -567,7 +588,8 @@ func (s *Server) systemInfo(response http.ResponseWriter, request *http.Request)
 		"commit":                  version.Commit,
 		"build_time":              version.BuildTime,
 		"database_mode":           s.database.Mode(),
-		"port":                    7070,
+		"listen_address":          s.listenAddress,
+		"port":                    listenPort(s.listenAddress),
 		"agent_auto_enrollment":   enrollmentEnabled,
 		"agent_enrollment_mode":   enrollmentMode,
 		"agent_enrollment_source": enrollmentSource,
@@ -579,6 +601,23 @@ func (s *Server) systemInfo(response http.ResponseWriter, request *http.Request)
 		payload["postgres_startup_failure"] = failure
 	}
 	writeJSON(response, http.StatusOK, payload)
+}
+
+// listenPort reports the port an operator can actually reach, so the console's
+// runtime panel states a fact rather than a default.
+func listenPort(address string) any {
+	if address == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil {
+		return nil
+	}
+	return number
 }
 
 func (s *Server) agentEnrollmentMode() string {

@@ -32,7 +32,7 @@ func TestStoreFiltersSharedDiagnosticsAndRedactsSecrets(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	items, instances, err := store.List(context.Background(), Filter{
+	items, total, facets, err := store.List(context.Background(), Filter{
 		Level: "error",
 		Query: "request-123",
 		Limit: 10,
@@ -40,8 +40,17 @@ func TestStoreFiltersSharedDiagnosticsAndRedactsSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || len(instances) != 1 {
-		t.Fatalf("items/instances = %d/%d", len(items), len(instances))
+	if len(items) != 1 || total != 1 || len(facets.Instances) != 1 {
+		t.Fatalf("items/total/instances = %d/%d/%d",
+			len(items), total, len(facets.Instances))
+	}
+	// The console builds its component filter from these, so a component the
+	// server records must appear without anyone editing the console.
+	if len(facets.Components) != 1 || facets.Components[0] != "agent_enrollment" {
+		t.Fatalf("facets.Components = %v", facets.Components)
+	}
+	if len(facets.EventCodes) != 1 {
+		t.Fatalf("facets.EventCodes = %v", facets.EventCodes)
 	}
 	if items[0].Message != "failed with [REDACTED]" ||
 		items[0].Details["token"] != "[REDACTED]" ||

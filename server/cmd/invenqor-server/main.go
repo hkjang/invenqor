@@ -179,6 +179,7 @@ func run(logger *slog.Logger) error {
 		DatabaseTimeout:             processConfig.DatabaseTimeout,
 		AgentAutoEnrollment:         processConfig.AgentAutoEnrollment,
 		AgentEnrollmentToken:        processConfig.AgentEnrollmentToken,
+		ListenAddress:               processConfig.ListenAddress,
 	})
 	// The API keeps only a SHA-256 comparison value.
 	processConfig.AgentEnrollmentToken = ""

@@ -14,10 +14,13 @@ var (
 	ErrUnauthorized       = errors.New("authentication is required")
 	ErrCSRF               = errors.New("CSRF validation failed")
 	ErrPasswordUnchanged  = errors.New("new password must differ from current password")
-	ErrMFARequired        = errors.New("TOTP code is required")
-	ErrMFAInvalid         = errors.New("TOTP code is invalid")
-	ErrMFAAlreadyEnabled  = errors.New("TOTP is already enabled")
-	ErrMFASetupRequired   = errors.New("TOTP setup has not started")
+	// ErrPasswordUnavailable covers accounts that authenticate through an
+	// identity provider and therefore hold no local password to change.
+	ErrPasswordUnavailable = errors.New("account has no local password")
+	ErrMFARequired         = errors.New("TOTP code is required")
+	ErrMFAInvalid          = errors.New("TOTP code is invalid")
+	ErrMFAAlreadyEnabled   = errors.New("TOTP is already enabled")
+	ErrMFASetupRequired    = errors.New("TOTP setup has not started")
 )
 
 const (
@@ -92,4 +95,11 @@ type TOTPSetup struct {
 	Secret          string   `json:"secret"`
 	ProvisioningURI string   `json:"provisioning_uri"`
 	RecoveryCodes   []string `json:"recovery_codes"`
+}
+
+// TOTPStatus is what the console needs to describe an account's second factor.
+type TOTPStatus struct {
+	Enabled                bool       `json:"enabled"`
+	VerifiedAt             *time.Time `json:"verified_at,omitempty"`
+	RecoveryCodesRemaining int        `json:"recovery_codes_remaining"`
 }

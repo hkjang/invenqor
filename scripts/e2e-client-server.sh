@@ -290,7 +290,8 @@ device_credential_after=$(docker run --rm -v "$agent_volume:/state:ro" alpine:3.
   sha256sum /state/device-credential.json | awk '{print $1}')
 test "$device_credential_before" != "$device_credential_after"
 curl -fsS "http://127.0.0.1:$port/api/v1/system/info" |
-  jq -e '.agent_auto_enrollment == true and .agent_enrollment_mode == "open" and .port == 7070' >/dev/null
+  jq -e '.agent_auto_enrollment == true and .agent_enrollment_mode == "open"
+    and .port == 7070 and .listen_address == "0.0.0.0:7070"' >/dev/null
 curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/dashboard/statistics" |
   jq -e '.assets.total > 0 and .agents.healthy > 0 and (.collection.daily | length == 7)' >/dev/null

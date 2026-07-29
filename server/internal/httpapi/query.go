@@ -12,6 +12,12 @@ type queryInput struct {
 	Limit int    `json:"limit,omitempty"`
 }
 
+// queryGrammar publishes the field and operator list so the console can show
+// what is writable instead of leaving an operator to guess and read rejections.
+func (s *Server) queryGrammar(response http.ResponseWriter, request *http.Request) {
+	writeJSON(response, http.StatusOK, querydsl.Describe())
+}
+
 func (s *Server) validateQuery(response http.ResponseWriter, request *http.Request) {
 	var input queryInput
 	if err := decodeJSON(request, &input); err != nil {

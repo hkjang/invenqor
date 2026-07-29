@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/audit"
 	"github.com/hkjang/invenqor/server/internal/classify"
 )
@@ -32,9 +34,9 @@ type assetView struct {
 	Attributes      json.RawMessage `json:"attributes"`
 	CustomFields    json.RawMessage `json:"custom_fields"`
 	Source          string          `json:"source"`
-	FirstSeenAt     any             `json:"first_seen_at"`
-	LastSeenAt      any             `json:"last_seen_at"`
-	DeletedAt       any             `json:"deleted_at,omitempty"`
+	FirstSeenAt     apitime.Time    `json:"first_seen_at"`
+	LastSeenAt      apitime.Time    `json:"last_seen_at"`
+	DeletedAt       apitime.Time    `json:"deleted_at,omitempty"`
 }
 
 const assetColumns = `id, asset_key, name, type, status, criticality,
@@ -55,46 +57,185 @@ func scanAsset(scanner interface{ Scan(...any) error }) (assetView, error) {
 	return asset, err
 }
 
-func (s *Server) listAssets(response http.ResponseWriter, request *http.Request) {
-	limit := queryInt(request, "limit", 50, 1, 200)
-	offset := queryInt(request, "offset", 0, 0, 1_000_000)
-	search := strings.TrimSpace(request.URL.Query().Get("q"))
-	assetType := strings.TrimSpace(request.URL.Query().Get("type"))
-	status := strings.TrimSpace(request.URL.Query().Get("status"))
-	includeDeleted := request.URL.Query().Get("include_deleted") == "true"
-	query := `SELECT ` + assetColumns + ` FROM assets
-		WHERE ($1 = '' OR LOWER(name) LIKE LOWER($2)
-		 OR LOWER(asset_key) LIKE LOWER($2))
-		AND ($3 = '' OR type = $3)
-		AND ($4 = '' OR status = $4)
-		AND ($5 = 1 OR deleted_at IS NULL)
-		ORDER BY last_seen_at DESC, id LIMIT $6 OFFSET $7`
+// assetListFilter is shared by the listing and its CSV export so a download
+// always contains exactly the rows the operator was looking at.
+type assetListFilter struct {
+	Search         string
+	Type           string
+	Status         string
+	Environment    string
+	Criticality    string
+	Owner          string
+	IncludeDeleted bool
+	Sort           string
+	Limit          int
+	Offset         int
+}
+
+// Environment and criticality became meaningful once classification started
+// setting them, but the listing could not filter on either, so "show me every
+// critical production asset" - the question the classification work exists to
+// answer - had to be asked through the query DSL instead.
+func parseAssetListFilter(request *http.Request) assetListFilter {
+	values := request.URL.Query()
+	return assetListFilter{
+		Search:         strings.TrimSpace(values.Get("q")),
+		Type:           strings.TrimSpace(values.Get("type")),
+		Status:         strings.TrimSpace(values.Get("status")),
+		Environment:    strings.TrimSpace(values.Get("environment")),
+		Criticality:    strings.TrimSpace(values.Get("criticality")),
+		Owner:          strings.TrimSpace(values.Get("owner_department")),
+		IncludeDeleted: values.Get("include_deleted") == "true",
+		Sort:           strings.TrimSpace(values.Get("sort")),
+		Limit:          queryInt(request, "limit", 50, 1, 200),
+		Offset:         queryInt(request, "offset", 0, 0, 1_000_000),
+	}
+}
+
+func (filter assetListFilter) where() (string, []any) {
+	statement := " WHERE 1=1"
+	arguments := make([]any, 0, 8)
+	add := func(clause string, value any) {
+		arguments = append(arguments, value)
+		statement += fmt.Sprintf(clause, len(arguments))
+	}
+	if filter.Search != "" {
+		add(
+			" AND (LOWER(name) LIKE $%[1]d OR LOWER(asset_key) LIKE $%[1]d)",
+			"%"+strings.ToLower(filter.Search)+"%",
+		)
+	}
+	if filter.Type != "" {
+		add(" AND type = $%d", filter.Type)
+	}
+	if filter.Status != "" {
+		add(" AND status = $%d", filter.Status)
+	}
+	if filter.Environment != "" {
+		add(" AND environment = $%d", filter.Environment)
+	}
+	if filter.Criticality != "" {
+		add(" AND criticality = $%d", filter.Criticality)
+	}
+	if filter.Owner != "" {
+		add(
+			" AND LOWER(owner_department) LIKE $%d",
+			"%"+strings.ToLower(filter.Owner)+"%",
+		)
+	}
+	if !filter.IncludeDeleted {
+		statement += " AND deleted_at IS NULL"
+	}
+	return statement, arguments
+}
+
+// assetSortOrders is a fixed allowlist: the value reaches SQL directly, so it
+// can never be caller-supplied text.
+var assetSortOrders = map[string]string{
+	"":            "last_seen_at DESC, id",
+	"recent":      "last_seen_at DESC, id",
+	"oldest":      "last_seen_at, id",
+	"name":        "LOWER(name), id",
+	"type":        "type, LOWER(name), id",
+	"criticality": "criticality, LOWER(name), id",
+	"discovered":  "first_seen_at DESC, id",
+}
+
+func (filter assetListFilter) orderBy() string {
+	if order, found := assetSortOrders[filter.Sort]; found {
+		return order
+	}
+	return assetSortOrders[""]
+}
+
+func (s *Server) assetRows(
+	request *http.Request,
+	filter assetListFilter,
+) ([]assetView, error) {
+	where, arguments := filter.where()
+	arguments = append(arguments, filter.Limit, filter.Offset)
+	statement := "SELECT " + assetColumns + " FROM assets" + where +
+		fmt.Sprintf(
+			" ORDER BY %s LIMIT $%d OFFSET $%d",
+			filter.orderBy(), len(arguments)-1, len(arguments),
+		)
 	rows, err := s.database.DB().QueryContext(
-		request.Context(), query, search, "%"+search+"%", assetType, status,
-		boolInt(includeDeleted), limit+1, offset,
+		request.Context(), statement, arguments...,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]assetView, 0, filter.Limit)
+	for rows.Next() {
+		asset, err := scanAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, asset)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) listAssets(response http.ResponseWriter, request *http.Request) {
+	filter := parseAssetListFilter(request)
+	items, err := s.assetRows(request, filter)
 	if err != nil {
 		s.internalError(response, request, err)
 		return
 	}
-	defer rows.Close()
-	items := make([]assetView, 0, limit)
-	hasMore := false
-	for rows.Next() {
-		asset, err := scanAsset(rows)
-		if err != nil {
-			s.internalError(response, request, err)
-			return
-		}
-		if len(items) == limit {
-			hasMore = true
-			break
-		}
-		items = append(items, asset)
+	where, arguments := filter.where()
+	// The console showed "50개 자산 · offset 0", which says nothing about how
+	// large the result actually is. The count is one cheap query away.
+	var total int64
+	if err := s.database.DB().QueryRowContext(
+		request.Context(),
+		"SELECT COUNT(*) FROM assets"+where,
+		arguments...,
+	).Scan(&total); err != nil {
+		s.internalError(response, request, err)
+		return
 	}
 	writeJSON(response, 200, map[string]any{
-		"items": items, "limit": limit, "offset": offset, "has_more": hasMore,
+		"items": items, "limit": filter.Limit, "offset": filter.Offset,
+		"total":    total,
+		"has_more": int64(filter.Offset+len(items)) < total,
 	})
+}
+
+// exportAssets writes the current filter as CSV. Inventory extracts are asked
+// for constantly - for a review, a ticket, a hand-off - and the alternative is
+// an operator copying a paged table by hand.
+func (s *Server) exportAssets(response http.ResponseWriter, request *http.Request) {
+	filter := parseAssetListFilter(request)
+	filter.Offset = 0
+	filter.Limit = queryInt(request, "limit", 10_000, 1, 100_000)
+	items, err := s.assetRows(request, filter)
+	if err != nil {
+		s.internalError(response, request, err)
+		return
+	}
+	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	response.Header().Set(
+		"Content-Disposition",
+		`attachment; filename="invenqor-assets.csv"`,
+	)
+	_, _ = response.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(response)
+	_ = writer.Write([]string{
+		"asset_key", "name", "type", "status", "environment", "criticality",
+		"owner_department", "location", "source", "confidence",
+		"first_seen_at", "last_seen_at",
+	})
+	for _, item := range items {
+		_ = writer.Write([]string{
+			item.AssetKey, item.Name, item.Type, item.Status, item.Environment,
+			item.Criticality, item.OwnerDepartment, item.Location, item.Source,
+			strconv.FormatFloat(item.Confidence, 'f', 2, 64),
+			item.FirstSeenAt.String(), item.LastSeenAt.String(),
+		})
+	}
+	writer.Flush()
 }
 
 func (s *Server) getAsset(response http.ResponseWriter, request *http.Request) {
@@ -137,9 +278,9 @@ func (s *Server) getAsset(response http.ResponseWriter, request *http.Request) {
 		sources = append(sources, map[string]any{
 			"id": id, "agent_id": agentID, "category": category,
 			"source_asset_id": sourceID, "source_name": sourceName,
-			"payload": json.RawMessage(payload), "collected_at": collected,
-			"first_seen_at": firstSeen, "last_seen_at": lastSeen,
-			"deleted_at": deleted,
+			"payload": json.RawMessage(payload), "collected_at": apiTime(collected),
+			"first_seen_at": apiTime(firstSeen), "last_seen_at": apiTime(lastSeen),
+			"deleted_at": apiTime(deleted),
 		})
 	}
 	writeJSON(response, 200, map[string]any{"asset": asset, "sources": sources})
@@ -383,7 +524,7 @@ func (s *Server) assetHistory(response http.ResponseWriter, request *http.Reques
 		items = append(items, map[string]any{
 			"id": id, "change_type": changeType, "before": rawJSON(before),
 			"after": rawJSON(after), "actor_type": actorType,
-			"actor_id": actorID, "reason": reason, "occurred_at": occurred,
+			"actor_id": actorID, "reason": reason, "occurred_at": apiTime(occurred),
 		})
 	}
 	writeJSON(response, 200, map[string]any{"items": items})

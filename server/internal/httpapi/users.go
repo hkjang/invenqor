@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/auth"
 )
 
@@ -46,8 +47,8 @@ type managedUserRecord struct {
 	SuperAdmin  bool
 	Locked      bool
 	Provider    string
-	CreatedAt   any
-	UpdatedAt   any
+	CreatedAt   apitime.Time
+	UpdatedAt   apitime.Time
 	Roles       []string
 	LocalRoles  []string
 	OIDCRoles   []string

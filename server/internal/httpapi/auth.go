@@ -128,6 +128,37 @@ func (s *Server) enableTOTP(response http.ResponseWriter, request *http.Request)
 	writeJSON(response, http.StatusOK, map[string]any{"totp_enabled": true})
 }
 
+func (s *Server) regenerateRecoveryCodes(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	var input struct {
+		Code string `json:"code"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeAPIError(response, request, http.StatusBadRequest, "INVALID_REQUEST", "The request body is invalid.")
+		return
+	}
+	codes, err := s.totpService.RegenerateRecoveryCodes(
+		request.Context(),
+		principalFromContext(request.Context()).User.ID,
+		input.Code,
+	)
+	switch {
+	case err == nil:
+		writeJSON(response, http.StatusOK, map[string]any{
+			"recovery_codes": codes,
+		})
+	case errors.Is(err, auth.ErrMFASetupRequired):
+		writeAPIError(
+			response, request, http.StatusConflict, "MFA_NOT_ENABLED",
+			"Recovery codes exist only for an enabled second factor.",
+		)
+	default:
+		writeAPIError(response, request, http.StatusBadRequest, "MFA_INVALID", "The TOTP code is invalid.")
+	}
+}
+
 func (s *Server) disableTOTP(response http.ResponseWriter, request *http.Request) {
 	var input struct {
 		Code string `json:"code"`
@@ -219,7 +250,52 @@ func (s *Server) me(response http.ResponseWriter, request *http.Request) {
 		"user":                principal.User,
 		"idle_expires_at":     principal.IdleExpiresAt,
 		"absolute_expires_at": principal.AbsoluteExpiresAt,
+		"security":            s.accountSecurity(request, principal.User.ID),
 	})
+}
+
+// accountSecurity describes the signed-in account's own protections. Without it
+// the console could not tell whether MFA was on, so it offered both "set up" and
+// "disable" to everyone, and showed a password form to accounts that have no
+// local password to change.
+func (s *Server) accountSecurity(
+	request *http.Request,
+	userID string,
+) map[string]any {
+	security := map[string]any{
+		"password_configured":      true,
+		"totp_enabled":             false,
+		"recovery_codes_remaining": 0,
+	}
+	if configured, err := s.authService.PasswordConfigured(
+		request.Context(), userID,
+	); err == nil {
+		security["password_configured"] = configured
+	} else {
+		s.logger.Warn(
+			"account_security_password_state_unavailable",
+			"request_id", middleware.GetReqID(request.Context()),
+			"error", err,
+		)
+	}
+	if s.totpService == nil {
+		return security
+	}
+	status, err := s.totpService.Status(request.Context(), userID)
+	if err != nil {
+		s.logger.Warn(
+			"account_security_totp_state_unavailable",
+			"request_id", middleware.GetReqID(request.Context()),
+			"error", err,
+		)
+		return security
+	}
+	security["totp_enabled"] = status.Enabled
+	security["recovery_codes_remaining"] = status.RecoveryCodesRemaining
+	if status.VerifiedAt != nil {
+		security["totp_verified_at"] = status.VerifiedAt.Format(time.RFC3339Nano)
+	}
+	return security
 }
 
 func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
@@ -273,6 +349,13 @@ func (s *Server) changePassword(response http.ResponseWriter, request *http.Requ
 		writeAPIError(response, request, http.StatusUnauthorized, "INVALID_CREDENTIALS", "The current password is invalid.")
 	case errors.Is(err, auth.ErrPasswordUnchanged):
 		writeAPIError(response, request, http.StatusBadRequest, "PASSWORD_UNCHANGED", "The new password must differ from the current password.")
+	case errors.Is(err, auth.ErrPasswordUnavailable):
+		// A federated account has no local password. This used to fail the
+		// database scan and surface as an internal error.
+		writeAPIError(
+			response, request, http.StatusConflict, "PASSWORD_NOT_LOCAL",
+			"This account signs in through the identity provider, so its password is managed there.",
+		)
 	default:
 		s.logger.Warn(
 			"password_change_rejected",

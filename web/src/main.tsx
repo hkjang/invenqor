@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { SettingsPage, UsersPage } from "./adminPages";
-import {AccountSecurityPage} from "./accountPage";
+import {AccountSecurityPage, type AccountSecurity} from "./accountPage";
 import {
   AgentsPage,
   AssetsPage,
@@ -34,6 +34,7 @@ import {
   savePreferences,
   type UserPreferences,
 } from "./preferences";
+import {formatDate, formatRelative} from "./format";
 import "./styles.css";
 import "./personalization.css";
 
@@ -205,7 +206,10 @@ function App() {
   const [keycloakIncomplete, setKeycloakIncomplete] = React.useState(false);
   const [bootstrap, setBootstrap] = React.useState<BootstrapStatus|null>(null);
   const [preferences, setPreferences] = React.useState<UserPreferences>(defaultPreferences);
-  React.useEffect(()=>{ api<{user:User}>("/api/v1/auth/me").then(v=>setUser(v.user)).catch(()=>{}); },[]);
+  const [security,setSecurity]=React.useState<AccountSecurity|undefined>(undefined);
+  const loadIdentity=React.useCallback(()=>api<{user:User; security?:AccountSecurity}>("/api/v1/auth/me")
+    .then(v=>{setUser(v.user); setSecurity(v.security);}).catch(()=>{}),[]);
+  React.useEffect(()=>{ void loadIdentity(); },[loadIdentity]);
   React.useEffect(()=>{ api<SystemInfo>("/api/v1/system/info").then(setSystemInfo).catch(()=>{}); },[]);
   React.useEffect(()=>{
     api<{keycloak:boolean; keycloak_incomplete?:boolean}>("/api/v1/auth/methods")
@@ -297,7 +301,8 @@ function App() {
       {activePage==="users"&&<UsersPage csrf={csrf} currentUserID={user.id}/>}
       {activePage==="keys"&&<ApiKeys csrf={csrf}/>} {activePage==="audit"&&<AuditPage/>}
       {activePage==="logs"&&<ServerLogsPage/>}
-      {activePage==="account"&&<AccountSecurityPage csrf={csrf}/>}
+      {activePage==="account"&&<AccountSecurityPage csrf={csrf} security={security}
+        onSecurityChange={()=>{void loadIdentity();}}/>}
       {activePage==="preferences"&&<PersonalizationPage preferences={preferences}
         pages={visibleNavigation.filter(item=>item.id!=="account").map(item=>({id:item.id,label:item.label}))}
         onChange={updatePreferences}/>}
@@ -385,6 +390,7 @@ function ApiKeys({csrf}:{csrf:string}){
   const [keys,setKeys]=React.useState<ApiKey[]>([]);const [catalog,setCatalog]=React.useState<Scope[]>([]);
   const [name,setName]=React.useState("");const [selected,setSelected]=React.useState<string[]>(["assets.read","mcp.access"]);
   const [expires,setExpires]=React.useState("");const [secret,setSecret]=React.useState("");const [error,setError]=React.useState("");
+  const [showRevoked,setShowRevoked]=React.useState(false);
   const load=React.useCallback(()=>Promise.all([
     api<{api_keys:ApiKey[]}>("/api/v1/admin/api-keys").then(v=>setKeys(v.api_keys)),
     api<{scopes:Scope[]}>("/api/v1/admin/api-key-scopes").then(v=>setCatalog(v.scopes)),
@@ -395,15 +401,55 @@ function ApiKeys({csrf}:{csrf:string}){
   const rename=async(key:ApiKey)=>{const name=window.prompt("새 키 이름",key.name);if(!name||name===key.name)return;try{await api(`/api/v1/admin/api-keys/${key.id}`,{method:"PATCH",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({name})});await api(`/api/v1/admin/api-keys/${key.id}`);await load()}catch(reason){setError((reason as Error).message)}};
   const rotate=async(key:ApiKey)=>{const value=window.prompt("구 키 유예시간(초, 0~604800)", "3600");if(value===null)return;try{const v=await api<{secret:string}>(`/api/v1/admin/api-keys/${key.id}/rotate`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({grace_seconds:Number(value)})});setSecret(v.secret);await load()}catch(reason){setError((reason as Error).message)}};
   const revoke=async(key:ApiKey)=>{if(!window.confirm(`${key.name} 키를 즉시 폐기합니까?`))return;try{await api(`/api/v1/admin/api-keys/${key.id}`,{method:"DELETE",headers:{"X-CSRF-Token":csrf}});await load()}catch(reason){setError((reason as Error).message)}};
+  const active=keys.filter(key=>!key.revoked_at);
+  const revoked=keys.filter(key=>!!key.revoked_at);
+  const visibleKeys=showRevoked?keys:active;
+  const expiringSoon=active.filter(key=>keyExpiryTone(key.expires_at||"")==="warn");
   return <section><PageTitle kicker="MACHINE IDENTITY" title="API · MCP 키" subtitle="연계 시스템과 AI Agent의 최소권한 키를 생성하고 회전합니다."/>
     {secret&&<div className="secret-reveal"><div><strong>새 Secret — 지금 한 번만 표시됩니다</strong><code>{secret}</code></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(secret)}><Copy size={17}/> 복사</button><button className="secondary" onClick={()=>setSecret("")}><X size={17}/></button></div>}
     {error&&<div className="error">{error}</div>}
     <div className="key-layout"><Panel title="새 키 발급" action="원문 비저장"><form className="key-form" onSubmit={create}><label>키 이름<input value={name} onChange={e=>setName(e.target.value)} placeholder="예: cmdb-readonly" required/></label><label>만료 시각<input type="datetime-local" value={expires} onChange={e=>setExpires(e.target.value)}/></label><fieldset><legend>Scope</legend>{catalog.map(scope=><label className="scope-check" key={scope.name}><input type="checkbox" checked={selected.includes(scope.name)} onChange={()=>setSelected(selected.includes(scope.name)?selected.filter(v=>v!==scope.name):[...selected,scope.name])}/><span><strong>{scope.name}</strong><small>{scope.description}</small></span></label>)}</fieldset><button className="primary compact" disabled={!selected.length}>키 생성</button></form></Panel>
-    <Panel title={`${keys.filter(k=>!k.revoked_at).length}개 활성 키`} action="scope 즉시 반영"><div className="key-list">{keys.map(key=><article className={key.revoked_at?"revoked":""} key={key.id}><div className="key-head"><div><KeyRound size={19}/><span><strong>{key.name}</strong><small>ivq_sk_{key.prefix}_… · 최근 사용 {formatDate(key.last_used_at||"")}</small></span></div><div><button title="이름 변경" onClick={()=>rename(key)} disabled={!!key.revoked_at}>이름</button><button title="회전" onClick={()=>rotate(key)} disabled={!!key.revoked_at}><RefreshCw size={16}/></button><button title="폐기" onClick={()=>revoke(key)} disabled={!!key.revoked_at}><Trash2 size={16}/></button></div></div><div className="scope-pills">{catalog.map(scope=><button key={scope.name} className={key.scopes.includes(scope.name)?"on":""} disabled={!!key.revoked_at} onClick={()=>replaceScopes(key,scope.name)}>{scope.name}</button>)}</div>{key.expires_at&&<small>만료 {formatDate(key.expires_at)}</small>}</article>)}</div></Panel></div>
+    <Panel title={`${active.length}개 활성 키`}
+      action={revoked.length?`폐기 ${revoked.length}건 보관`:"scope 즉시 반영"}>
+      {!!expiringSoon.length&&<div className="admin-notice warning">
+        <strong>{expiringSoon.length}개 키가 7일 내 만료됩니다.</strong>
+        <span>만료된 키는 연계 시스템에서 401을 받습니다. 만료 전에 회전하십시오:
+          {" "}{expiringSoon.map(key=>key.name).join(", ")}</span></div>}
+      <div className="key-list">{visibleKeys.map(key=><article className={key.revoked_at?"revoked":""} key={key.id}>
+        <div className="key-head"><div><KeyRound size={19}/><span><strong>{key.name}</strong>
+          <small>ivq_sk_{key.prefix}_… · {key.last_used_at
+            // "사용된 적 없음" is the answer to "can this key be removed?", and
+            // an empty dash never was.
+            ?`최근 사용 ${formatRelative(key.last_used_at)}`
+            :"아직 사용된 적 없음"}</small></span></div>
+          <div><button title="이름 변경" onClick={()=>rename(key)} disabled={!!key.revoked_at}>이름</button>
+            <button title="회전" onClick={()=>rotate(key)} disabled={!!key.revoked_at}><RefreshCw size={16}/></button>
+            <button title="폐기" onClick={()=>revoke(key)} disabled={!!key.revoked_at}><Trash2 size={16}/></button></div></div>
+        <div className="scope-pills">{catalog.map(scope=><button key={scope.name} className={key.scopes.includes(scope.name)?"on":""} disabled={!!key.revoked_at} onClick={()=>replaceScopes(key,scope.name)}>{scope.name}</button>)}</div>
+        <div className="key-meta">
+          {key.revoked_at
+            ?<small className="bad">폐기 {formatDate(key.revoked_at)}</small>
+            :key.expires_at
+              ?<small className={keyExpiryTone(key.expires_at)}>
+                만료 {formatDate(key.expires_at)} · {formatRelative(key.expires_at)}</small>
+              :<small>만료 없음</small>}
+        </div></article>)}
+        {!visibleKeys.length&&<Empty icon={KeyRound} text="발급된 키가 없습니다."/>}</div>
+      {!!revoked.length&&<div className="pagination">
+        <button className="secondary" onClick={()=>setShowRevoked(!showRevoked)}>
+          {showRevoked?"폐기된 키 숨기기":`폐기된 키 ${revoked.length}건 보기`}</button></div>}
+    </Panel></div>
   </section>
 }
+// An expired key fails as a 401 in a connected system, where nobody is looking
+// at this screen, so the warning has to be here before it happens.
+const keyExpiryTone=(expiresAt:string)=>{
+  const remaining=new Date(expiresAt).getTime()-Date.now();
+  if(Number.isNaN(remaining)) return "";
+  if(remaining<=0) return "bad";
+  return remaining<=7*86_400_000?"warn":"";
+};
 function PageTitle({kicker,title,subtitle}:{kicker:string;title:string;subtitle:string}){return <div className="page-title"><p className="eyebrow dark">{kicker}</p><h1>{title}</h1><p>{subtitle}</p></div>}
 function Panel({title,action,children}:{title:string;action:string;children:React.ReactNode}){return <article className="panel"><div className="panel-head"><h3>{title}</h3><span>{action}</span></div>{children}</article>}
 function Empty({icon:Icon,text}:{icon:React.ElementType;text:string}){return <div className="empty"><Icon/><p>{text}</p></div>}
-const formatDate=(value:string)=>value?new Intl.DateTimeFormat("ko-KR",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).format(new Date(value)):"—";
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App/></React.StrictMode>);

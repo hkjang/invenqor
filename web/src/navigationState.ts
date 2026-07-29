@@ -45,8 +45,13 @@ const settingsTabs = new Set<SettingsTab>([
 
 export const parseConsoleHash = (
   hash: string,
-): {page?: ConsolePage; settingsTab?: SettingsTab} => {
-  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+): {page?: ConsolePage; settingsTab?: SettingsTab; query: URLSearchParams} => {
+  // A page can carry parameters - an audit row links to the diagnostic log for
+  // its request ID as "#/logs?request_id=…". Without splitting the query off,
+  // the page name became "logs?request_id=…", matched nothing, and the link
+  // silently did not navigate.
+  const [route, search = ""] = hash.replace(/^#\/?/, "").split("?");
+  const parts = route.split("/").filter(Boolean);
   const page = consolePages.has(parts[0] as ConsolePage)
     ? parts[0] as ConsolePage
     : undefined;
@@ -54,8 +59,14 @@ export const parseConsoleHash = (
     settingsTabs.has(parts[1] as SettingsTab)
     ? parts[1] as SettingsTab
     : undefined;
-  return {page, settingsTab};
+  return {page, settingsTab, query: new URLSearchParams(search)};
 };
+
+/** The parameters carried by the current hash, for a page that accepts them. */
+export const consoleHashQuery = (): URLSearchParams =>
+  typeof window === "undefined"
+    ? new URLSearchParams()
+    : parseConsoleHash(window.location.hash).query;
 
 export const consoleHash = (
   page: ConsolePage,

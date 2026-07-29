@@ -876,7 +876,8 @@ function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
       <InfoRow label="Commit" value={info?.commit || "unknown"}/>
       <InfoRow label="Build time" value={info?.build_time || "unknown"}/>
       <InfoRow label="Database mode" value={info?.database_mode || "확인 중"}/>
-      <InfoRow label="서비스 포트" value="7070"/>
+      <InfoRow label="서비스 주소" value={info?.listen_address
+        || (info?.port ? `:${info.port}` : "확인 중")}/>
       <InfoRow label="Agent 자동 등록" value={
         info?.agent_enrollment_mode === "open" ? "활성 · URL-only" :
           info?.agent_enrollment_mode === "token" ? "활성 · 공용 Token 보호" :

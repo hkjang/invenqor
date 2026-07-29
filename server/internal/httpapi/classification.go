@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/classify"
 )
 
@@ -352,11 +353,11 @@ func (s *Server) reclassifyAssets(
 }
 
 type proposedRelation struct {
-	ID           string  `json:"id"`
-	RelationType string  `json:"relation_type"`
-	Derivation   string  `json:"derivation"`
-	Confidence   float64 `json:"confidence"`
-	CreatedAt    any     `json:"created_at"`
+	ID           string       `json:"id"`
+	RelationType string       `json:"relation_type"`
+	Derivation   string       `json:"derivation"`
+	Confidence   float64      `json:"confidence"`
+	CreatedAt    apitime.Time `json:"created_at"`
 	Source       struct {
 		ID          string `json:"id"`
 		Name        string `json:"name"`

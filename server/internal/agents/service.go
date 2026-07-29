@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/audit"
 )
 
@@ -26,17 +27,17 @@ var (
 )
 
 type Agent struct {
-	ID              string `json:"id"`
-	AgentID         string `json:"agent_id"`
-	Hostname        string `json:"hostname"`
-	Status          string `json:"status"`
-	Version         string `json:"version"`
-	OSName          string `json:"os_name"`
-	Architecture    string `json:"architecture"`
-	AuthMethod      string `json:"auth_method"`
-	PolicyVersion   string `json:"policy_version"`
-	LastSeenAt      any    `json:"last_seen_at,omitempty"`
-	LastInventoryAt any    `json:"last_inventory_at,omitempty"`
+	ID              string       `json:"id"`
+	AgentID         string       `json:"agent_id"`
+	Hostname        string       `json:"hostname"`
+	Status          string       `json:"status"`
+	Version         string       `json:"version"`
+	OSName          string       `json:"os_name"`
+	Architecture    string       `json:"architecture"`
+	AuthMethod      string       `json:"auth_method"`
+	PolicyVersion   string       `json:"policy_version"`
+	LastSeenAt      apitime.Time `json:"last_seen_at,omitempty"`
+	LastInventoryAt apitime.Time `json:"last_inventory_at,omitempty"`
 }
 
 type ProvisionResult struct {

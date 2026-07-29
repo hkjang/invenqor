@@ -335,7 +335,7 @@ func (s *Server) mcpAgentsList(r *http.Request, raw json.RawMessage) (any, error
 		items = append(items, map[string]any{
 			"agent_id": agentID, "hostname": hostname, "status": status,
 			"version": version, "os_name": osName, "architecture": architecture,
-			"last_seen_at": lastSeen, "last_inventory_at": lastInventory,
+			"last_seen_at": apiTime(lastSeen), "last_inventory_at": apiTime(lastInventory),
 		})
 	}
 	return map[string]any{"agents": items}, rows.Err()

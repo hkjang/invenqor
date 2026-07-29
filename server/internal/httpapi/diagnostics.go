@@ -42,7 +42,7 @@ func (s *Server) listDiagnosticLogs(
 		Query: request.URL.Query().Get("q"),
 		Limit: queryInt(request, "limit", 200, 1, 500),
 	}
-	items, instances, err := s.diagnosticStore.List(
+	items, total, facets, err := s.diagnosticStore.List(
 		request.Context(),
 		filter,
 	)
@@ -51,8 +51,13 @@ func (s *Server) listDiagnosticLogs(
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
-		"items":       items,
-		"instances":   instances,
+		"items": items,
+		"total": total,
+		"limit": filter.Limit,
+		// Instances stays alongside the facets object for the console still
+		// reading the older shape.
+		"instances":   facets.Instances,
+		"facets":      facets,
 		"retention":   map[string]any{"days": 30, "maximum_events": 10000},
 		"instance_id": s.diagnosticStore.InstanceID(),
 	})

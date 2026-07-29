@@ -7,6 +7,8 @@ export type SystemInfo = {
   agent_enrollment_mode?: "open"|"token"|"disabled";
   agent_enrollment_source?: "database"|"startup-environment";
   agent_enrollment_policy_available?: boolean;
+  listen_address?: string;
+  port?: number;
 };
 
 export const formatServerVersion = (value?: string) =>

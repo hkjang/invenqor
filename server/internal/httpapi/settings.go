@@ -47,7 +47,7 @@ func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{
 			"key": key, "value": display, "secret": secret,
 			"apply_mode": mode, "pending": pending != nil, "version": version,
-			"updated_by": user, "updated_at": updated,
+			"updated_by": user, "updated_at": apiTime(updated),
 		})
 	}
 	writeJSON(w, 200, map[string]any{
@@ -189,7 +189,7 @@ func (s *Server) settingHistory(w http.ResponseWriter, r *http.Request) {
 			"id": id, "key": settingKey, "version": version,
 			"before":     maskedSettingValue(before, secret),
 			"after":      maskedSettingValue(after, secret),
-			"changed_by": user, "reason": reason, "created_at": created,
+			"changed_by": user, "reason": reason, "created_at": apiTime(created),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
@@ -255,43 +255,6 @@ func (s *Server) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	s.recordAdminAudit(r, "setting.rollback", "setting", input.Key, nil,
 		map[string]any{"target_version": input.Version}, input.Reason)
 	writeJSON(w, 200, map[string]any{"rolled_back": true, "version": next})
-}
-
-func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
-	limit := queryInt(r, "limit", 100, 1, 500)
-	rows, err := s.database.DB().QueryContext(r.Context(),
-		`SELECT id,occurred_at,actor_type,actor_id,actor_name,action,
-		 resource_type,resource_id,request_id,source_ip,user_agent,result,
-		 reason,before_json,after_json,metadata_json
-		 FROM audit_logs ORDER BY occurred_at DESC LIMIT $1`, limit)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	defer rows.Close()
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, actorType, actorName, action, resourceType, requestID, ip, ua, result, reason string
-		var at, actorID, resourceID, before, after, metadata any
-		if err := rows.Scan(
-			&id, &at, &actorType, &actorID, &actorName, &action,
-			&resourceType, &resourceID, &requestID, &ip, &ua, &result,
-			&reason, &before, &after, &metadata,
-		); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
-		items = append(items, map[string]any{
-			"id": id, "occurred_at": at, "actor_type": actorType,
-			"actor_id": actorID, "actor_name": actorName, "action": action,
-			"resource_type": resourceType, "resource_id": resourceID,
-			"request_id": requestID, "source_ip": ip, "user_agent": ua,
-			"result": result, "reason": reason,
-			"before": rawJSON(before), "after": rawJSON(after),
-			"metadata": rawJSON(metadata),
-		})
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
 }
 
 func validSettingKey(value string) bool {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 )
 
 const (
@@ -39,7 +40,7 @@ type Event struct {
 
 type Item struct {
 	ID         string         `json:"id"`
-	OccurredAt any            `json:"occurred_at"`
+	OccurredAt apitime.Time   `json:"occurred_at"`
 	Level      string         `json:"level"`
 	Component  string         `json:"component"`
 	EventCode  string         `json:"event_code"`
@@ -134,23 +135,24 @@ func (store *Store) Record(ctx context.Context, event Event) error {
 	return nil
 }
 
+// List returns the matching events newest first, the total the filter matches
+// (so the console can say the limit truncated the answer rather than implying
+// there is nothing more), and the facets its filter controls are built from.
 func (store *Store) List(
 	ctx context.Context,
 	filter Filter,
-) ([]Item, []string, error) {
+) ([]Item, int64, Facets, error) {
 	if filter.Limit < 1 {
 		filter.Limit = 100
 	}
 	if filter.Limit > 500 {
 		filter.Limit = 500
 	}
-	statement := `SELECT id,occurred_at,level,component,event_code,message,
-		 request_id,instance_id,agent_id,source_ip,details_json
-		 FROM diagnostic_logs WHERE 1=1`
+	where := " WHERE 1=1"
 	arguments := make([]any, 0, 5)
 	addCondition := func(column string, value any) {
 		arguments = append(arguments, value)
-		statement += fmt.Sprintf(" AND %s=$%d", column, len(arguments))
+		where += fmt.Sprintf(" AND %s=$%d", column, len(arguments))
 	}
 	if filter.Level != "" {
 		addCondition("level", filter.Level)
@@ -163,13 +165,24 @@ func (store *Store) List(
 	}
 	if query := strings.ToLower(strings.TrimSpace(filter.Query)); query != "" {
 		arguments = append(arguments, "%"+query+"%")
-		statement += fmt.Sprintf(
+		where += fmt.Sprintf(
 			` AND LOWER(event_code || ' ' || message || ' ' ||
 			 request_id || ' ' || agent_id || ' ' || source_ip || ' ' ||
 			 instance_id) LIKE $%d`,
 			len(arguments),
 		)
 	}
+	var total int64
+	if err := store.database.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM diagnostic_logs"+where,
+		arguments...,
+	).Scan(&total); err != nil {
+		return nil, 0, Facets{}, fmt.Errorf("count diagnostic events: %w", err)
+	}
+	statement := `SELECT id,occurred_at,level,component,event_code,message,
+		 request_id,instance_id,agent_id,source_ip,details_json
+		 FROM diagnostic_logs` + where
 	arguments = append(arguments, filter.Limit)
 	statement += fmt.Sprintf(
 		" ORDER BY occurred_at DESC LIMIT $%d",
@@ -181,7 +194,7 @@ func (store *Store) List(
 		arguments...,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list diagnostic events: %w", err)
+		return nil, 0, Facets{}, fmt.Errorf("list diagnostic events: %w", err)
 	}
 	defer rows.Close()
 	items := make([]Item, 0, filter.Limit)
@@ -201,16 +214,16 @@ func (store *Store) List(
 			&item.SourceIP,
 			&details,
 		); err != nil {
-			return nil, nil, err
+			return nil, 0, Facets{}, err
 		}
 		item.Details = decodeDetails(details)
 		items = append(items, item)
 	}
-	instances, err := store.instances(ctx)
+	facets, err := store.facets(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, Facets{}, err
 	}
-	return items, instances, rows.Err()
+	return items, total, facets, rows.Err()
 }
 
 // Since returns the recorded events for the named components inside a time
@@ -283,14 +296,53 @@ func (store *Store) Since(
 	return items, rows.Err()
 }
 
-func (store *Store) instances(ctx context.Context) ([]string, error) {
+// Facets are the values the log actually holds. The console builds its filter
+// controls from these: the component list used to be written by hand in the
+// console, so components the server had started recording - agent_preflight and
+// keycloak among them - could not be filtered at all.
+type Facets struct {
+	Instances  []string `json:"instances"`
+	Components []string `json:"components"`
+	EventCodes []string `json:"event_codes"`
+}
+
+func (store *Store) facets(ctx context.Context) (Facets, error) {
+	instances, err := store.distinct(ctx, "instance_id", 200)
+	if err != nil {
+		return Facets{}, err
+	}
+	components, err := store.distinct(ctx, "component", 100)
+	if err != nil {
+		return Facets{}, err
+	}
+	codes, err := store.distinct(ctx, "event_code", 300)
+	if err != nil {
+		return Facets{}, err
+	}
+	return Facets{
+		Instances:  instances,
+		Components: components,
+		EventCodes: codes,
+	}, nil
+}
+
+// distinct lists the values present in one column. The column name is never
+// caller-supplied - it comes from the fixed set above.
+func (store *Store) distinct(
+	ctx context.Context,
+	column string,
+	limit int,
+) ([]string, error) {
 	rows, err := store.database.QueryContext(
 		ctx,
-		`SELECT DISTINCT instance_id FROM diagnostic_logs
-		 ORDER BY instance_id`,
+		fmt.Sprintf(
+			`SELECT %s FROM diagnostic_logs
+			 GROUP BY %s ORDER BY COUNT(*) DESC, %s LIMIT %d`,
+			column, column, column, limit,
+		),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list distinct %s: %w", column, err)
 	}
 	defer rows.Close()
 	result := make([]string, 0)

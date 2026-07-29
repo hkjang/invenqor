@@ -121,7 +121,10 @@ func (service *TOTPService) Enable(
 	userID string,
 	code string,
 ) error {
-	valid, _, err := service.verifyStored(ctx, userID, code, false)
+	// Enrolment must prove the authenticator itself works, so a recovery code is
+	// not acceptable here: accepting one enabled MFA for a user whose
+	// authenticator was never registered, and left that code unconsumed.
+	valid, err := service.verifyAuthenticator(ctx, userID, code, false)
 	if err != nil {
 		return err
 	}
@@ -150,7 +153,7 @@ func (service *TOTPService) Verify(
 	userID string,
 	code string,
 ) error {
-	valid, recoveryHashes, err := service.verifyStored(ctx, userID, code, true)
+	valid, recoveryHashes, err := service.verifyStored(ctx, userID, code, true, true)
 	if err != nil {
 		return err
 	}
@@ -176,6 +179,49 @@ func (service *TOTPService) Verify(
 	return nil
 }
 
+// RegenerateRecoveryCodes issues a fresh set and invalidates the old ones. A
+// user who has spent their codes previously had to disable MFA and enrol again,
+// which meant a window with no second factor at all.
+func (service *TOTPService) RegenerateRecoveryCodes(
+	ctx context.Context,
+	userID string,
+	code string,
+) ([]string, error) {
+	// The authenticator itself must answer: a recovery code cannot mint more
+	// recovery codes, or one leaked code would be enough to keep an intruder in
+	// indefinitely.
+	valid, err := service.verifyAuthenticator(ctx, userID, code, true)
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, ErrMFAInvalid
+	}
+	codes, hashes, err := generateRecoveryCodes(10)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(hashes)
+	if err != nil {
+		return nil, fmt.Errorf("encode recovery hashes: %w", err)
+	}
+	result, err := service.db.ExecContext(
+		ctx,
+		`UPDATE user_totp
+		 SET recovery_codes_json = $1, updated_at = CURRENT_TIMESTAMP
+		 WHERE user_id = $2 AND enabled = TRUE`,
+		string(encoded),
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store new recovery codes: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, ErrMFASetupRequired
+	}
+	return codes, nil
+}
+
 func (service *TOTPService) Disable(
 	ctx context.Context,
 	userID string,
@@ -194,11 +240,65 @@ func (service *TOTPService) Disable(
 	return nil
 }
 
+// verifyAuthenticator accepts only a code the authenticator app can produce.
+func (service *TOTPService) verifyAuthenticator(
+	ctx context.Context,
+	userID string,
+	code string,
+	requireEnabled bool,
+) (bool, error) {
+	valid, _, err := service.verifyStored(ctx, userID, code, requireEnabled, false)
+	return valid, err
+}
+
+// Status reports what the console needs to describe the account's second
+// factor without guessing: whether it is on, since when, and how many recovery
+// codes are still usable.
+func (service *TOTPService) Status(
+	ctx context.Context,
+	userID string,
+) (TOTPStatus, error) {
+	var status TOTPStatus
+	// The SQLite start-up fallback hands timestamps back as text, so the shared
+	// flexible scanner rather than sql.NullTime.
+	var verifiedAt flexibleTime
+	var rawRecovery any
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT enabled, verified_at, recovery_codes_json
+		 FROM user_totp WHERE user_id = $1`,
+		userID,
+	).Scan(&status.Enabled, &verifiedAt, &rawRecovery); errors.Is(err, sql.ErrNoRows) {
+		return TOTPStatus{}, nil
+	} else if err != nil {
+		return TOTPStatus{}, fmt.Errorf("read TOTP status: %w", err)
+	}
+	if verifiedAt.Valid {
+		verified := verifiedAt.Time.UTC()
+		status.VerifiedAt = &verified
+	}
+	recoveryBytes, err := jsonBytes(rawRecovery)
+	if err != nil {
+		return TOTPStatus{}, err
+	}
+	var recoveryHashes []string
+	if err := json.Unmarshal(recoveryBytes, &recoveryHashes); err != nil {
+		return TOTPStatus{}, fmt.Errorf("decode TOTP recovery hashes: %w", err)
+	}
+	// Only an enabled second factor has usable recovery codes; an abandoned
+	// setup row must not report ten codes the user cannot use.
+	if status.Enabled {
+		status.RecoveryCodesRemaining = len(recoveryHashes)
+	}
+	return status, nil
+}
+
 func (service *TOTPService) verifyStored(
 	ctx context.Context,
 	userID string,
 	code string,
 	requireEnabled bool,
+	allowRecovery bool,
 ) (bool, []string, error) {
 	var encryptedSecret string
 	var enabled bool
@@ -231,6 +331,9 @@ func (service *TOTPService) verifyStored(
 				return true, nil, nil
 			}
 		}
+	}
+	if !allowRecovery {
+		return false, nil, nil
 	}
 	recoveryBytes, err := jsonBytes(rawRecovery)
 	if err != nil {
