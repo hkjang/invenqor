@@ -578,6 +578,153 @@ paths:
                   enrollment: {type: object, description: Current registration policy as shown in Settings}
         "401": {description: Authentication required}
         "403": {description: agents.read permission required}
+  /api/v1/admin/settings/classification:
+    get:
+      operationId: listClassificationRules
+      summary: List the asset classification taxonomy with usage and coverage
+      description: Requires settings.read. Rules arrive in run order (priority, then name); later rules may match on values earlier rules assigned. Each rule reports how many assets its decisions currently explain.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Ordered rule set and coverage summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules, summary]
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, format: uuid}
+                        name: {type: string}
+                        description: {type: string}
+                        priority: {type: integer}
+                        enabled: {type: boolean}
+                        system_rule: {type: boolean}
+                        confidence: {type: number}
+                        assets: {type: integer, description: Assets this rule currently explains}
+                        match:
+                          type: object
+                          properties:
+                            categories: {type: array, items: {type: string}}
+                            name_patterns: {type: array, items: {type: string}, description: Whole-name wildcard match}
+                            name_tokens: {type: array, items: {type: string}, description: Delimiter-separated token match, which is what keeps an environment code from matching inside an unrelated product name}
+                            types: {type: array, items: {type: string}}
+                            environments: {type: array, items: {type: string}}
+                            attribute_equals: {type: object, additionalProperties: {type: string}}
+                            attribute_contains: {type: object, additionalProperties: {type: string}}
+                        assign:
+                          type: object
+                          properties:
+                            type: {type: string}
+                            environment: {type: string}
+                            criticality: {type: string}
+                            owner_department: {type: string}
+                            location: {type: string}
+                            tags: {type: array, items: {type: string}}
+                            relate_to_host: {type: boolean, description: Whether this component earns a relationship to the host it was collected from}
+                            relation: {type: string}
+                  summary:
+                    type: object
+                    properties:
+                      assets: {type: integer}
+                      classified: {type: integer}
+                      manual: {type: integer}
+                      unclassified: {type: integer}
+                      inferred_relations: {type: integer}
+                      proposed_relations: {type: integer}
+        "401": {description: Authentication required}
+        "403": {description: settings.read permission required}
+  /api/v1/admin/settings/classification/rules/{ruleId}:
+    patch:
+      operationId: updateClassificationRule
+      summary: Enable, disable or reprioritise one classification rule
+      description: Requires settings.write and the X-CSRF-Token header. The change takes effect for the next ingested event immediately; use reclassify to apply it to assets already stored.
+      security: [{session: []}]
+      parameters:
+        - {in: path, name: ruleId, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                priority: {type: integer, minimum: 1, maximum: 999}
+                reason: {type: string}
+      responses:
+        "200": {description: Rule updated}
+        "400": {description: "No change requested, or the priority is out of range"}
+        "404": {description: The rule does not exist}
+  /api/v1/admin/settings/classification/reclassify:
+    post:
+      operationId: reclassifyAssets
+      summary: Replay the current rule set over the stored inventory
+      description: Requires settings.write. Fields an operator has set by hand are never overwritten. Returns how many assets were examined and how many the rules explained.
+      security: [{session: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {reason: {type: string}}}
+      responses:
+        "200":
+          description: Reclassification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  examined: {type: integer}
+                  classified: {type: integer}
+  /api/v1/assets/relations/proposed:
+    get:
+      operationId: listProposedRelations
+      summary: List inferred relationships awaiting human review
+      description: Requires relations.read. An inference the product is not sure about - a cloned machine, for instance - is never applied silently; it waits here with its derivation and confidence.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Review queue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, format: uuid}
+                        relation_type: {type: string}
+                        derivation: {type: string, enum: [same_agent_inventory, machine_identity]}
+                        confidence: {type: number}
+                        created_at: {type: string}
+                        source: {type: object, properties: {id: {type: string}, name: {type: string}, type: {type: string}, environment: {type: string}}}
+                        target: {type: object, properties: {id: {type: string}, name: {type: string}, type: {type: string}, environment: {type: string}}}
+  /api/v1/assets/relations/{relationId}/{decision}:
+    post:
+      operationId: reviewProposedRelation
+      summary: Approve or reject an inferred relationship
+      description: Requires relations.write and the X-CSRF-Token header. An approved proposal becomes a manual relationship, so no later automatic pass revises it.
+      security: [{session: []}]
+      parameters:
+        - {in: path, name: relationId, required: true, schema: {type: string, format: uuid}}
+        - {in: path, name: decision, required: true, schema: {type: string, enum: [approve, reject]}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {reason: {type: string}}}
+      responses:
+        "200": {description: Decision recorded}
+        "400": {description: The decision must be approve or reject}
+        "404": {description: The proposal does not exist or was already reviewed}
   /api/v1/admin/users:
     get:
       operationId: listUsers

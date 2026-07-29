@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hkjang/invenqor/server/migrations"
 )
 
 func TestOpenWithoutPostgresUsesSQLiteFallback(t *testing.T) {
@@ -130,10 +133,32 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.DB().QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatalf("query schema_migrations error = %v", err)
 	}
-	if versions != 4 {
-		t.Fatalf("migration versions = %d, want 4", versions)
+	// Counting a literal here means the number has to be updated with each
+	// migration, which is the point: an accidentally re-runnable migration would
+	// otherwise inflate this silently.
+	expected := migrationFileCount(t, "sqlite")
+	if versions != expected {
+		t.Fatalf("migration versions = %d, want %d", versions, expected)
 	}
 	assertTableExists(t, second, "diagnostic_logs")
+	assertTableExists(t, second, "asset_classification_rules")
+}
+
+// migrationFileCount counts the shipped migrations for a dialect so the
+// idempotency check stays correct as the schema grows.
+func migrationFileCount(t *testing.T, dialect string) int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.Files, dialect)
+	if err != nil {
+		t.Fatalf("list %s migrations: %v", dialect, err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			count++
+		}
+	}
+	return count
 }
 
 func assertTableExists(t *testing.T, runtime *Runtime, name string) {

@@ -15,6 +15,7 @@ export type ConsolePage =
 export type SettingsTab =
   | "postgresql"
   | "agents"
+  | "classification"
   | "keycloak"
   | "general"
   | "system";
@@ -36,6 +37,7 @@ const consolePages = new Set<ConsolePage>([
 const settingsTabs = new Set<SettingsTab>([
   "postgresql",
   "agents",
+  "classification",
   "keycloak",
   "general",
   "system",

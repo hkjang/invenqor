@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/audit"
+	"github.com/hkjang/invenqor/server/internal/classify"
 )
 
 type assetView struct {
@@ -254,8 +256,33 @@ func (s *Server) updateAsset(response http.ResponseWriter, request *http.Request
 	if len(input.CustomFields) > 0 {
 		customFields = jsonValueOr(input.CustomFields, "{}")
 	}
+	// Whatever a person edits here becomes theirs: the classification rules must
+	// never move it back on the next inventory event.
+	claimed := make([]string, 0, 5)
+	for field, changed := range map[string]bool{
+		"type":             input.Type != nil,
+		"criticality":      input.Criticality != nil,
+		"environment":      input.Environment != nil,
+		"owner_department": input.OwnerDepartment != nil,
+		"location":         input.Location != nil,
+	} {
+		if changed {
+			claimed = append(claimed, field)
+		}
+	}
+	sort.Strings(claimed)
 	now := time.Now().UTC()
-	_, err = s.database.DB().ExecContext(
+	transaction, err := s.database.DB().BeginTx(request.Context(), nil)
+	if err != nil {
+		s.internalError(response, request, err)
+		return
+	}
+	defer transaction.Rollback()
+	if err := classify.MarkManual(request.Context(), transaction, id, claimed); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
+	_, err = transaction.ExecContext(
 		request.Context(),
 		`UPDATE assets SET name=$1, status=$2, criticality=$3,
 		 environment=$4, owner_department=$5, location=$6,
@@ -265,6 +292,10 @@ func (s *Server) updateAsset(response http.ResponseWriter, request *http.Request
 		attributes, customFields, now, id,
 	)
 	if err != nil {
+		s.internalError(response, request, err)
+		return
+	}
+	if err := transaction.Commit(); err != nil {
 		s.internalError(response, request, err)
 		return
 	}

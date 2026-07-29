@@ -6,6 +6,7 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Layers,
   LockKeyholeOpen,
   Pencil,
   Power,
@@ -21,6 +22,7 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "./api";
+import { ClassificationSettingsPanel } from "./classificationPage";
 import {
   consoleHash,
   loadSettingsTab,
@@ -194,6 +196,7 @@ export function SettingsPage({
       <div className="settings-nav">
         <button className={tab === "postgresql" ? "active" : ""} onClick={() => selectTab("postgresql")}><Database size={17}/>PostgreSQL</button>
         <button className={tab === "agents" ? "active" : ""} onClick={() => selectTab("agents")}><RadioTower size={17}/>Agent 등록</button>
+        <button className={tab === "classification" ? "active" : ""} onClick={() => selectTab("classification")}><Layers size={17}/>자산 분류</button>
         <button className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
         <button className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
         <button className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
@@ -201,6 +204,7 @@ export function SettingsPage({
       <div className="settings-content">
         {tab === "postgresql" && <PostgresSettings csrf={csrf}/>}
         {tab === "agents" && <AgentEnrollmentSettingsPanel csrf={csrf}/>}
+        {tab === "classification" && <ClassificationSettingsPanel csrf={csrf}/>}
         {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf}/>}
         {tab === "general" && <GeneralSettingsPanel csrf={csrf}/>}
         {tab === "system" && <SystemSettingsInfo info={systemInfo}/>}

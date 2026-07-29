@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/classify"
 )
 
 var ErrInProgress = errors.New("event is already being processed")
@@ -25,15 +26,23 @@ type Result struct {
 }
 
 type Service struct {
-	database *sql.DB
-	now      func() time.Time
+	database   *sql.DB
+	now        func() time.Time
+	classifier *classify.Store
 }
 
 func NewService(database *sql.DB) *Service {
 	return &Service{
-		database: database,
-		now:      func() time.Time { return time.Now().UTC() },
+		database:   database,
+		now:        func() time.Time { return time.Now().UTC() },
+		classifier: classify.NewStore(database),
 	}
+}
+
+// Classifier exposes the rule store so the administrative API can invalidate the
+// cache after an edit and reuse the same engine for a full reclassification.
+func (s *Service) Classifier() *classify.Store {
+	return s.classifier
 }
 
 func (s *Service) Process(
@@ -45,6 +54,13 @@ func (s *Service) Process(
 ) (Result, error) {
 	if agent.AgentID != envelope.AgentID {
 		return Result{}, errors.New("authenticated agent does not match event agent_id")
+	}
+	// Read the rule set before opening the transaction. SQLite serialises
+	// writers, so a query on another connection while this event holds the write
+	// lock deadlocks; the rules are also immutable for the length of an event.
+	rules, err := s.classifier.Rules(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("load classification rules: %w", err)
 	}
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -121,6 +137,13 @@ func (s *Service) Process(
 					ctx, tx, eventInternalID, agent, envelope, raw, err,
 				)
 			}
+			if err := s.classifyRecord(
+				ctx, tx, agent, rules, assetID, record,
+			); err != nil {
+				return s.failEvent(
+					ctx, tx, eventInternalID, agent, envelope, raw, err,
+				)
+			}
 			assetIDs = append(assetIDs, assetID)
 		}
 	}
@@ -148,6 +171,13 @@ func (s *Service) Process(
 				ctx, tx, eventInternalID, agent, envelope, raw, err,
 			)
 		}
+		if err := s.classifyRecord(
+			ctx, tx, agent, rules, assetID, *change.Record,
+		); err != nil {
+			return s.failEvent(
+				ctx, tx, eventInternalID, agent, envelope, raw, err,
+			)
+		}
 		assetIDs = append(assetIDs, assetID)
 	}
 	errorsToStore := append(
@@ -170,7 +200,7 @@ func (s *Service) Process(
 			)
 		}
 	}
-	if err := s.linkToHost(ctx, tx, agent.ID, assetIDs); err != nil {
+	if err := s.proposeDuplicates(ctx, tx, agent, envelope); err != nil {
 		return s.failEvent(
 			ctx, tx, eventInternalID, agent, envelope, raw, err,
 		)
@@ -526,47 +556,142 @@ func (s *Service) removeRecord(
 	return err
 }
 
-func (s *Service) linkToHost(
+// classifyRecord gives one collected record its business context and, when the
+// rule set says the component belongs to its host, the typed relationship that
+// makes the dependency graph real.
+//
+// The previous behaviour created one generic 'belongs_to_host' edge for every
+// record, which on a single Linux host means thousands of edges for installed
+// packages alone - a graph nobody can read. Which components earn an edge is now
+// a curation decision in the rule set.
+func (s *Service) classifyRecord(
 	ctx context.Context,
 	tx *sql.Tx,
-	agentID string,
-	assetIDs []string,
+	agent agents.Agent,
+	rules []classify.Rule,
+	assetID string,
+	record AssetRecord,
 ) error {
-	var hostID string
-	err := tx.QueryRowContext(
-		ctx,
-		`SELECT asset_id FROM asset_sources
-		 WHERE agent_id = $1 AND category = 'system' AND deleted_at IS NULL
-		 ORDER BY first_seen_at LIMIT 1`,
-		agentID,
-	).Scan(&hostID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if assetID == "" {
 		return nil
 	}
-	if err != nil {
-		return err
+	var currentType, environment, criticality string
+	if err := tx.QueryRowContext(
+		ctx,
+		"SELECT type, environment, criticality FROM assets WHERE id = $1",
+		assetID,
+	).Scan(&currentType, &environment, &criticality); err != nil {
+		return fmt.Errorf("read asset for classification: %w", err)
 	}
-	for _, assetID := range assetIDs {
-		if assetID == hostID {
-			continue
-		}
-		_, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO asset_relations(
-				id, source_asset_id, relation_type, target_asset_id,
-				source, confidence
-			) VALUES ($1, $2, 'belongs_to_host', $3, 'agent', 1.0)
-			ON CONFLICT(source_asset_id, relation_type, target_asset_id)
-			DO UPDATE SET valid_to = NULL, source = 'agent', confidence = 1.0`,
-			uuid.NewString(),
-			assetID,
-			hostID,
-		)
+	// A component's environment is the environment of the machine it was read
+	// from. Inferring it from the component's own name would be guessing twice,
+	// and it is what let a unit called postgresql read as staging.
+	if record.Category != "system" && environment == defaultEnvironment {
+		inherited, err := s.hostEnvironment(ctx, tx, agent.ID)
 		if err != nil {
 			return err
 		}
+		if inherited != "" {
+			environment = inherited
+		}
 	}
-	return nil
+	result, err := s.classifier.ClassifyAndStore(
+		ctx,
+		tx,
+		rules,
+		classify.AssetContext{
+			AssetID:     assetID,
+			Category:    record.Category,
+			Name:        assetName(record),
+			Type:        currentType,
+			Environment: environment,
+			Criticality: criticality,
+			Payload:     compactJSON(record.Payload),
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !result.RelateToHost {
+		return nil
+	}
+	return classify.LinkToHost(
+		ctx, tx, agent.ID, assetID, result.Relation, result.Confidence,
+	)
+}
+
+// defaultEnvironment is the schema default, which means "nobody has decided yet".
+const defaultEnvironment = "other"
+
+// hostEnvironment reads the environment already classified onto the agent's host
+// asset. Records arrive with the system inventory first, so the host is normally
+// classified by the time its components are; when it is not, the next event
+// completes the inheritance.
+func (s *Service) hostEnvironment(
+	ctx context.Context,
+	tx *sql.Tx,
+	agentInternalID string,
+) (string, error) {
+	hostAssetID, err := classify.HostAssetForAgent(ctx, tx, agentInternalID)
+	if err != nil || hostAssetID == "" {
+		return "", err
+	}
+	var environment string
+	if err := tx.QueryRowContext(
+		ctx,
+		"SELECT environment FROM assets WHERE id = $1",
+		hostAssetID,
+	).Scan(&environment); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read host environment: %w", err)
+	}
+	if environment == defaultEnvironment {
+		return "", nil
+	}
+	return environment, nil
+}
+
+// proposeDuplicates surfaces two agents reporting the same machine. Cloned
+// images silently double an inventory, and the merge decision belongs to a
+// person, so this is recorded as a proposal.
+func (s *Service) proposeDuplicates(
+	ctx context.Context,
+	tx *sql.Tx,
+	agent agents.Agent,
+	envelope Envelope,
+) error {
+	if envelope.Snapshot == nil {
+		return nil
+	}
+	identifier := ""
+	for _, record := range envelope.Snapshot.Records {
+		if record.Category != "system" {
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(record.Payload, &payload) != nil {
+			continue
+		}
+		for _, key := range []string{"machine_id", "dmi_product_uuid"} {
+			if value, ok := payload[key].(string); ok && len(value) >= 16 {
+				identifier = value
+				break
+			}
+		}
+		break
+	}
+	if identifier == "" {
+		return nil
+	}
+	hostAssetID, err := classify.HostAssetForAgent(ctx, tx, agent.ID)
+	if err != nil || hostAssetID == "" {
+		return err
+	}
+	return classify.ProposeDuplicatesByMachineIdentity(
+		ctx, tx, agent.ID, hostAssetID, identifier,
+	)
 }
 
 func agentMetadata(envelope Envelope) (string, string, string) {

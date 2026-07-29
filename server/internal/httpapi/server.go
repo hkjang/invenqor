@@ -279,6 +279,25 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/assets/visualization", s.assetVisualization,
 		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/classification",
+			s.listClassificationRules,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/classification/rules/{ruleID}",
+			s.updateClassificationRule,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/classification/reclassify",
+			s.reclassifyAssets,
+		)
+		protected.With(s.requirePermission("relations.read")).Get(
+			"/api/v1/assets/relations/proposed", s.listProposedRelations,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("relations.write")).Post(
+			"/api/v1/assets/relations/{relationID}/{decision}",
+			s.reviewProposedRelation,
+		)
 		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
 			"/api/v1/assets", s.createAsset,
 		)

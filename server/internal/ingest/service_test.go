@@ -18,6 +18,7 @@ func TestInventoryIsIdempotentAndPreservesRawEvent(t *testing.T) {
 	envelope := inventoryEnvelope(agent.AgentID, []AssetRecord{
 		record("host-source", "system", `{"hostname":"node-01","architecture":"x86_64"}`),
 		record("pkg-source", "software.package", `{"name":"curl","version":"1"}`),
+		record("nic-source", "network.interface", `{"interface":"eth0","mac":"aa:bb"}`),
 	})
 	raw, _ := json.Marshal(envelope)
 	result, err := service.Process(
@@ -39,10 +40,43 @@ func TestInventoryIsIdempotentAndPreservesRawEvent(t *testing.T) {
 		t.Fatal("second event was not reported as duplicate")
 	}
 	assertCount(t, runtime, "agent_events", 1)
-	assertCount(t, runtime, "assets", 2)
-	assertCount(t, runtime, "asset_sources", 2)
-	assertCount(t, runtime, "asset_changes", 2)
+	assertCount(t, runtime, "assets", 3)
+	assertCount(t, runtime, "asset_sources", 3)
+	assertCount(t, runtime, "asset_changes", 3)
+	// Exactly one relationship: the interface is part of its host. A plain OS
+	// package earns no edge - a host with thousands of packages would otherwise
+	// produce a graph nobody can read.
 	assertCount(t, runtime, "asset_relations", 1)
+	assertCountWhere(
+		t, runtime, "asset_relations",
+		"relation_type = 'part_of' AND source = 'inferred' AND status = 'active'",
+		1,
+	)
+	// Classification runs during ingest, with the rule trail recorded.
+	var hostType, packageType, classificationSource string
+	var confidence float64
+	if err := runtime.DB().QueryRow(
+		`SELECT a.type, a.classification_source, a.classification_confidence
+		   FROM assets a JOIN asset_sources s ON s.asset_id = a.id
+		  WHERE s.category = 'system'`,
+	).Scan(&hostType, &classificationSource, &confidence); err != nil {
+		t.Fatal(err)
+	}
+	if hostType != "host" || classificationSource != "rule" || confidence <= 0 {
+		t.Fatalf(
+			"host classification = %q/%q/%v",
+			hostType, classificationSource, confidence,
+		)
+	}
+	if err := runtime.DB().QueryRow(
+		`SELECT a.type FROM assets a JOIN asset_sources s ON s.asset_id = a.id
+		  WHERE s.category = 'software.package'`,
+	).Scan(&packageType); err != nil {
+		t.Fatal(err)
+	}
+	if packageType != "software" {
+		t.Fatalf("package type = %q, want software", packageType)
+	}
 	var stored string
 	if err := runtime.DB().QueryRow(
 		"SELECT raw_event FROM agent_events",
