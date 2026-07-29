@@ -3,6 +3,7 @@ import {
   formatMappings,
   normalizeKeycloakSettings,
   parseMappings,
+  parseNetworkEntries,
 } from "./adminPages";
 
 describe("Keycloak mapping editor", () => {
@@ -41,5 +42,13 @@ describe("Keycloak mapping editor", () => {
     expect(settings.allowed_email_domains).toEqual([]);
     expect(settings.role_mappings).toEqual({});
     expect(settings.group_mappings).toEqual({});
+  });
+});
+
+describe("Agent enrollment network editor", () => {
+  it("accepts lines and commas, removes blanks and duplicates", () => {
+    expect(parseNetworkEntries(
+      "10.20.30.40\n10.20.0.0/16, 2001:db8::/64\n10.20.30.40",
+    )).toEqual(["10.20.0.0/16", "10.20.30.40", "2001:db8::/64"]);
   });
 });

@@ -130,9 +130,10 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := second.DB().QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatalf("query schema_migrations error = %v", err)
 	}
-	if versions != 3 {
-		t.Fatalf("migration versions = %d, want 3", versions)
+	if versions != 4 {
+		t.Fatalf("migration versions = %d, want 4", versions)
 	}
+	assertTableExists(t, second, "diagnostic_logs")
 }
 
 func assertTableExists(t *testing.T, runtime *Runtime, name string) {

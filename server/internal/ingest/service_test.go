@@ -151,6 +151,74 @@ func TestUpdatedChangeKeepsAssetHistory(t *testing.T) {
 	)
 }
 
+func TestFirstInventoryPromotesEnrollmentHostWithoutDuplicateAsset(
+	t *testing.T,
+) {
+	t.Parallel()
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	agentService := agents.NewService(runtime.DB())
+	externalID := uuid.NewString()
+	provisioned, err := agentService.AutoEnroll(
+		context.Background(),
+		externalID,
+		"enrollment-name",
+		"ivq_ec_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"10.50.60.70",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCount(t, runtime, "assets", 1)
+	envelope := inventoryEnvelope(externalID, []AssetRecord{
+		record(
+			"host-source",
+			"system",
+			`{"hostname":"inventory-name","architecture":"x86_64"}`,
+		),
+		record(
+			"pkg-source",
+			"software.package",
+			`{"name":"curl","version":"8"}`,
+		),
+	})
+	processEnvelope(
+		t,
+		NewService(runtime.DB()),
+		provisioned.Agent,
+		envelope,
+	)
+	assertCount(t, runtime, "assets", 2)
+	assertCount(t, runtime, "asset_sources", 3)
+	var name, status, source string
+	var sourceCount int
+	if err := runtime.DB().QueryRow(
+		`SELECT a.name,a.status,a.source,COUNT(s.id)
+		 FROM assets a
+		 JOIN asset_sources s ON s.asset_id=a.id
+		 WHERE a.asset_key=$1
+		 GROUP BY a.name,a.status,a.source`,
+		"agent:"+externalID,
+	).Scan(&name, &status, &source, &sourceCount); err != nil {
+		t.Fatal(err)
+	}
+	if name != "inventory-name" || status != "active" ||
+		source != "agent" || sourceCount != 2 {
+		t.Fatalf(
+			"promoted asset = %q/%q/%q with %d sources",
+			name,
+			status,
+			source,
+			sourceCount,
+		)
+	}
+}
+
 func TestEnvelopeValidationRejectsIdentityAndHeartbeatPayload(t *testing.T) {
 	t.Parallel()
 	valid := inventoryEnvelope(uuid.NewString(), nil)

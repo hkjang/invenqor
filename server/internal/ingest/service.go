@@ -288,26 +288,67 @@ func (s *Service) upsertRecord(
 	name := assetName(record)
 	if newRecord {
 		sourceID = uuid.NewString()
-		assetID = uuid.NewString()
-		assetKey := agent.AgentID + ":" + record.Category + ":" + record.AssetID
-		_, err = tx.ExecContext(
-			ctx,
-			`INSERT INTO assets(
-				id, asset_key, name, type, status, attributes_json, source,
-				first_seen_at, last_seen_at, created_at, updated_at
-			) VALUES (
-				$1, $2, $3, $4, 'active', $5, 'agent',
-				$6, $6, $6, $6
-			)`,
-			assetID,
-			assetKey,
-			name,
-			assetType,
-			payload,
-			collectedAt,
-		)
-		if err != nil {
-			return "", fmt.Errorf("insert representative asset: %w", err)
+		reusedEnrollmentAsset := false
+		if record.Category == "system" {
+			err = tx.QueryRowContext(
+				ctx,
+				`SELECT asset_id FROM asset_sources
+				 WHERE agent_id = $1 AND category = 'enrollment'
+				   AND deleted_at IS NULL
+				 ORDER BY first_seen_at LIMIT 1`,
+				agent.ID,
+			).Scan(&assetID)
+			switch {
+			case err == nil:
+				reusedEnrollmentAsset = true
+			case errors.Is(err, sql.ErrNoRows):
+				err = nil
+			default:
+				return "", fmt.Errorf(
+					"find enrollment asset for inventory: %w",
+					err,
+				)
+			}
+		}
+		if reusedEnrollmentAsset {
+			_, err = tx.ExecContext(
+				ctx,
+				`UPDATE assets SET name=$1, type=$2, status='active',
+				 confidence=1.0, attributes_json=$3, source='agent',
+				 last_seen_at=$4, updated_at=$5, deleted_at=NULL
+				 WHERE id=$6`,
+				name,
+				assetType,
+				payload,
+				collectedAt,
+				now,
+				assetID,
+			)
+			if err != nil {
+				return "", fmt.Errorf("promote enrollment asset: %w", err)
+			}
+		} else {
+			assetID = uuid.NewString()
+			assetKey := agent.AgentID + ":" + record.Category + ":" + record.AssetID
+			_, err = tx.ExecContext(
+				ctx,
+				`INSERT INTO assets(
+					id, asset_key, name, type, status, attributes_json, source,
+					first_seen_at, last_seen_at, created_at, updated_at
+				) VALUES (
+					$1, $2, $3, $4, 'active', $5, 'agent',
+					$6, $6, $6, $6
+				)`,
+				assetID,
+				assetKey,
+				name,
+				assetType,
+				payload,
+				collectedAt,
+			)
+			if err != nil {
+				return "", fmt.Errorf("insert representative asset: %w", err)
+			}
 		}
 		_, err = tx.ExecContext(
 			ctx,

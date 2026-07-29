@@ -21,9 +21,15 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "./api";
+import {
+  consoleHash,
+  loadSettingsTab,
+  parseConsoleHash,
+  saveSettingsTab,
+  type SettingsTab,
+} from "./navigationState";
 import type { SystemInfo } from "./productVersion";
 
-type SettingsTab = "postgresql" | "agents" | "keycloak" | "general" | "system";
 type PostgresTarget = {
   valid: boolean;
   host?: string;
@@ -52,6 +58,9 @@ type AgentEnrollmentSettings = {
   enabled: boolean;
   mode: "disabled"|"open"|"token";
   token_configured: boolean;
+  network_mode: "any"|"allowlist";
+  allowed_networks: string[];
+  trusted_proxies: string[];
   version: number;
   updated_at: string;
   updated_by: string;
@@ -151,11 +160,30 @@ const jsonRequest = (csrf: string, body: unknown, method = "POST"): RequestInit 
 export function SettingsPage({
   csrf,
   systemInfo,
+  userID,
 }: {
   csrf: string;
   systemInfo: SystemInfo | null;
+  userID: string;
 }) {
-  const [tab, setTab] = React.useState<SettingsTab>("postgresql");
+  const [tab, setTab] = React.useState<SettingsTab>(() => loadSettingsTab(userID));
+  const selectTab = React.useCallback((next: SettingsTab) => {
+    setTab(next);
+    saveSettingsTab(userID, next);
+    const nextHash = consoleHash("settings", next);
+    if (window.location.hash !== nextHash) window.location.hash = nextHash;
+  }, [userID]);
+  React.useEffect(() => {
+    const synchronize = () => {
+      const routed = parseConsoleHash(window.location.hash).settingsTab;
+      if (routed) {
+        setTab(routed);
+        saveSettingsTab(userID, routed);
+      }
+    };
+    window.addEventListener("hashchange", synchronize);
+    return () => window.removeEventListener("hashchange", synchronize);
+  }, [userID]);
   return <section>
     <AdminPageTitle
       kicker="CONTROL CENTER"
@@ -164,11 +192,11 @@ export function SettingsPage({
     />
     <div className="settings-layout">
       <div className="settings-nav">
-        <button className={tab === "postgresql" ? "active" : ""} onClick={() => setTab("postgresql")}><Database size={17}/>PostgreSQL</button>
-        <button className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}><RadioTower size={17}/>Agent 등록</button>
-        <button className={tab === "keycloak" ? "active" : ""} onClick={() => setTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
-        <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
-        <button className={tab === "system" ? "active" : ""} onClick={() => setTab("system")}><ServerCog size={17}/>시스템 정보</button>
+        <button className={tab === "postgresql" ? "active" : ""} onClick={() => selectTab("postgresql")}><Database size={17}/>PostgreSQL</button>
+        <button className={tab === "agents" ? "active" : ""} onClick={() => selectTab("agents")}><RadioTower size={17}/>Agent 등록</button>
+        <button className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
+        <button className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
+        <button className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
       </div>
       <div className="settings-content">
         {tab === "postgresql" && <PostgresSettings csrf={csrf}/>}
@@ -184,6 +212,9 @@ export function SettingsPage({
 function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
   const [policy, setPolicy] = React.useState<AgentEnrollmentSettings|null>(null);
   const [mode, setMode] = React.useState<AgentEnrollmentSettings["mode"]>("open");
+  const [networkMode, setNetworkMode] = React.useState<AgentEnrollmentSettings["network_mode"]>("any");
+  const [allowedNetworks, setAllowedNetworks] = React.useState("");
+  const [trustedProxies, setTrustedProxies] = React.useState("");
   const [reason, setReason] = React.useState("");
   const [registrationToken, setRegistrationToken] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -194,6 +225,9 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       .then(value => {
         setPolicy(value);
         setMode(value.mode);
+        setNetworkMode(value.network_mode);
+        setAllowedNetworks(value.allowed_networks.join("\n"));
+        setTrustedProxies(value.trusted_proxies.join("\n"));
       }),
   []);
   React.useEffect(() => {
@@ -204,9 +238,18 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
     try {
       const value = await api<AgentEnrollmentSettings>(
         "/api/v1/admin/settings/agent-enrollment",
-        jsonRequest(csrf, {mode, reason}, "PATCH"),
+        jsonRequest(csrf, {
+          mode,
+          network_mode: networkMode,
+          allowed_networks: parseNetworkEntries(allowedNetworks),
+          trusted_proxies: parseNetworkEntries(trustedProxies),
+          reason,
+        }, "PATCH"),
       );
-      setPolicy(value); setMode(value.mode); setReason("");
+      setPolicy(value); setMode(value.mode); setNetworkMode(value.network_mode);
+      setAllowedNetworks(value.allowed_networks.join("\n"));
+      setTrustedProxies(value.trusted_proxies.join("\n"));
+      setReason("");
       setMessage(value.mode === "open"
         ? "토큰 없는 자동 등록을 활성화했습니다. Agent는 URL만으로 바로 등록됩니다."
         : value.mode === "token"
@@ -278,6 +321,10 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       description: "새 Agent 등록을 차단합니다. 기존 등록 Agent의 수집과 전송은 계속 허용됩니다.",
     },
   ];
+  const policyChanged = mode !== policy.mode ||
+    networkMode !== policy.network_mode ||
+    parseNetworkEntries(allowedNetworks).join("\n") !== policy.allowed_networks.join("\n") ||
+    parseNetworkEntries(trustedProxies).join("\n") !== policy.trusted_proxies.join("\n");
   return <AdminPanel
     title="Agent 자동 등록"
     action={`DB 정책 v${policy.version} · ${policy.mode.toUpperCase()}`}
@@ -286,7 +333,7 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       <div className="enrollment-status status-grid">
         <StatusItem label="현재 상태" value={policy.enabled ? "활성" : "비활성"} good={policy.enabled}/>
         <StatusItem label="등록 방식" value={policy.mode === "open" ? "URL-only" : policy.mode === "token" ? "Token 보호" : "차단"}/>
-        <StatusItem label="등록 토큰" value={policy.token_configured ? "발급됨" : "없음"} good={policy.token_configured}/>
+        <StatusItem label="접속 IP 정책" value={policy.network_mode === "any" ? "모든 IP" : `${policy.allowed_networks.length}개 규칙`} good={policy.network_mode === "allowlist"}/>
         <StatusItem label="정책 공유" value="DB · 모든 Pod" good/>
       </div>
       <div className="enrollment-mode-grid" role="radiogroup" aria-label="Agent 자동 등록 방식">
@@ -315,6 +362,51 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       {!policy.token_configured && <Notice tone="info" title="Protected 모드를 사용하려면 먼저 토큰을 발급하십시오.">
         발급 버튼은 새 토큰을 한 번만 표시하고 즉시 토큰 보호 모드로 전환합니다.
       </Notice>}
+      <div className="enrollment-network-policy">
+        <div className="section-heading">
+          <div>
+            <strong>자동 등록 허용 IP / CIDR</strong>
+            <small>Agent의 최초 접속 IP를 판정해 등록을 허용하고 즉시 IP 기반 host 자산을 생성합니다.</small>
+          </div>
+          <Shield size={18}/>
+        </div>
+        <div className="network-mode-switch" role="radiogroup" aria-label="자동 등록 IP 범위">
+          <label className={networkMode === "any" ? "selected" : ""}>
+            <input type="radio" name="network-mode" checked={networkMode === "any"}
+              onChange={() => setNetworkMode("any")}/>
+            <span><strong>모든 IP 허용</strong><small>네트워크 제한 없이 현재 등록 방식을 적용합니다.</small></span>
+          </label>
+          <label className={networkMode === "allowlist" ? "selected" : ""}>
+            <input type="radio" name="network-mode" checked={networkMode === "allowlist"}
+              onChange={() => setNetworkMode("allowlist")}/>
+            <span><strong>지정 IP만 허용</strong><small>아래의 정확한 IP 또는 CIDR에 일치할 때만 등록합니다.</small></span>
+          </label>
+        </div>
+        <div className="network-rule-grid">
+          <label>허용 IP / CIDR <b>{parseNetworkEntries(allowedNetworks).length}</b>
+            <textarea
+              value={allowedNetworks}
+              onChange={event => setAllowedNetworks(event.target.value)}
+              placeholder={"10.20.30.40\n10.20.40.0/24\n2001:db8:100::/64"}
+              rows={6}
+            />
+            <small>한 줄에 하나씩 입력합니다. 단일 IPv4/IPv6와 CIDR을 함께 사용할 수 있습니다.</small>
+          </label>
+          <label>신뢰 프록시 IP / CIDR <b>{parseNetworkEntries(trustedProxies).length}</b>
+            <textarea
+              value={trustedProxies}
+              onChange={event => setTrustedProxies(event.target.value)}
+              placeholder={"10.0.0.10\n10.0.1.0/24"}
+              rows={6}
+            />
+            <small>Ingress/LB가 이 범위에서 접속할 때만 X-Forwarded-For를 신뢰합니다. 비워두면 직접 접속 IP로 판정합니다.</small>
+          </label>
+        </div>
+        {networkMode === "allowlist" && parseNetworkEntries(allowedNetworks).length === 0 &&
+          <Notice tone="error" title="허용 IP 또는 CIDR이 필요합니다.">
+            빈 허용 목록은 저장되지 않습니다. Agent가 실제로 접속하는 주소 또는 대역을 추가하십시오.
+          </Notice>}
+      </div>
       {registrationToken && <div className="secret-reveal enrollment-token-reveal">
         <div>
           <strong>등록 토큰 — 지금 한 번만 표시됩니다</strong>
@@ -333,7 +425,9 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
         <button className="secondary" disabled={busy} onClick={load}><RefreshCw size={16}/>새로고침</button>
         {policy.token_configured && <button className="secondary" disabled={busy} onClick={deleteToken}><Trash2 size={16}/>토큰 폐기</button>}
         <button className="secondary" disabled={busy} onClick={issueToken}><KeyRound size={16}/>{policy.token_configured ? "토큰 회전" : "토큰 발급"}</button>
-        <button className="primary compact" disabled={busy || mode === policy.mode} onClick={save}><Save size={16}/>정책 적용</button>
+        <button className="primary compact"
+          disabled={busy || !policyChanged || (networkMode === "allowlist" && parseNetworkEntries(allowedNetworks).length === 0)}
+          onClick={save}><Save size={16}/>정책 적용</button>
       </div>
       <ActionMessage message={message} error={error}/>
       <div className="agent-config-example">
@@ -343,6 +437,10 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       </div>
     </div>
   </AdminPanel>;
+}
+
+export function parseNetworkEntries(value: string): string[] {
+  return [...new Set(value.split(/[\n,]+/).map(entry => entry.trim()).filter(Boolean))].sort();
 }
 
 function PostgresSettings({csrf}: {csrf: string}) {
@@ -437,6 +535,12 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
   const [settings, setSettings] = React.useState<KeycloakSettings|null>(null);
   const [secretConfigured, setSecretConfigured] = React.useState(false);
   const [clientSecret, setClientSecret] = React.useState("");
+  const [quickKeycloakURL, setQuickKeycloakURL] = React.useState("");
+  const [quickRealm, setQuickRealm] = React.useState("");
+  const [quickClientID, setQuickClientID] = React.useState("");
+  const [applicationURL, setApplicationURL] = React.useState(
+    typeof window === "undefined" ? "" : window.location.origin,
+  );
   const [roleMappings, setRoleMappings] = React.useState("");
   const [groupMappings, setGroupMappings] = React.useState("");
   const [reason, setReason] = React.useState("");
@@ -452,6 +556,16 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
       setSecretConfigured(value.client_secret_configured);
       setRoleMappings(formatMappings(normalized.role_mappings));
       setGroupMappings(formatMappings(normalized.group_mappings));
+      setQuickKeycloakURL(normalized.issuer_url);
+      setQuickRealm(normalized.realm);
+      setQuickClientID(normalized.client_id);
+      if (normalized.redirect_uri) {
+        try {
+          setApplicationURL(new URL(normalized.redirect_uri).origin);
+        } catch {
+          // Keep the browser origin when a legacy redirect URI is malformed.
+        }
+      }
     }),
   []);
   React.useEffect(() => {
@@ -500,8 +614,84 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
       setBusy(false);
     }
   };
+  const autoConfigure = async () => {
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = await api<{
+        settings: KeycloakSettings;
+        client_secret_configured: boolean;
+        discovery_issuer: string;
+        redirect_uri: string;
+      }>(
+        "/api/v1/admin/settings/keycloak/auto-configure",
+        jsonRequest(csrf, {
+          keycloak_url: quickKeycloakURL,
+          realm: quickRealm,
+          client_id: quickClientID,
+          application_url: applicationURL,
+          private_ca_pem: settings.private_ca_pem,
+          reason: reason || "Keycloak OIDC 빠른 연동",
+          ...(clientSecret ? {client_secret: clientSecret} : {}),
+        }),
+      );
+      setSettings(normalizeKeycloakSettings(value.settings));
+      setSecretConfigured(value.client_secret_configured);
+      setClientSecret(""); setReason("");
+      setMessage(`OIDC Discovery와 TLS 검증을 완료하고 로그인을 활성화했습니다. Callback: ${value.redirect_uri}`);
+      await load();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   return <AdminPanel title="Keycloak OIDC" action={secretConfigured ? "Client Secret 설정됨" : "Client Secret 미설정"}>
     <div className="settings-body">
+      <div className="keycloak-quick-setup">
+        <div className="section-heading">
+          <div>
+            <strong>최소 정보 빠른 연동</strong>
+            <small>OIDC Discovery, Callback/Logout URI, 표준 Scope와 Claim을 자동 구성하고 연결 성공 후에만 저장합니다.</small>
+          </div>
+          <KeyRound size={19}/>
+        </div>
+        <div className="admin-form">
+          <label className="wide">Keycloak 주소
+            <input value={quickKeycloakURL} onChange={event => setQuickKeycloakURL(event.target.value)}
+              placeholder="https://sso.example.com"/>
+          </label>
+          <label>Realm
+            <input value={quickRealm} onChange={event => setQuickRealm(event.target.value)}
+              placeholder="invenqor"/>
+          </label>
+          <label>Client ID
+            <input value={quickClientID} onChange={event => setQuickClientID(event.target.value)}
+              placeholder="invenqor"/>
+          </label>
+          <label className="wide">InvenQor 외부 주소
+            <input value={applicationURL} onChange={event => setApplicationURL(event.target.value)}
+              placeholder="https://invenqor.example.com"/>
+            <small>현재 접속 주소가 기본값입니다. Ingress 외부 주소가 다르면 수정하십시오.</small>
+          </label>
+          <label className="wide">Client Secret
+            <input type="password" value={clientSecret} onChange={event => setClientSecret(event.target.value)}
+              placeholder={secretConfigured ? "기존 Secret 사용 · 회전할 때만 입력" : "Keycloak Client Secret"}
+              autoComplete="new-password"/>
+          </label>
+        </div>
+        <div className="form-actions">
+          <button className="primary compact" disabled={
+            busy || !quickKeycloakURL.trim() || !quickClientID.trim() ||
+            !applicationURL.trim() || (!secretConfigured && !clientSecret.trim())
+          } onClick={autoConfigure}>
+            <Power size={16}/>자동 구성 · 검증 · 활성화
+          </button>
+        </div>
+      </div>
+      <div className="advanced-settings-heading">
+        <strong>고급 정책</strong>
+        <small>기본값을 세밀하게 조정하거나 Role/Group 매핑과 사설 CA를 구성합니다.</small>
+      </div>
       <label className="toggle-row"><input type="checkbox" checked={settings.enabled} onChange={event => change("enabled", event.target.checked)}/><span><strong>Keycloak 로그인 활성화</strong><small>로컬 로그인은 비상 접근 경로로 유지됩니다.</small></span></label>
       <div className="admin-form">
         <label className="wide">Issuer URL<input value={settings.issuer_url} onChange={event => change("issuer_url", event.target.value)} placeholder="https://sso.example.com"/></label>
@@ -553,7 +743,6 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
           />
           <small>사내 CA로 Keycloak TLS를 구성한 경우에만 입력합니다.</small>
         </label>
-        <label className="wide">Client Secret<input type="password" value={clientSecret} onChange={event => setClientSecret(event.target.value)} placeholder={secretConfigured ? "변경할 때만 입력" : "필수 Secret"} autoComplete="new-password"/></label>
         <label className="wide">변경 사유<input value={reason} onChange={event => setReason(event.target.value)}/></label>
       </div>
       <label className="toggle-row"><input type="checkbox" checked={settings.auto_create_users} onChange={event => change("auto_create_users", event.target.checked)}/><span><strong>최초 로그인 사용자 자동 생성</strong><small>기본 역할과 mapping 정책을 적용합니다.</small></span></label>

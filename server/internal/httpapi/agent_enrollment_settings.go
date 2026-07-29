@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,12 +27,15 @@ var errAgentEnrollmentTokenNotConfigured = errors.New(
 )
 
 type agentEnrollmentPolicy struct {
-	Enabled      bool      `json:"enabled"`
-	RequireToken bool      `json:"require_token"`
-	TokenHash    string    `json:"token_hash,omitempty"`
-	Version      int       `json:"version"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	UpdatedBy    string    `json:"updated_by"`
+	Enabled         bool      `json:"enabled"`
+	RequireToken    bool      `json:"require_token"`
+	TokenHash       string    `json:"token_hash,omitempty"`
+	NetworkMode     string    `json:"network_mode"`
+	AllowedNetworks []string  `json:"allowed_networks"`
+	TrustedProxies  []string  `json:"trusted_proxies"`
+	Version         int       `json:"version"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	UpdatedBy       string    `json:"updated_by"`
 }
 
 func (policy agentEnrollmentPolicy) mode() string {
@@ -48,6 +53,9 @@ func (policy agentEnrollmentPolicy) publicValue() map[string]any {
 		"enabled":          policy.Enabled,
 		"mode":             policy.mode(),
 		"token_configured": policy.TokenHash != "",
+		"network_mode":     policy.NetworkMode,
+		"allowed_networks": policy.AllowedNetworks,
+		"trusted_proxies":  policy.TrustedProxies,
 		"version":          policy.Version,
 		"updated_at":       policy.UpdatedAt,
 		"updated_by":       policy.UpdatedBy,
@@ -57,10 +65,13 @@ func (policy agentEnrollmentPolicy) publicValue() map[string]any {
 
 func (s *Server) initialAgentEnrollmentPolicy() agentEnrollmentPolicy {
 	policy := agentEnrollmentPolicy{
-		Enabled:   s.agentEnrollmentEnabled,
-		Version:   1,
-		UpdatedAt: time.Now().UTC(),
-		UpdatedBy: "startup-environment",
+		Enabled:         s.agentEnrollmentEnabled,
+		NetworkMode:     "any",
+		AllowedNetworks: []string{},
+		TrustedProxies:  []string{},
+		Version:         1,
+		UpdatedAt:       time.Now().UTC(),
+		UpdatedBy:       "startup-environment",
 	}
 	if s.agentEnrollmentTokenRequired {
 		policy.RequireToken = true
@@ -115,6 +126,42 @@ func (s *Server) loadAgentEnrollmentPolicy(
 		return agentEnrollmentPolicy{}, "", fmt.Errorf(
 			"decode agent enrollment policy: %w",
 			err,
+		)
+	}
+	if policy.NetworkMode == "" {
+		// Policies written before network controls existed allowed every source.
+		policy.NetworkMode = "any"
+	}
+	if policy.AllowedNetworks == nil {
+		policy.AllowedNetworks = []string{}
+	}
+	if policy.TrustedProxies == nil {
+		policy.TrustedProxies = []string{}
+	}
+	allowed, err := normalizeNetworkRules(policy.AllowedNetworks, 256)
+	if err != nil {
+		return agentEnrollmentPolicy{}, "", fmt.Errorf(
+			"agent enrollment policy has invalid allowed networks: %w",
+			err,
+		)
+	}
+	proxies, err := normalizeNetworkRules(policy.TrustedProxies, 64)
+	if err != nil {
+		return agentEnrollmentPolicy{}, "", fmt.Errorf(
+			"agent enrollment policy has invalid trusted proxies: %w",
+			err,
+		)
+	}
+	policy.AllowedNetworks = allowed
+	policy.TrustedProxies = proxies
+	if policy.NetworkMode != "any" && policy.NetworkMode != "allowlist" {
+		return agentEnrollmentPolicy{}, "", errors.New(
+			"agent enrollment policy has an invalid network mode",
+		)
+	}
+	if policy.NetworkMode == "allowlist" && len(policy.AllowedNetworks) == 0 {
+		return agentEnrollmentPolicy{}, "", errors.New(
+			"agent enrollment policy allowlist is empty",
 		)
 	}
 	if policy.Version < 1 {
@@ -203,8 +250,11 @@ func (s *Server) updateAgentEnrollmentSettings(
 	request *http.Request,
 ) {
 	var input struct {
-		Mode   string `json:"mode"`
-		Reason string `json:"reason"`
+		Mode            string    `json:"mode"`
+		NetworkMode     *string   `json:"network_mode"`
+		AllowedNetworks *[]string `json:"allowed_networks"`
+		TrustedProxies  *[]string `json:"trusted_proxies"`
+		Reason          string    `json:"reason"`
 	}
 	if decodeJSON(request, &input) != nil {
 		writeAPIError(
@@ -242,6 +292,43 @@ func (s *Server) updateAgentEnrollmentSettings(
 				policy.Enabled = true
 				policy.RequireToken = true
 			}
+			if input.NetworkMode != nil {
+				policy.NetworkMode = strings.ToLower(strings.TrimSpace(
+					*input.NetworkMode,
+				))
+			}
+			if input.AllowedNetworks != nil {
+				normalized, err := normalizeNetworkRules(
+					*input.AllowedNetworks,
+					256,
+				)
+				if err != nil {
+					return fmt.Errorf("allowed_networks: %w", err)
+				}
+				policy.AllowedNetworks = normalized
+			}
+			if input.TrustedProxies != nil {
+				normalized, err := normalizeNetworkRules(
+					*input.TrustedProxies,
+					64,
+				)
+				if err != nil {
+					return fmt.Errorf("trusted_proxies: %w", err)
+				}
+				policy.TrustedProxies = normalized
+			}
+			if policy.NetworkMode != "any" &&
+				policy.NetworkMode != "allowlist" {
+				return errors.New(
+					"network_mode must be any or allowlist",
+				)
+			}
+			if policy.NetworkMode == "allowlist" &&
+				len(policy.AllowedNetworks) == 0 {
+				return errors.New(
+					"allowed_networks must contain at least one IP or CIDR",
+				)
+			}
 			return nil
 		},
 	)
@@ -262,6 +349,16 @@ func (s *Server) updateAgentEnrollmentSettings(
 			)
 			return
 		}
+		if strings.Contains(err.Error(), "network_mode") ||
+			strings.Contains(err.Error(), "allowed_networks") ||
+			strings.Contains(err.Error(), "trusted_proxies") {
+			writeAPIError(
+				response, request, http.StatusBadRequest,
+				"INVALID_AGENT_ENROLLMENT_NETWORK_POLICY",
+				err.Error(),
+			)
+			return
+		}
 		s.internalError(response, request, err)
 		return
 	}
@@ -275,6 +372,70 @@ func (s *Server) updateAgentEnrollmentSettings(
 		input.Reason,
 	)
 	writeJSON(response, http.StatusOK, after.publicValue())
+}
+
+func normalizeNetworkRules(values []string, limit int) ([]string, error) {
+	if len(values) > limit {
+		return nil, fmt.Errorf("at most %d entries are allowed", limit)
+	}
+	unique := make(map[string]struct{}, len(values))
+	for index, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if strings.Contains(value, "/") {
+			prefix, err := netip.ParsePrefix(value)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"entry %d (%q) is not a valid CIDR",
+					index+1,
+					value,
+				)
+			}
+			if prefix.Addr().Is4In6() {
+				prefix = netip.PrefixFrom(
+					prefix.Addr().Unmap(),
+					prefix.Bits()-96,
+				)
+			}
+			unique[prefix.Masked().String()] = struct{}{}
+			continue
+		}
+		address, err := netip.ParseAddr(value)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"entry %d (%q) is not a valid IP address",
+				index+1,
+				value,
+			)
+		}
+		unique[address.Unmap().String()] = struct{}{}
+	}
+	result := make([]string, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func networkRulesContain(rules []string, address netip.Addr) bool {
+	address = address.Unmap()
+	for _, rule := range rules {
+		if strings.Contains(rule, "/") {
+			prefix, err := netip.ParsePrefix(rule)
+			if err == nil && prefix.Contains(address) {
+				return true
+			}
+			continue
+		}
+		candidate, err := netip.ParseAddr(rule)
+		if err == nil && candidate.Unmap() == address {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) issueAgentEnrollmentToken(

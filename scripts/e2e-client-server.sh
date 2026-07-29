@@ -67,6 +67,33 @@ login=$(curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' \
   -d '{"username":"e2e.admin","password":"CorrectHorse!42"}' \
   "http://127.0.0.1:$port/api/v1/auth/local/login")
 csrf=$(printf '%s' "$login" | jq -r .csrf_token)
+
+# Verify that enrollment itself creates a visible PostgreSQL-backed host asset
+# before any inventory event arrives.
+enrollment_only_agent_id=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
+curl -fsS -H 'Content-Type: application/json' \
+  -d '{"agent_id":"'"$enrollment_only_agent_id"'","hostname":"enrollment-only-host","claim_token":"ivq_ec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+  "http://127.0.0.1:$port/v1/agent/enroll" > "$work/enrollment-only.json"
+jq -e '.token | startswith("ivq_at_")' "$work/enrollment-only.json" >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/assets?limit=200" |
+  jq -e --arg key "agent:$enrollment_only_agent_id" \
+    '.items[] | select(.asset_key == $key) | .status == "discovered" and .source == "agent_enrollment"' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/diagnostics/logs?q=$enrollment_only_agent_id" |
+  jq -e '.items[] | select(.event_code == "AGENT_ENROLLMENT_SUCCEEDED")' >/dev/null
+
+# Verify that a rejected Agent request can be correlated from its response to
+# the shared Server diagnostics API without exposing credentials.
+rejected=$(curl -sS -H 'Content-Type: application/json' \
+  -d '{"agent_id":"not-a-uuid","hostname":"rejected-host","claim_token":"ivq_ec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
+  "http://127.0.0.1:$port/v1/agent/enroll")
+rejected_request_id=$(printf '%s' "$rejected" | jq -r .request_id)
+test -n "$rejected_request_id"
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/diagnostics/logs?q=$rejected_request_id" |
+  jq -e '.items[] | select(.event_code == "INVALID_AGENT_IDENTITY")' >/dev/null
+
 docker volume create "$agent_volume" >/dev/null
 mkdir -p "$work/config"
 
@@ -81,11 +108,11 @@ openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
 update_signature=$(base64 < "$work/update.sig" | tr -d '\r\n')
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -F version=0.2.3 -F channel=stable -F os=linux -F architecture=x86_64 \
+  -F version=0.2.4 -F channel=stable -F os=linux -F architecture=x86_64 \
   -F "signature=$update_signature" -F rollout_percent=100 \
   "http://127.0.0.1:$port/api/v1/admin/agent-updates" \
   > "$work/update-manifest.json"
-jq -e '.version == "0.2.3" and .size > 0' "$work/update-manifest.json" >/dev/null
+jq -e '.version == "0.2.4" and .size > 0' "$work/update-manifest.json" >/dev/null
 
 sed \
   -e 's|# url = .*|url = "http://'"$server"':7070"|' \
@@ -108,9 +135,9 @@ docker run --name "$update_client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
   invenqor-agent:e2e --check-update > "$work/update-check.txt"
-grep -q 'staged invenqor-agent update 0.2.2' "$work/update-check.txt"
+grep -q 'staged invenqor-agent update 0.2.4' "$work/update-check.txt"
 docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
-  cat /state/updates/pending.json | jq -e '.manifest.version == "0.2.3"' >/dev/null
+  cat /state/updates/pending.json | jq -e '.manifest.version == "0.2.4"' >/dev/null
 docker rm "$update_client" >/dev/null
 docker run -d --name "$client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
@@ -180,8 +207,8 @@ test "$(curl -sS -o /dev/null -w '%{http_code}' \
   "http://127.0.0.1:$port/api/v1/external/assets?limit=1")" = 401
 agents=$(curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/admin/agents")
-printf '%s' "$agents" | jq -e '.agents[0].status == "active"' >/dev/null
-agent_internal_id=$(printf '%s' "$agents" | jq -r '.agents[0].id')
+printf '%s' "$agents" | jq -e '.agents[] | select(.status == "active")' >/dev/null
+agent_internal_id=$(printf '%s' "$agents" | jq -r '.agents[] | select(.status == "active") | .id' | head -n1)
 device_credential_before=$(docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
   sha256sum /state/device-credential.json | awk '{print $1}')
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \

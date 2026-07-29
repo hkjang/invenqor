@@ -134,13 +134,33 @@ func TestAutoEnrollmentIsRetryableOnlyByOriginalDeviceClaim(t *testing.T) {
 	claim := "ivq_ec_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	first, err := service.AutoEnroll(
-		context.Background(), externalID, "auto-host", claim,
+		context.Background(), externalID, "auto-host", claim, "10.20.30.40",
 	)
 	if err != nil {
 		t.Fatalf("AutoEnroll() error = %v", err)
 	}
 	if first.Token == "" || first.Agent.AuthMethod != "auto_bearer" {
 		t.Fatalf("unexpected enrollment result: %+v", first)
+	}
+	var assetStatus, assetSource, identifier string
+	if err := runtime.DB().QueryRow(
+		`SELECT a.status, a.source, i.identifier_value
+		 FROM assets a
+		 JOIN asset_identifiers i ON i.asset_id=a.id
+		 WHERE a.asset_key=$1 AND i.identifier_type='ip'`,
+		"agent:"+externalID,
+	).Scan(&assetStatus, &assetSource, &identifier); err != nil {
+		t.Fatalf("read immediate enrollment asset: %v", err)
+	}
+	if assetStatus != "discovered" ||
+		assetSource != "agent_enrollment" ||
+		identifier != "10.20.30.40" {
+		t.Fatalf(
+			"enrollment asset = %q/%q/%q",
+			assetStatus,
+			assetSource,
+			identifier,
+		)
 	}
 	if _, err := service.AuthenticateBearer(
 		context.Background(), first.Token,
@@ -149,7 +169,7 @@ func TestAutoEnrollmentIsRetryableOnlyByOriginalDeviceClaim(t *testing.T) {
 	}
 
 	retry, err := service.AutoEnroll(
-		context.Background(), externalID, "renamed-host", claim,
+		context.Background(), externalID, "renamed-host", claim, "10.20.30.41",
 	)
 	if err != nil {
 		t.Fatalf("retry AutoEnroll() error = %v", err)
@@ -167,12 +187,23 @@ func TestAutoEnrollmentIsRetryableOnlyByOriginalDeviceClaim(t *testing.T) {
 	); err != nil {
 		t.Fatalf("replacement device token was rejected: %v", err)
 	}
+	var assetCount int
+	if err := runtime.DB().QueryRow(
+		"SELECT COUNT(*) FROM assets WHERE asset_key=$1",
+		"agent:"+externalID,
+	).Scan(&assetCount); err != nil {
+		t.Fatal(err)
+	}
+	if assetCount != 1 {
+		t.Fatalf("enrollment retry created %d assets, want 1", assetCount)
+	}
 
 	_, err = service.AutoEnroll(
 		context.Background(),
 		externalID,
 		"attacker",
 		"ivq_ec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"10.20.30.42",
 	)
 	if !errors.Is(err, ErrEnrollmentClaimMismatch) {
 		t.Fatalf("mismatched claim error = %v, want ErrEnrollmentClaimMismatch", err)

@@ -1,16 +1,16 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · EXECUTIVE BRIEF</p>
   <h1>임원 보고서</h1>
-  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.2·Server v0.2.4 도입 가치, 통제 경계와 단계별 확산 제안</p>
+  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.3·Server v0.2.5 도입 가치, 통제 경계와 단계별 확산 제안</p>
   <div class="meta">
-    <p><strong>대상 릴리즈</strong> Agent v0.2.2 · Server v0.2.4</p>
+    <p><strong>대상 릴리즈</strong> Agent v0.2.3 · Server v0.2.5</p>
     <p><strong>보고서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>의사결정 등급</strong> 제한 운영 승인 검토</p>
   </div>
 </div>
 
-## v0.2.2 중앙 자산 관리 확장 요약
+## v0.2.3 중앙 자산 관리 확장 요약
 
 이번 릴리즈는 Linux 수집 Agent를 중앙 자산 Intelligence 서비스로 확장합니다.
 PostgreSQL 기반 대표 자산, 원천 추적, 변경 이력, 관계, 안전한 Query DSL과
@@ -28,6 +28,13 @@ tar.gz도 함께 배포합니다.
 Server URL만 배포하는 Zero-touch 방식으로 운영하고, 경계가 넓은 망은 일회
 표시 등록 Token 보호, 사고·동결 기간은 신규 등록 차단으로 전환할 수 있습니다.
 정책은 모든 Kubernetes Pod에 동시에 적용되고 변경 이력은 감사 로그에 남습니다.
+정확한 IP와 CIDR allowlist, 신뢰할 Ingress/프록시 대역을 별도로 관리해
+전달 헤더 위조 없이 등록 경계를 자동 적용할 수 있습니다.
+
+모든 Server Pod는 공용 PostgreSQL에 운영 진단 이벤트를 기록합니다. 관리자는
+Pod, 수준, 오류 코드, Agent, IP와 request ID로 장애를 교차 추적하며, Agent
+로그에 표시된 request ID로 Server 측 거부 원인을 바로 연결할 수 있습니다.
+민감한 Token과 비밀번호는 저장 전에 마스킹하고 보존량을 제한합니다.
 
 CMDB·자동화·AI 활용을 위해 자산 REST API와 읽기 전용 MCP 도구를 제공합니다.
 연계별 API key는 최소 scope, 원문 비저장, scope 변경·삭제, 유예 회전과 즉시
@@ -42,7 +49,7 @@ CMDB·자동화·AI 활용을 위해 자산 REST API와 읽기 전용 MCP 도구
 
 ## 1. 의사결정 요약
 
-Invenqor Agent v0.2.2는 Linux 서버의 운영체제, 하드웨어 자원, 네트워크,
+Invenqor Agent v0.2.3는 Linux 서버의 운영체제, 하드웨어 자원, 네트워크,
 프로세스, 설치 소프트웨어, 서비스, 계정과 컨테이너 환경을 비특권 방식으로
 수집하는 경량 에이전트입니다. 외부 언어 런타임 없이 x86_64와 aarch64에서
 실행되고, 중앙으로는 outbound HTTPS만 사용합니다.
@@ -86,7 +93,7 @@ Invenqor Agent는 이 문제를 해결하기 위한 **신뢰 가능한 원천 �
 데이터를 경영·보안 의사결정으로 바꾸려면 중앙 정규화, 정책, 대시보드와
 업무 프로세스가 추가로 필요합니다.
 
-## 3. v0.2.2가 제공하는 범위
+## 3. v0.2.3가 제공하는 범위
 
 <div class="kpi-grid">
   <div class="kpi"><strong>10개</strong>기본 수집기 영역</div>
@@ -166,23 +173,23 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 | 데이터 | CMDB 핵심 필드 일치율 | 표본 검증 목표 이상 |
 
 효과 금액은 현재 인력 단가, 서버 수, 감사 빈도, 사고 조사 시간을 입력해
-산출해야 합니다. v0.2.2 자료만으로 절감액이나 ROI를 단정하지 않습니다.
+산출해야 합니다. v0.2.3 자료만으로 절감액이나 ROI를 단정하지 않습니다.
 
 ## 6. 위험과 통제 계획
 
 ### 6.1 주요 위험
 
-| 위험 | 영향 | v0.2.2 상태 | 필수 통제 |
+| 위험 | 영향 | v0.2.3 상태 | 필수 통제 |
 |---|---|---|---|
 | 중앙 시스템 장애 | 최신 데이터 지연 | DB spool·자동 재처리 | PostgreSQL HA·백업·SLO 운영 |
 | 자산정보 과다 노출 | 공격 표면·개인정보 유출 | 계정/네트워크/프로세스 수집 | 분류, RBAC, 암호화, 조회 감사, 보존 |
 | 명령행의 비밀정보 | 자격증명 유출 | 기본 비활성 | 승인 없는 활성화 금지 |
 | 인증 비밀 유출 | 위조 agent 전송 | token/mTLS 지원 | 장비별 발급, 제한 권한, 회전·폐기 |
-| Open 등록 경계 오설정 | 비인가 장비 등록 | DB 정책으로 Open/Token/차단 즉시 전환 | Open은 신뢰망에만 허용, 외부는 Token 보호 |
+| Open 등록 경계 오설정 | 비인가 장비 등록 | DB 정책과 IP/CIDR allowlist 적용 | 신뢰 프록시를 제한하고 외부는 Token 보호 |
 | 큐 포화 | 신규 변경 event 생성 실패 | 기존 데이터 보존 후 실패 | 70/90% 경보, 게이트웨이 SLO |
 | 부분 수집 오류 | 실제 삭제 탐지 지연 | 삭제 보수 억제 | 오류율 경보와 운영 예외 처리 |
 | 공급망 증적 부족 | 패키지 진위 검증 한계 | SHA-256만 제공 | 조직 서명, SBOM/provenance 로드맵 |
-| 자동 업데이트 부재 | 패치 배포 지연 | 미지원 | 표준 배포 도구와 ring rollout |
+| 자동 업데이트 오배포 | 서비스 중단·공급망 위험 | Ed25519·SHA-256·단계적 rollout | 승인 키 분리, canary, 이전 바이너리 복구 시험 |
 | 플랫폼 편차 | 일부 필드 누락 | 점진적 기능 저하 | 대표 OS Pilot과 예외 기준 |
 
 ### 6.2 명확한 비기능 범위
@@ -192,9 +199,9 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 - 취약점/CVE 식별과 위험도 계산
 - 자산 소유자나 업무 중요도 자동 판정
 - 원격 조치, 원격 셸, 스크립트 실행
-- 자동 업데이트, 서명 검증, health check rollback
+- 장애 후 애플리케이션 상태를 판정하는 완전 자동 health-check rollback
 - 컨테이너/Pod/이미지 전체 목록
-- 중앙 서버의 고가용성, 재해복구, 권한·감사 구현
+- PostgreSQL 자체의 HA·백업·재해복구 자동 구성
 - 모든 Linux 배포판과 커널에 대한 동일 수준 보장
 
 ## 7. 단계별 도입안
@@ -272,15 +279,17 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 
 ## 10. 릴리즈 품질 증적
 
-v0.2.2 릴리즈 시 확인된 항목:
+Agent v0.2.3·Server v0.2.5 릴리즈 시 확인된 항목:
 
 - Rust format 검사
 - Clippy 경고 0 기준
-- Rust 단위 테스트 19개와 전체 Go 테스트 통과
+- Rust 단위 테스트 23개, React 단위 테스트 14개와 전체 Go 테스트 통과
 - x86_64/aarch64 musl 정적 빌드
 - 두 아카이브 SHA-256 검증
 - CentOS 7, Red Hat UBI 8/9, Ubuntu 22.04/24.04, Alpine 실제 E2E
-- Server 2-Pod 동시 migration·교차 Pod 세션 E2E
+- Server 2-Pod 공용 정책·자산·진단 로그 교차 조회 E2E
+- IP/CIDR 등록 정책, trusted proxy 위조 방지와 즉시 자산 생성 검증
+- Keycloak 최소 정보 Discovery·자동 설정과 메뉴 새로고침 상태 복원 검증
 - 서명 업데이트 게시·인증 다운로드·검증·스테이징 E2E
 - 오프라인 Docker image tar.gz 재적재·기동 검증
 - GitHub Actions CI
@@ -306,7 +315,7 @@ v0.2.2 릴리즈 시 확인된 항목:
 
 ## 12. 결론
 
-Invenqor Agent v0.2.2는 Linux 자산 가시성의 가장 아래층인 **현장 수집과 신뢰성
+Invenqor Agent v0.2.3는 Linux 자산 가시성의 가장 아래층인 **현장 수집과 신뢰성
 있는 전달**에 집중한 초기 릴리즈입니다. 비특권·outbound-only·부분 실패 격리·
 내구성 큐라는 설계는 통제된 Pilot을 시작하기에 합리적입니다.
 

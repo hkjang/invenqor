@@ -243,6 +243,49 @@ func TestOIDCSettingsValidationAndRoleMapping(t *testing.T) {
 	}
 }
 
+func TestAutomaticOIDCSettingsDiscoverAndDeriveApplicationEndpoints(
+	t *testing.T,
+) {
+	runtime, _ := setupAuthUser(t)
+	defer runtime.Close()
+	bootstrapStore, err := bootstrap.Open(filepath.Dir(runtime.SQLitePath()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localAuth, err := NewService(runtime.DB(), DefaultServiceOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := newMockOIDCProvider(t, key)
+	defer provider.Close()
+	service := NewOIDCService(runtime.DB(), bootstrapStore, localAuth)
+	settings, err := service.AutomaticSettings(
+		context.Background(),
+		OIDCAutoConfig{
+			KeycloakURL:    provider.URL,
+			ClientID:       "invenqor",
+			ApplicationURL: "https://inventory.example.test/",
+			PrivateCAPEM:   provider.CAPEM,
+		},
+	)
+	if err != nil {
+		t.Fatalf("AutomaticSettings() error = %v", err)
+	}
+	if !settings.Enabled ||
+		settings.EffectiveIssuer() != provider.URL ||
+		settings.RedirectURI !=
+			"https://inventory.example.test/api/v1/auth/keycloak/callback" ||
+		settings.LogoutRedirectURI != "https://inventory.example.test/" ||
+		!settings.LastConnectionOK ||
+		settings.LastConnectionTestAt == nil {
+		t.Fatalf("automatic settings = %#v", settings)
+	}
+}
+
 func TestOIDCSettingsRequireSecretAndKnownMappedRoles(t *testing.T) {
 	runtime, admin := setupAuthUser(t)
 	defer runtime.Close()

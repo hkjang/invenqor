@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/invenqor/server/internal/auth"
+	"github.com/hkjang/invenqor/server/internal/diagnostics"
 )
 
 type principalContextKey struct{}
@@ -337,6 +338,17 @@ func (s *Server) internalError(
 		"request_id", middleware.GetReqID(request.Context()),
 		"error", err,
 	)
+	s.recordDiagnostic(request, diagnostics.Event{
+		Level:     "error",
+		Component: "http",
+		EventCode: "INTERNAL_ERROR",
+		Message:   "The server could not complete the request.",
+		Details: map[string]any{
+			"method": request.Method,
+			"path":   request.URL.Path,
+			"error":  err.Error(),
+		},
+	})
 	writeAPIError(response, request, http.StatusInternalServerError, "INTERNAL_ERROR", "The server could not complete the request.")
 }
 

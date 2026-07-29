@@ -1,6 +1,6 @@
 # Invenqor 자산 API·MCP·키 관리 가이드
 
-대상 Server 버전: v0.2.4 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.5 · 기준일: 2026-07-29
 
 ## 1. 목적과 설계 원칙
 
@@ -23,10 +23,23 @@ SSE가 필요 없는 현재 도구 집합은 POST JSON 응답을 사용합니다
 
 Agent 자동 등록의 운영 API도 같은 Session+CSRF 경계에 있습니다. 관리자는
 `/api/v1/admin/settings/agent-enrollment`에서 URL-only Open, Token 보호,
-비활성 모드를 전환하고 `/token` 하위 경로에서 등록 Token을 발급·회전·
-폐기합니다. 정책은 공용 DB에서 요청마다 검증되어 모든 Server Pod에 즉시
-적용되며 Token 원문은 발급 응답에서 한 번만 반환됩니다. 상세 계약은
-`openapi.yaml`을 따릅니다.
+비활성 모드와 IP/CIDR allowlist·신뢰 프록시를 관리하고 `/token` 하위 경로에서
+등록 Token을 발급·회전·폐기합니다. 정책은 공용 DB에서 요청마다 검증되어 모든
+Server Pod에 즉시 적용되며 Token 원문은 발급 응답에서 한 번만 반환됩니다.
+등록 성공 즉시 접속 IP의 host 자산이 생성되고 첫 system inventory가 같은
+자산으로 병합됩니다.
+
+Keycloak은 `/api/v1/admin/settings/keycloak/auto-configure`에 Keycloak URL,
+Realm, Client ID, Client Secret과 InvenQor 외부 URL을 보내면 Discovery/TLS
+검증, Callback/Logout URI와 표준 claim 구성을 거쳐 활성화할 수 있습니다.
+
+멀티 Pod 진단은 `GET /api/v1/admin/diagnostics/logs`에서 공용 DB의 제한된
+warning/error와 Agent 등록 이벤트를 조회합니다. `audit.read`가 필요하고
+`level`, `component`, `instance_id`, `q`, `limit` 필터를 지원합니다. Agent
+응답과 로그의 `request_id`를 `q`로 검색하면 처리 Pod와 실패 단계를 연결할 수
+있습니다. Secret과 원문 인벤토리는 저장하지 않습니다.
+
+상세 계약은 `openapi.yaml`을 따릅니다.
 
 ## 2. Scope 카탈로그
 

@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.4 · Agent 버전: v0.2.2 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.5 · Agent 버전: v0.2.3 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -11,14 +11,16 @@ Invenqor는 Linux Agent, 중앙 Server, PostgreSQL, 웹 관리 콘솔로 구성�
 
 ```text
 브라우저 ─┐
-Agent ────┼─ HTTPS :7070 ─ Ingress/Reverse Proxy ─ Server Pod(2+) ─ PostgreSQL
+Agent ────┼─ HTTPS :443 ─ Ingress/Reverse Proxy ─ HTTP :7070 Service ─ Server Pod(2+) ─ PostgreSQL
 관리 API ─┘                                      ├─ Pod별 spool/state PVC
                                                 └─ 업데이트 공용 RWX PVC
 ```
 
-운영망에서는 `7070`에서 TLS를 종료하는 Ingress 또는 Reverse Proxy를 사용하고
-Agent의 `server.url`도 같은 URL을 지정합니다. Agent는 inbound 포트를 열지
-않으며 Server로 outbound 연결만 생성합니다.
+운영망에서는 외부 HTTPS `443`의 Ingress 또는 Reverse Proxy에서 TLS를 종료하고
+내부 Service `7070`으로 전달합니다. Agent의 `server.url`은
+`https://invenqor.example.com`처럼 외부 URL을 지정하며 외부가 기본 443이면
+`:7070`을 붙이지 않습니다. Agent는 inbound 포트를 열지 않고 Server로 outbound
+연결만 생성합니다.
 
 ## 2. 무엇을 수집하고 어떻게 저장하는가
 
@@ -64,17 +66,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.4.tar.gz`
-- `invenqor-0.2.4.tar.gz.sha256`
+- `invenqor-0.2.5.tar.gz`
+- `invenqor-0.2.5.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.4.tar.gz.sha256
-gzip -t invenqor-0.2.4.tar.gz
-docker load < invenqor-0.2.4.tar.gz
-docker image inspect invenqor-server:0.2.4 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.5.tar.gz.sha256
+gzip -t invenqor-0.2.5.tar.gz
+docker load < invenqor-0.2.5.tar.gz
+docker image inspect invenqor-server:0.2.5 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -94,7 +96,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.4
+./scripts/build-offline-images.sh 0.2.5
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -109,7 +111,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.4
+  invenqor-server:0.2.5
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -205,8 +207,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -305,6 +307,44 @@ Chart는 관리자 비밀번호 Secret을
 `INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE`로 읽습니다. 초기 계정 생성이 확인되면
 Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기하십시오.
 
+### 9.1 HTTPS Ingress
+
+Chart의 선택적 Ingress는 `/` Prefix 하나로 웹, 관리 API, Agent 등록·이벤트·
+업데이트를 모두 같은 origin에 전달합니다. NGINX Ingress 예시는 다음과 같습니다.
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 20m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "90"
+  hosts:
+    - host: invenqor.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: invenqor-tls
+      hosts: [invenqor.example.com]
+```
+
+Ingress는 경로를 rewrite하지 않아야 하며 Agent 이벤트 본문 상한 16 MiB보다 큰
+20 MiB 이상을 허용해야 합니다. Agent는 다음 경로를 같은 HTTPS origin으로
+사용합니다.
+
+| 목적 | 경로 |
+|---|---|
+| 최초 자동 등록 | `POST /v1/agent/enroll` |
+| 인벤토리·heartbeat | `POST /v1/agent/events` |
+| 업데이트 확인·다운로드 | `GET /v1/agent/updates...` |
+
+사설 인증서이면 각 Agent의 `ca_file`에 CA chain을 배포합니다. IP allowlist를
+사용하면 **설정 → Agent 등록 → 신뢰 프록시**에 Ingress의 실제 Pod/노드 IP 또는
+CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`를 신뢰하지
+않고 표준 방식으로 덮어쓰도록 구성합니다. Server는 TCP peer가 신뢰 프록시
+목록에 있을 때만 이 헤더를 사용합니다.
+
 ## 10. 상태 확인, 백업과 복구
 
 | 경로 | 정상 기준 |
@@ -312,7 +352,7 @@ Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.4`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.5`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -321,7 +361,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.4 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.5 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -340,7 +380,14 @@ v0.2.4 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하
 
 ## 12. 장애 판단
 
+- Agent 로그의 `code=... request_id=...`를 **Server 로그** 화면에서 검색하면
+  요청 처리 Pod, source IP, 정책 버전과 안전하게 정리된 내부 원인을 확인할 수
+  있습니다.
 - `401`: Agent UUID와 장비별 Token, 차단 여부를 확인합니다.
+- `403 AGENT_SOURCE_NOT_ALLOWED`: IP/CIDR allowlist, 신뢰 프록시와
+  `X-Forwarded-For` 판정을 확인합니다.
+- `5xx`: Agent의 request ID로 Server 진단 로그를 찾고, 같은 시각의 해당 Pod
+  stdout과 PostgreSQL 상태를 함께 확인합니다.
 - TLS 오류: URL hostname, 사설 CA, 인증서 만료와 7070 경로를 확인합니다.
 - 큐 증가: Server readiness와 네트워크를 복구하십시오. 큐를 임의 삭제하지
   않습니다.
@@ -381,13 +428,49 @@ url = "https://invenqor.example.com:7070"
 동일한 결과를 냅니다. 모든 활성화·비활성화·발급·회전·폐기는 변경 사유와
 전후 상태를 감사 로그에 남기며 Token 원문과 해시는 노출하지 않습니다.
 
+### IP/CIDR 기반 Zero-touch 등록
+
+**설정 → Agent 등록 → 자동 등록 허용 IP / CIDR**에서 등록 요청의 출발지를
+추가로 제한할 수 있습니다.
+
+- **모든 IP 허용**은 기존처럼 인증 모드만 적용합니다.
+- **지정 IP만 허용**은 단일 IPv4/IPv6 또는 CIDR과 일치할 때만 등록합니다.
+- 허용 규칙은 최대 256개이며 공백·중복과 CIDR host bit는 저장 시 정규화됩니다.
+- 허용되지 않은 요청은 자격 증명을 만들기 전에
+  `AGENT_SOURCE_NOT_ALLOWED`로 거부됩니다.
+
+```text
+10.20.30.40
+10.20.40.0/24
+2001:db8:100::/64
+```
+
+Kubernetes Ingress나 L7 Load Balancer 뒤에서는 **신뢰 프록시 IP / CIDR**에
+실제 Ingress/LB의 접속 주소만 등록하십시오. Server는 TCP peer가 이 목록과
+일치할 때만 `X-Forwarded-For`를 오른쪽부터 검증해 실제 Agent IP를 판정합니다.
+목록 밖의 클라이언트가 전달 헤더를 위조해도 직접 접속 IP로 판정됩니다. 프록시
+Pod CIDR 전체를 넣기보다 가능한 한 전용 Ingress node/Pod 대역을 사용하십시오.
+
+허용된 Agent의 `/v1/agent/enroll`이 성공하면 Server는 인벤토리 전송을 기다리지
+않고 다음 레코드를 같은 DB 트랜잭션에서 만듭니다.
+
+- `status=discovered`, `type=host`인 임시 자산
+- 접속 IP의 `asset_identifiers(type=ip)` 식별자
+- Agent UUID와 접속 IP가 포함된 `enrollment` source
+
+첫 `system` 인벤토리가 도착하면 별도 host를 만들지 않고 이 자산을 `active`로
+승격하고 hostname·OS·architecture 등의 authoritative payload를 병합합니다.
+따라서 관리 화면에는 등록 직후 자산이 보이고, 수집 완료 뒤에도 중복 host가
+남지 않습니다. 이 기능은 능동 포트 스캔이 아니라 실제 Agent 접속 기반
+등록이므로 방화벽에는 기존 단일 TCP `7070`만 필요합니다.
+
 동일 기능의 관리 API는 다음과 같습니다. 상태 변경에는 관리자 Session,
 `X-CSRF-Token`, `settings.write`가 필요합니다.
 
 | Method | 경로 | 기능 |
 |---|---|---|
 | `GET` | `/api/v1/admin/settings/agent-enrollment` | 현재 정책과 Token 설정 여부 |
-| `PATCH` | `/api/v1/admin/settings/agent-enrollment` | `disabled/open/token` 모드 적용 |
+| `PATCH` | `/api/v1/admin/settings/agent-enrollment` | 인증 모드와 IP/CIDR·신뢰 프록시 정책 적용 |
 | `POST` | `/api/v1/admin/settings/agent-enrollment/token` | Token 발급 또는 즉시 회전 |
 | `DELETE` | `/api/v1/admin/settings/agent-enrollment/token` | Token 폐기 |
 
@@ -421,7 +504,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.4
+  invenqor-server:0.2.5
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
@@ -441,10 +524,24 @@ Standard Flow를 활성화합니다. Direct Access Grant와 Implicit Flow는 끕
 | Client authentication | On |
 | PKCE | S256 |
 
-Invenqor의 **설정 → Keycloak** 화면에서 Issuer URL, Realm, Client ID/Secret,
-Redirect/Logout URI, Scope, 사용자·Email·이름·역할·그룹 claim, 허용 Email
-domain, 기본 역할과 자동 사용자 생성을 설정합니다. 사내 TLS를 쓰면 루트/중간
-CA 인증서를 PEM으로 등록할 수 있습니다.
+Invenqor의 **설정 → Keycloak → 최소 정보 빠른 연동**에는 다음 값만 입력합니다.
+
+1. Keycloak 주소(예: `https://sso.example.com`)
+2. Realm
+3. Client ID와 최초 Client Secret
+4. Invenqor 외부 주소(현재 브라우저 origin이 기본값)
+
+**자동 구성 · 검증 · 활성화**는 Realm issuer를 조합하고 OIDC Discovery와
+TLS/사설 CA를 검증한 뒤 Callback URI, Logout URI, `openid profile email`,
+표준 사용자 claim과 Keycloak 기본 `realm_access.roles` claim을 구성합니다.
+검증에 실패하면 설정과 새 Secret을 저장하지 않습니다. 이미 Secret이 저장된
+경우에는 Secret을 다시 입력하지 않고 URL/Realm/Client ID만 재검증할 수
+있습니다. 생성된 Callback URI는 성공 메시지와 고급 설정에서 확인하여 Keycloak
+Client의 Valid Redirect URI와 일치시키십시오.
+
+고급 정책에서는 Redirect/Logout URI, Scope, 사용자·Email·이름·역할·그룹
+claim, 허용 Email domain, 기본 역할과 자동 사용자 생성을 세밀하게 조정합니다.
+사내 TLS를 쓰면 빠른 연동 전에 루트/중간 CA 인증서를 PEM 입력란에 붙여 넣습니다.
 
 역할과 그룹 매핑은 한 줄에 하나씩 입력합니다.
 

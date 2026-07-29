@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Activity, Boxes, ChevronDown, ChevronRight, LayoutDashboard,
   Copy, KeyRound, LogOut, Menu, Palette, RefreshCw, Search, Settings,
-  ShieldCheck, Trash2, UserCog, Users, X,
+  ScrollText, ShieldCheck, Trash2, UserCog, Users, X,
 } from "lucide-react";
 import { api } from "./api";
 import { SettingsPage, UsersPage } from "./adminPages";
@@ -14,9 +14,18 @@ import {
   AuditPage,
   OperationsDashboard,
   QueryPage,
+  ServerLogsPage,
 } from "./operationsPages";
 import { ProductVersion, type SystemInfo } from "./productVersion";
 import {PersonalizationPage} from "./personalizationPage";
+import {
+  consoleHash,
+  loadLastPage,
+  loadSettingsTab,
+  parseConsoleHash,
+  saveLastPage,
+  type ConsolePage,
+} from "./navigationState";
 import {
   applyPreferences,
   defaultPreferences,
@@ -27,7 +36,7 @@ import {
 import "./styles.css";
 import "./personalization.css";
 
-type Page = "dashboard" | "assets" | "agents" | "query" | "settings" | "users" | "keys" | "audit" | "account" | "preferences";
+type Page = ConsolePage;
 type User = { id: string; display_name: string; username: string; permissions: string[]; super_admin: boolean };
 type ApiKey = { id: string; name: string; prefix: string; scopes: string[]; expires_at?: string; last_used_at?: string; revoked_at?: string };
 type Scope = { name: string; description: string };
@@ -122,13 +131,26 @@ const navigation: {id: Page; label: string; icon: React.ElementType; permission:
   {id:"users",label:"사용자",icon:Users,permission:"users.read"},
   {id:"keys",label:"API · MCP 키",icon:KeyRound,permission:"api_keys.manage"},
   {id:"audit",label:"감사 로그",icon:ShieldCheck,permission:"audit.read"},
+  {id:"logs",label:"Server 로그",icon:ScrollText,permission:"audit.read"},
   {id:"account",label:"내 보안",icon:UserCog,permission:""},
 ];
+
+const canOpenPage = (page: Page, user: User) => {
+  if (page === "account" || page === "preferences") return true;
+  const item = navigation.find(candidate => candidate.id === page);
+  return !!item && (
+    !item.permission ||
+    user.super_admin ||
+    user.permissions.includes(item.permission)
+  );
+};
 
 function App() {
   const [user, setUser] = React.useState<User|null>(null);
   const [csrf, setCsrf] = React.useState(sessionStorage.getItem("csrf") || "");
-  const [page, setPage] = React.useState<Page>("dashboard");
+  const [page, setPage] = React.useState<Page>(
+    () => parseConsoleHash(window.location.hash).page || "dashboard",
+  );
   const [mobile, setMobile] = React.useState(false);
   const [systemInfo, setSystemInfo] = React.useState<SystemInfo|null>(null);
   const [keycloakEnabled, setKeycloakEnabled] = React.useState(false);
@@ -143,10 +165,37 @@ function App() {
     const loaded = loadPreferences(user.id);
     setPreferences(loaded);
     applyPreferences(loaded);
-    const permitted = navigation.some(item =>
-      item.id === loaded.start_page &&
-      (!item.permission || user.super_admin || user.permissions.includes(item.permission)));
-    setPage(permitted ? loaded.start_page as Page : "dashboard");
+    const routed = parseConsoleHash(window.location.hash).page;
+    const remembered = loadLastPage(user.id);
+    const preferred = loaded.start_page as Page;
+    const candidate = routed || remembered || preferred;
+    const fallback = navigation.find(item =>
+      !item.permission ||
+      user.super_admin ||
+      user.permissions.includes(item.permission)
+    )?.id || "account";
+    const next = canOpenPage(candidate, user) ? candidate : fallback;
+    setPage(next);
+    saveLastPage(user.id, next);
+    if (!routed) {
+      window.history.replaceState(
+        null,
+        "",
+        consoleHash(next, next === "settings" ? loadSettingsTab(user.id) : undefined),
+      );
+    }
+  }, [user?.id]);
+  React.useEffect(() => {
+    if (!user) return;
+    const synchronize = () => {
+      const routed = parseConsoleHash(window.location.hash).page;
+      if (routed && canOpenPage(routed, user)) {
+        setPage(routed);
+        saveLastPage(user.id, routed);
+      }
+    };
+    window.addEventListener("hashchange", synchronize);
+    return () => window.removeEventListener("hashchange", synchronize);
   }, [user?.id]);
   React.useEffect(() => {
     if (preferences.theme !== "system") return;
@@ -160,6 +209,12 @@ function App() {
   const visibleNavigation=navigation.filter(item=>!item.permission||user.super_admin||user.permissions.includes(item.permission));
   const personalPage=page==="account"||page==="preferences";
   const activePage=personalPage||visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;
+  const navigate=(next:Page)=>{
+    if (!canOpenPage(next,user)) return;
+    setPage(next);saveLastPage(user.id,next);setMobile(false);
+    const nextHash=consoleHash(next,next==="settings"?loadSettingsTab(user.id):undefined);
+    if(window.location.hash!==nextHash) window.location.hash=nextHash;
+  };
   const updatePreferences=(next:UserPreferences)=>{
     setPreferences(next);savePreferences(user.id,next);applyPreferences(next);
   };
@@ -172,11 +227,11 @@ function App() {
   return <div className="app-shell">
     <aside className={mobile?"sidebar open":"sidebar"}>
       <div className="brand"><div className="brand-mark small">IQ</div><div><strong>INVENQOR</strong><span>CONTROL PLANE</span></div><button className="mobile-close" onClick={()=>setMobile(false)}><X/></button></div>
-      <nav>{visibleNavigation.map(item=><button key={item.id} className={activePage===item.id?"active":""} onClick={()=>{setPage(item.id);setMobile(false)}}><item.icon size={19}/>{item.label}</button>)}</nav>
+      <nav>{visibleNavigation.map(item=><button key={item.id} className={activePage===item.id?"active":""} onClick={()=>navigate(item.id)}><item.icon size={19}/>{item.label}</button>)}</nav>
       <div className="user-card"><div className="avatar">{(user.display_name||user.username)[0].toUpperCase()}</div><div><strong>{user.display_name||user.username}</strong><span>{user.super_admin?"최고 관리자":"사용자"}</span></div><button onClick={logout} title="로그아웃"><LogOut size={17}/></button></div>
     </aside>
     <main className="content"><header><button className="menu" onClick={()=>setMobile(true)}><Menu/></button><div><span className="crumb">INVENQOR / {activePage==="preferences"?"개인화":visibleNavigation.find(n=>n.id===activePage)?.label || "접근 권한 없음"}</span></div><div className="header-meta"><ProductVersion info={systemInfo} compact/><div className="live"><i/> LIVE</div>
-      <ProfileMenu user={user} onNavigate={setPage} onLogout={logout}/></div></header>
+      <ProfileMenu user={user} onNavigate={navigate} onLogout={logout}/></div></header>
       <PageErrorBoundary key={activePage}>
       {!activePage&&<Empty icon={ShieldCheck} text="이 계정에 콘솔 접근 권한이 없습니다."/>}
       {activePage==="dashboard"&&<OperationsDashboard systemInfo={systemInfo}
@@ -184,9 +239,10 @@ function App() {
       {activePage==="assets"&&<AssetsPage csrf={csrf} access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
       {activePage==="agents"&&<AgentsPage csrf={csrf} systemInfo={systemInfo}
         access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
-      {activePage==="query"&&<QueryPage csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo}/>}
+      {activePage==="query"&&<QueryPage csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo} userID={user.id}/>}
       {activePage==="users"&&<UsersPage csrf={csrf} currentUserID={user.id}/>}
       {activePage==="keys"&&<ApiKeys csrf={csrf}/>} {activePage==="audit"&&<AuditPage/>}
+      {activePage==="logs"&&<ServerLogsPage/>}
       {activePage==="account"&&<AccountSecurityPage csrf={csrf}/>}
       {activePage==="preferences"&&<PersonalizationPage preferences={preferences}
         pages={visibleNavigation.filter(item=>item.id!=="account").map(item=>({id:item.id,label:item.label}))}

@@ -131,3 +131,90 @@ func (s *Server) testKeycloakSettings(response http.ResponseWriter, request *htt
 		"issuer":    input.Settings.EffectiveIssuer(),
 	})
 }
+
+func (s *Server) autoConfigureKeycloak(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	var input struct {
+		KeycloakURL    string  `json:"keycloak_url"`
+		Realm          string  `json:"realm"`
+		ClientID       string  `json:"client_id"`
+		ClientSecret   *string `json:"client_secret,omitempty"`
+		ApplicationURL string  `json:"application_url"`
+		PrivateCAPEM   string  `json:"private_ca_pem"`
+		Reason         string  `json:"reason"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeAPIError(
+			response,
+			request,
+			http.StatusBadRequest,
+			"INVALID_REQUEST",
+			"The request body is invalid.",
+		)
+		return
+	}
+	settings, err := s.oidcService.AutomaticSettings(
+		request.Context(),
+		auth.OIDCAutoConfig{
+			KeycloakURL:    input.KeycloakURL,
+			Realm:          input.Realm,
+			ClientID:       input.ClientID,
+			ApplicationURL: input.ApplicationURL,
+			PrivateCAPEM:   input.PrivateCAPEM,
+		},
+	)
+	if err != nil {
+		s.logger.Warn(
+			"keycloak_auto_configuration_failed",
+			"request_id", middleware.GetReqID(request.Context()),
+			"error", err,
+		)
+		writeAPIError(
+			response,
+			request,
+			http.StatusBadGateway,
+			"KEYCLOAK_DISCOVERY_FAILED",
+			"Keycloak discovery failed. Verify the URL, realm, and TLS trust.",
+		)
+		return
+	}
+	if err := s.oidcService.SaveSettings(
+		request.Context(),
+		settings,
+		input.ClientSecret,
+		principalFromContext(request.Context()).User,
+		input.Reason,
+	); err != nil {
+		if errors.Is(err, auth.ErrOIDCSecret) {
+			writeAPIError(
+				response,
+				request,
+				http.StatusBadRequest,
+				"KEYCLOAK_SECRET_REQUIRED",
+				"A Keycloak client secret is required before enabling login.",
+			)
+			return
+		}
+		if errors.Is(err, auth.ErrOIDCRole) {
+			writeAPIError(
+				response,
+				request,
+				http.StatusBadRequest,
+				"INVALID_KEYCLOAK_ROLE",
+				"A Keycloak mapping references an unknown InvenQor role.",
+			)
+			return
+		}
+		s.internalError(response, request, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{
+		"configured":               true,
+		"settings":                 settings,
+		"client_secret_configured": true,
+		"discovery_issuer":         settings.EffectiveIssuer(),
+		"redirect_uri":             settings.RedirectURI,
+	})
+}

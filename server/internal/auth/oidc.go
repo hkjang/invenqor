@@ -60,6 +60,14 @@ type OIDCSettings struct {
 	LastConnectionOK     bool              `json:"last_connection_ok"`
 }
 
+type OIDCAutoConfig struct {
+	KeycloakURL    string
+	Realm          string
+	ClientID       string
+	ApplicationURL string
+	PrivateCAPEM   string
+}
+
 func DefaultOIDCSettings() OIDCSettings {
 	return OIDCSettings{
 		Scopes:              []string{oidc.ScopeOpenID, "profile", "email"},
@@ -313,6 +321,59 @@ func (service *OIDCService) TestConnection(
 		return fmt.Errorf("discover Keycloak issuer: %w", err)
 	}
 	return nil
+}
+
+// AutomaticSettings builds a complete, enabled OIDC configuration from the
+// four values an administrator normally knows. Discovery is completed before
+// the caller persists either the settings or a client secret.
+func (service *OIDCService) AutomaticSettings(
+	ctx context.Context,
+	input OIDCAutoConfig,
+) (OIDCSettings, error) {
+	settings, err := service.Settings(ctx)
+	if err != nil {
+		return OIDCSettings{}, err
+	}
+	applicationURL, err := url.Parse(strings.TrimSpace(input.ApplicationURL))
+	if err != nil ||
+		!containsString([]string{"https", "http"}, applicationURL.Scheme) ||
+		applicationURL.Host == "" ||
+		applicationURL.User != nil {
+		return OIDCSettings{}, errors.New("InvenQor application URL is invalid")
+	}
+	applicationURL.RawQuery = ""
+	applicationURL.Fragment = ""
+	applicationURL.Path = strings.TrimRight(applicationURL.Path, "/")
+	base := strings.TrimRight(applicationURL.String(), "/")
+
+	settings.Enabled = true
+	settings.IssuerURL = strings.TrimRight(
+		strings.TrimSpace(input.KeycloakURL),
+		"/",
+	)
+	settings.Realm = strings.Trim(strings.TrimSpace(input.Realm), "/")
+	settings.ClientID = strings.TrimSpace(input.ClientID)
+	settings.RedirectURI = base + "/api/v1/auth/keycloak/callback"
+	settings.LogoutRedirectURI = base + "/"
+	if strings.TrimSpace(input.PrivateCAPEM) != "" {
+		settings.PrivateCAPEM = strings.TrimSpace(input.PrivateCAPEM)
+	}
+	if settings.UsernameClaim == "" {
+		settings.UsernameClaim = "preferred_username"
+	}
+	if settings.RoleClaim == "" || settings.RoleClaim == "roles" {
+		settings.RoleClaim = "realm_access.roles"
+	}
+	if len(settings.Scopes) == 0 {
+		settings.Scopes = []string{oidc.ScopeOpenID, "profile", "email"}
+	}
+	if err := service.TestConnection(ctx, settings); err != nil {
+		return OIDCSettings{}, err
+	}
+	now := time.Now().UTC()
+	settings.LastConnectionTestAt = &now
+	settings.LastConnectionOK = true
+	return settings, nil
 }
 
 func (service *OIDCService) LogoutURL(

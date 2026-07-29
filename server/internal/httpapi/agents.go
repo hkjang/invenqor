@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/diagnostics"
 	"github.com/hkjang/invenqor/server/internal/ingest"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
@@ -29,11 +31,72 @@ func (s *Server) autoEnrollAgent(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
-	clientKey := request.RemoteAddr
-	if host, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
-		clientKey = host
+	policy, _, err := s.loadAgentEnrollmentPolicy(request.Context())
+	if err != nil {
+		s.recordDiagnostic(request, diagnostics.Event{
+			Level:     "error",
+			Component: "agent_enrollment",
+			EventCode: "AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
+			Message:   "The automatic enrollment policy could not be loaded.",
+			Details:   map[string]any{"error": err.Error()},
+		})
+		writeAPIError(
+			response, request, http.StatusServiceUnavailable,
+			"AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
+			"The automatic enrollment policy is temporarily unavailable.",
+		)
+		return
+	}
+	sourceIP, err := resolveEnrollmentSourceIP(request, policy.TrustedProxies)
+	if err != nil {
+		s.recordDiagnostic(request, diagnostics.Event{
+			Level:     "warning",
+			Component: "agent_enrollment",
+			EventCode: "INVALID_AGENT_SOURCE_ADDRESS",
+			Message:   "The Agent source address could not be verified.",
+			Details: map[string]any{
+				"remote_address": request.RemoteAddr,
+				"error":          err.Error(),
+			},
+		})
+		writeAPIError(
+			response, request, http.StatusBadRequest,
+			"INVALID_AGENT_SOURCE_ADDRESS",
+			"The Agent source address could not be verified.",
+		)
+		return
+	}
+	clientKey := sourceIP.String()
+	recordEnrollment := func(
+		level string,
+		code string,
+		message string,
+		agentID string,
+		details map[string]any,
+	) {
+		if details == nil {
+			details = map[string]any{}
+		}
+		details["policy_version"] = policy.Version
+		details["network_mode"] = policy.NetworkMode
+		s.recordDiagnostic(request, diagnostics.Event{
+			Level:     level,
+			Component: "agent_enrollment",
+			EventCode: code,
+			Message:   message,
+			AgentID:   agentID,
+			SourceIP:  clientKey,
+			Details:   details,
+		})
 	}
 	if !s.agentEnrollmentRateLimit.Allow(clientKey) {
+		recordEnrollment(
+			"warning",
+			"AGENT_ENROLLMENT_RATE_LIMITED",
+			"Too many Agent enrollment attempts were received.",
+			"",
+			nil,
+		)
 		response.Header().Set("Retry-After", "60")
 		writeAPIError(
 			response, request, http.StatusTooManyRequests,
@@ -42,20 +105,34 @@ func (s *Server) autoEnrollAgent(
 		)
 		return
 	}
-	policy, _, err := s.loadAgentEnrollmentPolicy(request.Context())
-	if err != nil {
-		writeAPIError(
-			response, request, http.StatusServiceUnavailable,
-			"AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
-			"The automatic enrollment policy is temporarily unavailable.",
-		)
-		return
-	}
 	if !policy.Enabled {
+		recordEnrollment(
+			"warning",
+			"AGENT_AUTO_ENROLLMENT_DISABLED",
+			"Automatic Agent enrollment is disabled.",
+			"",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusForbidden,
 			"AGENT_AUTO_ENROLLMENT_DISABLED",
 			"Automatic agent enrollment is not configured.",
+		)
+		return
+	}
+	if policy.NetworkMode == "allowlist" &&
+		!networkRulesContain(policy.AllowedNetworks, sourceIP) {
+		recordEnrollment(
+			"warning",
+			"AGENT_SOURCE_NOT_ALLOWED",
+			"The Agent source IP was rejected by the enrollment policy.",
+			"",
+			nil,
+		)
+		writeAPIError(
+			response, request, http.StatusForbidden,
+			"AGENT_SOURCE_NOT_ALLOWED",
+			"The Agent source IP is not permitted by the enrollment policy.",
 		)
 		return
 	}
@@ -68,6 +145,13 @@ func (s *Server) autoEnrollAgent(
 			provided[:],
 			expected,
 		) != 1 {
+			recordEnrollment(
+				"warning",
+				"AGENT_ENROLLMENT_UNAUTHORIZED",
+				"The fleet enrollment credential was rejected.",
+				"",
+				nil,
+			)
 			writeAPIError(
 				response, request, http.StatusUnauthorized,
 				"AGENT_ENROLLMENT_UNAUTHORIZED",
@@ -82,6 +166,13 @@ func (s *Server) autoEnrollAgent(
 		ClaimToken string `json:"claim_token"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
+		recordEnrollment(
+			"warning",
+			"INVALID_AGENT_REQUEST",
+			"The Agent enrollment payload could not be decoded.",
+			"",
+			map[string]any{"error": err.Error()},
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"INVALID_REQUEST", "The request body is invalid.",
@@ -89,6 +180,13 @@ func (s *Server) autoEnrollAgent(
 		return
 	}
 	if len(strings.TrimSpace(input.Hostname)) > 255 {
+		recordEnrollment(
+			"warning",
+			"INVALID_AGENT_HOSTNAME",
+			"The Agent hostname exceeded the supported length.",
+			input.AgentID,
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"INVALID_AGENT", "hostname must not exceed 255 characters.",
@@ -100,51 +198,180 @@ func (s *Server) autoEnrollAgent(
 		input.AgentID,
 		input.Hostname,
 		input.ClaimToken,
+		sourceIP.String(),
 	)
 	switch {
 	case err == nil:
+		recordEnrollment(
+			"info",
+			"AGENT_ENROLLMENT_SUCCEEDED",
+			"The Agent was enrolled and its host asset was created.",
+			input.AgentID,
+			map[string]any{
+				"hostname":         strings.TrimSpace(input.Hostname),
+				"asset_state":      "discovered",
+				"effective_source": clientKey,
+			},
+		)
 		response.Header().Set("Cache-Control", "no-store")
 		writeJSON(response, http.StatusCreated, result)
 	case errors.Is(err, agents.ErrEnrollmentClaimMismatch):
+		recordEnrollment(
+			"warning",
+			"AGENT_ALREADY_CLAIMED",
+			"The Agent identifier is bound to another device claim.",
+			input.AgentID,
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusConflict,
 			"AGENT_ALREADY_CLAIMED",
 			"The agent identifier is already bound to another device claim.",
 		)
 	case errors.Is(err, agents.ErrBlocked):
+		recordEnrollment(
+			"warning",
+			"AGENT_BLOCKED",
+			"The blocked Agent attempted enrollment.",
+			input.AgentID,
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusForbidden,
 			"AGENT_BLOCKED", "The agent is blocked.",
 		)
 	case errors.Is(err, agents.ErrInvalidEnrollment):
+		recordEnrollment(
+			"warning",
+			"INVALID_AGENT_IDENTITY",
+			"The Agent enrollment identity is invalid.",
+			input.AgentID,
+			map[string]any{"error": err.Error()},
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"INVALID_AGENT", "The agent enrollment identity is invalid.",
 		)
 	default:
+		recordEnrollment(
+			"error",
+			"AGENT_ENROLLMENT_FAILED",
+			"The server failed while creating the Agent or host asset.",
+			input.AgentID,
+			map[string]any{"error": err.Error()},
+		)
 		s.internalError(response, request, err)
 	}
+}
+
+func resolveEnrollmentSourceIP(
+	request *http.Request,
+	trustedProxies []string,
+) (netip.Addr, error) {
+	peer, err := parseRemoteAddress(request.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if !networkRulesContain(trustedProxies, peer) {
+		return peer, nil
+	}
+	forwarded := strings.TrimSpace(request.Header.Get("X-Forwarded-For"))
+	if forwarded == "" {
+		realIP := strings.TrimSpace(request.Header.Get("X-Real-IP"))
+		if realIP == "" {
+			return peer, nil
+		}
+		address, err := netip.ParseAddr(realIP)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		return address.Unmap(), nil
+	}
+	parts := strings.Split(forwarded, ",")
+	chain := make([]netip.Addr, 0, len(parts))
+	for _, part := range parts {
+		address, err := netip.ParseAddr(strings.TrimSpace(part))
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		chain = append(chain, address.Unmap())
+	}
+	for index := len(chain) - 1; index >= 0; index-- {
+		if !networkRulesContain(trustedProxies, chain[index]) {
+			return chain[index], nil
+		}
+	}
+	return chain[0], nil
+}
+
+func parseRemoteAddress(value string) (netip.Addr, error) {
+	if addressPort, err := netip.ParseAddrPort(value); err == nil {
+		return addressPort.Addr().Unmap(), nil
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err == nil {
+		value = host
+	}
+	address, err := netip.ParseAddr(strings.Trim(value, "[]"))
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return address.Unmap(), nil
 }
 
 func (s *Server) receiveAgentEvent(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
+	diagnosticAgentID := strings.TrimSpace(
+		request.Header.Get("X-Invenqor-Agent-Id"),
+	)
+	diagnosticSourceIP := s.agentDiagnosticSourceIP(request)
+	recordEventFailure := func(code string, message string, err error) {
+		details := map[string]any{"path": request.URL.Path}
+		if err != nil {
+			details["error"] = err.Error()
+		}
+		s.recordDiagnostic(request, diagnostics.Event{
+			Level:     "warning",
+			Component: "agent_transport",
+			EventCode: code,
+			Message:   message,
+			AgentID:   diagnosticAgentID,
+			SourceIP:  diagnosticSourceIP,
+			Details:   details,
+		})
+	}
 	agent, err := s.authenticateAgent(request)
 	switch {
 	case errors.Is(err, agents.ErrUnauthorized):
+		recordEventFailure(
+			"AGENT_UNAUTHORIZED",
+			"The Agent device credential was rejected.",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusUnauthorized,
 			"AGENT_UNAUTHORIZED", "The agent credential is invalid.",
 		)
 		return
 	case errors.Is(err, agents.ErrBlocked):
+		recordEventFailure(
+			"AGENT_BLOCKED",
+			"A blocked Agent attempted to send inventory.",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusForbidden,
 			"AGENT_BLOCKED", "The agent is blocked.",
 		)
 		return
 	case err != nil:
+		recordEventFailure(
+			"AGENT_AUTHENTICATION_FAILED",
+			"The server could not authenticate the Agent.",
+			err,
+		)
 		context, cancel := context.WithTimeout(request.Context(), time.Second)
 		defer cancel()
 		if pingErr := s.database.Ping(context); pingErr != nil {
@@ -165,6 +392,11 @@ func (s *Server) receiveAgentEvent(
 		request.Header.Get("X-Invenqor-Event-Id"),
 	)
 	if headerAgentID == "" || headerEventID == "" {
+		recordEventFailure(
+			"MISSING_EVENT_IDENTITY",
+			"The Agent request omitted identity headers.",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"MISSING_EVENT_IDENTITY",
@@ -173,6 +405,11 @@ func (s *Server) receiveAgentEvent(
 		return
 	}
 	if headerAgentID != agent.AgentID {
+		recordEventFailure(
+			"AGENT_ID_MISMATCH",
+			"The authenticated Agent did not match the identity header.",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusForbidden,
 			"AGENT_ID_MISMATCH",
@@ -181,6 +418,11 @@ func (s *Server) receiveAgentEvent(
 		return
 	}
 	if !s.agentRateLimit.Allow(agent.ID) {
+		recordEventFailure(
+			"AGENT_RATE_LIMITED",
+			"The Agent event rate limit was exceeded.",
+			nil,
+		)
 		response.Header().Set("Retry-After", "60")
 		writeAPIError(
 			response, request, http.StatusTooManyRequests,
@@ -199,6 +441,7 @@ func (s *Server) receiveAgentEvent(
 			code = "EVENT_TOO_LARGE"
 			message = "The event exceeds the maximum allowed size."
 		}
+		recordEventFailure(code, message, err)
 		writeAPIError(response, request, http.StatusBadRequest, code, message)
 		return
 	}
@@ -210,6 +453,11 @@ func (s *Server) receiveAgentEvent(
 			"agent_id", agent.AgentID,
 			"reason", err.Error(),
 		)
+		recordEventFailure(
+			"INVALID_EVENT",
+			"The Agent event payload failed schema validation.",
+			err,
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"INVALID_EVENT", err.Error(),
@@ -218,6 +466,11 @@ func (s *Server) receiveAgentEvent(
 	}
 	if envelope.AgentID != headerAgentID ||
 		envelope.EventID != headerEventID {
+		recordEventFailure(
+			"EVENT_IDENTITY_MISMATCH",
+			"The Agent event headers did not match its body.",
+			nil,
+		)
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"EVENT_IDENTITY_MISMATCH",
@@ -244,12 +497,22 @@ func (s *Server) receiveAgentEvent(
 			"policy_version": result.PolicyVersion,
 		})
 	case errors.Is(err, ingest.ErrInProgress):
+		recordEventFailure(
+			"EVENT_IN_PROGRESS",
+			"The Agent event is already being processed by a Server Pod.",
+			err,
+		)
 		response.Header().Set("Retry-After", "1")
 		writeAPIError(
 			response, request, http.StatusConflict,
 			"EVENT_IN_PROGRESS", "The event is already being processed.",
 		)
 	default:
+		recordEventFailure(
+			"AGENT_EVENT_PROCESSING_FAILED",
+			"The server failed while processing the Agent event.",
+			err,
+		)
 		context, cancel := context.WithTimeout(request.Context(), time.Second)
 		pingErr := s.database.Ping(context)
 		cancel()
@@ -259,6 +522,19 @@ func (s *Server) receiveAgentEvent(
 		}
 		s.internalError(response, request, err)
 	}
+}
+
+func (s *Server) agentDiagnosticSourceIP(request *http.Request) string {
+	policy, _, err := s.loadAgentEnrollmentPolicy(request.Context())
+	if err == nil {
+		if address, resolveErr := resolveEnrollmentSourceIP(
+			request,
+			policy.TrustedProxies,
+		); resolveErr == nil {
+			return address.String()
+		}
+	}
+	return clientIP(request)
 }
 
 func (s *Server) spoolAgentEvent(

@@ -3,14 +3,21 @@ use crate::model::Envelope;
 use anyhow::{Context, Result};
 use reqwest::{Certificate, Client, Identity};
 use serde::Deserialize;
+use std::fmt;
 use std::time::Duration;
 
 #[derive(Debug)]
-pub struct AgentUnauthorized;
+pub struct AgentUnauthorized {
+    diagnostic: ServerRejection,
+}
 
-impl std::fmt::Display for AgentUnauthorized {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("server rejected the device credential")
+impl fmt::Display for AgentUnauthorized {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "server rejected the device credential: {}",
+            self.diagnostic
+        )
     }
 }
 
@@ -39,6 +46,48 @@ pub struct ServerAcknowledgement {
 struct EnrollmentResponse {
     token: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct APIErrorEnvelope {
+    error: APIErrorBody,
+    #[serde(default)]
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct APIErrorBody {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug)]
+struct ServerRejection {
+    operation: &'static str,
+    path: &'static str,
+    status: reqwest::StatusCode,
+    code: String,
+    message: String,
+    request_id: String,
+}
+
+impl fmt::Display for ServerRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} returned HTTP {} code={} path={}",
+            self.operation, self.status, self.code, self.path
+        )?;
+        if !self.request_id.is_empty() {
+            write!(formatter, " request_id={}", self.request_id)?;
+        }
+        if !self.message.is_empty() {
+            write!(formatter, " message={}", self.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ServerRejection {}
 
 impl Transport {
     pub fn new(config: &ServerConfig) -> Result<Option<Self>> {
@@ -100,15 +149,17 @@ impl Transport {
         if let Some(token) = &self.enrollment_token {
             request = request.header("X-Invenqor-Enrollment-Token", token);
         }
-        let response = request
-            .send()
-            .await
-            .context("request automatic enrollment")?;
+        let response = request.send().await.map_err(|error| {
+            transport_failure(error, "automatic enrollment", "/v1/agent/enroll")
+        })?;
         let status = response.status();
-        anyhow::ensure!(
-            status.is_success(),
-            "automatic enrollment returned HTTP {status}"
-        );
+        if !status.is_success() {
+            return Err(
+                server_rejection(response, "automatic enrollment", "/v1/agent/enroll")
+                    .await
+                    .into(),
+            );
+        }
         let enrollment: EnrollmentResponse = response
             .json()
             .await
@@ -131,12 +182,25 @@ impl Transport {
         if let Some(token) = &self.bearer_token {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.context("send event")?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| transport_failure(error, "inventory delivery", "/v1/agent/events"))?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(AgentUnauthorized.into());
+            return Err(AgentUnauthorized {
+                diagnostic: server_rejection(response, "inventory delivery", "/v1/agent/events")
+                    .await,
+            }
+            .into());
         }
-        anyhow::ensure!(status.is_success(), "server returned HTTP {status}");
+        if !status.is_success() {
+            return Err(
+                server_rejection(response, "inventory delivery", "/v1/agent/events")
+                    .await
+                    .into(),
+            );
+        }
         let acknowledgement: ServerAcknowledgement = response
             .json()
             .await
@@ -144,6 +208,50 @@ impl Transport {
         anyhow::ensure!(acknowledgement.accepted, "server did not accept event");
         Ok(acknowledgement)
     }
+}
+
+async fn server_rejection(
+    response: reqwest::Response,
+    operation: &'static str,
+    path: &'static str,
+) -> ServerRejection {
+    let status = response.status();
+    let bytes = response.bytes().await.unwrap_or_default();
+    let limited = &bytes[..bytes.len().min(4096)];
+    let parsed = serde_json::from_slice::<APIErrorEnvelope>(limited).ok();
+    ServerRejection {
+        operation,
+        path,
+        status,
+        code: parsed
+            .as_ref()
+            .map(|value| value.error.code.clone())
+            .unwrap_or_else(|| "UNSTRUCTURED_SERVER_ERROR".into()),
+        message: parsed
+            .as_ref()
+            .map(|value| value.error.message.clone())
+            .unwrap_or_default(),
+        request_id: parsed.map(|value| value.request_id).unwrap_or_default(),
+    }
+}
+
+fn transport_failure(
+    error: reqwest::Error,
+    operation: &'static str,
+    path: &'static str,
+) -> anyhow::Error {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "dns/tcp/tls-connect"
+    } else if error.is_redirect() {
+        "redirect"
+    } else if error.is_builder() {
+        "request-build"
+    } else {
+        "network"
+    };
+    anyhow::anyhow!("{operation} failed category={category} path={path}: {error}")
 }
 
 #[cfg(test)]
@@ -292,5 +400,44 @@ mod tests {
         assert!(request.starts_with("post /v1/agent/enroll "));
         assert!(!request.contains("x-invenqor-enrollment-token"));
         assert!(request.contains("\"hostname\":\"url-only-host\""));
+    }
+
+    #[tokio::test]
+    async fn enrollment_error_includes_server_code_and_request_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = br#"{"error":{"code":"AGENT_SOURCE_NOT_ALLOWED","message":"The Agent source IP is not permitted by the enrollment policy."},"request_id":"server-request-42"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let config = ServerConfig {
+            url: Some(format!("http://{address}")),
+            allow_insecure_http: true,
+            timeout_seconds: 2,
+            ..ServerConfig::default()
+        };
+        let transport = Transport::new(&config).unwrap().unwrap();
+        let error = transport
+            .enroll(
+                "00000000-0000-0000-0000-000000000001",
+                "blocked-host",
+                "ivq_ec_claim",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(error.contains("AGENT_SOURCE_NOT_ALLOWED"));
+        assert!(error.contains("request_id=server-request-42"));
+        assert!(error.contains("path=/v1/agent/enroll"));
     }
 }

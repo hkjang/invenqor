@@ -107,6 +107,11 @@ disabled_status=$(curl -sS -o "$work/disabled-enrollment.json" -w '%{http_code}'
   -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-disabled\",\"claim_token\":\"ivq_ec_$(printf 'a%.0s' {1..64})\"}" \
   "http://127.0.0.1:$port_b/v1/agent/enroll")
 test "$disabled_status" = 403
+disabled_request_id=$(jq -r .request_id "$work/disabled-enrollment.json")
+test -n "$disabled_request_id"
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port_a/api/v1/admin/diagnostics/logs?q=$disabled_request_id" |
+  jq -e '.items[] | select(.event_code == "AGENT_AUTO_ENROLLMENT_DISABLED")' >/dev/null
 
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -H 'Content-Type: application/json' -X PATCH \
@@ -117,6 +122,10 @@ curl -fsS -H 'Content-Type: application/json' \
   -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-open\",\"claim_token\":\"ivq_ec_$(printf 'b%.0s' {1..64})\"}" \
   "http://127.0.0.1:$port_a/v1/agent/enroll" |
   jq -e '.token | startswith("ivq_at_")' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port_b/api/v1/admin/diagnostics/logs" |
+  jq -e '(.instances | length) >= 2 and
+    (.items | map(.event_code) | index("AGENT_ENROLLMENT_SUCCEEDED") != null)' >/dev/null
 
 registration_response=$(curl -fsS -b "$work/cookies" \
   -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
@@ -149,7 +158,7 @@ curl -fsS -H "Authorization: Bearer $api_key_secret" \
 
 migrations=$(docker exec "$postgres" psql -U invenqor -d invenqor -Atc \
   'SELECT COUNT(*) FROM schema_migrations')
-test "$migrations" -ge 3
+test "$migrations" -ge 4
 test "$(docker inspect -f '{{.State.Running}}' "$pod_a")" = true
 test "$(docker inspect -f '{{.State.Running}}' "$pod_b")" = true
-echo "E2E PASS: two server pods shared authentication and live Agent enrollment policy"
+echo "E2E PASS: two server pods shared authentication, Agent policy, assets, and diagnostics"

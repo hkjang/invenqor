@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -164,6 +165,7 @@ func (s *Service) AutoEnroll(
 	agentID string,
 	hostname string,
 	claimToken string,
+	sourceIP string,
 ) (ProvisionResult, error) {
 	if _, err := uuid.Parse(agentID); err != nil {
 		return ProvisionResult{}, fmt.Errorf("%w: agent_id must be a UUID", ErrInvalidEnrollment)
@@ -274,13 +276,25 @@ func (s *Service) AutoEnroll(
 	); err != nil {
 		return ProvisionResult{}, fmt.Errorf("store device bearer credential: %w", err)
 	}
+	if err := s.ensureEnrollmentAsset(
+		ctx,
+		tx,
+		internalID,
+		agentID,
+		strings.TrimSpace(hostname),
+		strings.TrimSpace(sourceIP),
+		now,
+	); err != nil {
+		return ProvisionResult{}, err
+	}
 	if err := s.audit.Record(ctx, tx, audit.Entry{
 		ActorType: "agent", ActorID: internalID, Action: "agent.auto_enroll",
 		ResourceType: "agent", ResourceID: internalID, Result: "success",
 		After: map[string]any{
-			"agent_id": agentID,
-			"hostname": strings.TrimSpace(hostname),
-			"auth":     "auto_bearer",
+			"agent_id":  agentID,
+			"hostname":  strings.TrimSpace(hostname),
+			"auth":      "auto_bearer",
+			"source_ip": strings.TrimSpace(sourceIP),
 		},
 	}); err != nil {
 		return ProvisionResult{}, err
@@ -294,6 +308,138 @@ func (s *Service) AutoEnroll(
 		return ProvisionResult{}, err
 	}
 	return ProvisionResult{Agent: agent, Token: bearer}, nil
+}
+
+func (s *Service) ensureEnrollmentAsset(
+	ctx context.Context,
+	tx *sql.Tx,
+	internalAgentID string,
+	externalAgentID string,
+	hostname string,
+	sourceIP string,
+	now time.Time,
+) error {
+	displayName := hostname
+	if displayName == "" {
+		displayName = sourceIP
+	}
+	if displayName == "" {
+		displayName = "agent-" + externalAgentID[:8]
+	}
+	payload, err := json.Marshal(map[string]any{
+		"agent_id":      externalAgentID,
+		"enrollment_ip": sourceIP,
+		"hostname":      hostname,
+		"state":         "awaiting_inventory",
+	})
+	if err != nil {
+		return fmt.Errorf("encode enrollment asset: %w", err)
+	}
+
+	var sourceID, assetID string
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT id, asset_id FROM asset_sources
+		 WHERE agent_id = $1 AND category = 'enrollment'
+		   AND source_asset_id = $2`,
+		internalAgentID,
+		externalAgentID,
+	).Scan(&sourceID, &assetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(
+			ctx,
+			`SELECT asset_id FROM asset_sources
+			 WHERE agent_id = $1 AND category = 'system'
+			   AND deleted_at IS NULL
+			 ORDER BY first_seen_at LIMIT 1`,
+			internalAgentID,
+		).Scan(&assetID)
+		if errors.Is(err, sql.ErrNoRows) {
+			assetID = uuid.NewString()
+			if _, err = tx.ExecContext(
+				ctx,
+				`INSERT INTO assets(
+					id, asset_key, name, type, status, confidence,
+					attributes_json, source, first_seen_at, last_seen_at,
+					created_at, updated_at
+				) VALUES (
+					$1, $2, $3, 'host', 'discovered', 0.8,
+					$4, 'agent_enrollment', $5, $5, $5, $5
+				)`,
+				assetID,
+				"agent:"+externalAgentID,
+				displayName,
+				string(payload),
+				now,
+			); err != nil {
+				return fmt.Errorf("create enrollment asset: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("find inventory asset for enrollment: %w", err)
+		}
+		sourceID = uuid.NewString()
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO asset_sources(
+				id, asset_id, agent_id, category, source_asset_id,
+				source_name, payload_json, collected_at, first_seen_at,
+				last_seen_at
+			) VALUES ($1, $2, $3, 'enrollment', $4, $5, $6, $7, $7, $7)`,
+			sourceID,
+			assetID,
+			internalAgentID,
+			externalAgentID,
+			sourceIP,
+			string(payload),
+			now,
+		); err != nil {
+			return fmt.Errorf("create enrollment asset source: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("find enrollment asset: %w", err)
+	} else {
+		if _, err = tx.ExecContext(
+			ctx,
+			`UPDATE asset_sources SET source_name=$1, payload_json=$2,
+			 collected_at=$3, last_seen_at=$3, deleted_at=NULL
+			 WHERE id=$4`,
+			sourceIP,
+			string(payload),
+			now,
+			sourceID,
+		); err != nil {
+			return fmt.Errorf("refresh enrollment asset source: %w", err)
+		}
+		if _, err = tx.ExecContext(
+			ctx,
+			`UPDATE assets SET
+				name=CASE WHEN status='discovered' THEN $1 ELSE name END,
+				last_seen_at=$2, updated_at=$2, deleted_at=NULL
+			 WHERE id=$3`,
+			displayName,
+			now,
+			assetID,
+		); err != nil {
+			return fmt.Errorf("refresh enrollment asset: %w", err)
+		}
+	}
+	if sourceIP != "" {
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO asset_identifiers(
+				id, asset_id, identifier_type, identifier_value,
+				source, confidence
+			) VALUES ($1, $2, 'ip', $3, 'agent_enrollment', 0.8)
+			ON CONFLICT(asset_id, identifier_type, identifier_value)
+			DO UPDATE SET source='agent_enrollment', confidence=0.8`,
+			uuid.NewString(),
+			assetID,
+			sourceIP,
+		); err != nil {
+			return fmt.Errorf("store enrollment IP identifier: %w", err)
+		}
+	}
+	return nil
 }
 
 // RotateBearer issues a replacement and leaves previous credentials valid only

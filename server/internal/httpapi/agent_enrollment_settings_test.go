@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -12,6 +13,100 @@ import (
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
+
+func TestEnrollmentNetworkPolicyAllowsCIDRAndRejectsSpoofedForwarding(
+	t *testing.T,
+) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+	otherPod := testServer(t, runtime)
+
+	saved := performAuthenticatedJSON(
+		t,
+		server,
+		http.MethodPatch,
+		"/api/v1/admin/settings/agent-enrollment",
+		map[string]any{
+			"mode":             "open",
+			"network_mode":     "allowlist",
+			"allowed_networks": []string{"203.0.113.0/24", "10.20.30.40"},
+			"trusted_proxies":  []string{"10.0.0.0/8"},
+			"reason":           "managed enrollment networks",
+		},
+		cookie,
+		csrf,
+	)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status = %d body = %s", saved.Code, saved.Body.String())
+	}
+
+	allowedID := uuid.NewString()
+	allowed := enrollTestAgentFrom(
+		t,
+		otherPod,
+		"10.1.2.3:42310",
+		"203.0.113.44",
+		allowedID,
+	)
+	if allowed.Code != http.StatusCreated {
+		t.Fatalf(
+			"trusted proxy enrollment status = %d body = %s",
+			allowed.Code,
+			allowed.Body.String(),
+		)
+	}
+	var identifier, status string
+	if err := runtime.DB().QueryRow(
+		`SELECT i.identifier_value,a.status
+		 FROM assets a
+		 JOIN asset_identifiers i ON i.asset_id=a.id
+		 WHERE a.asset_key=$1`,
+		"agent:"+allowedID,
+	).Scan(&identifier, &status); err != nil {
+		t.Fatal(err)
+	}
+	if identifier != "203.0.113.44" || status != "discovered" {
+		t.Fatalf("immediate asset identifier/status = %q/%q", identifier, status)
+	}
+
+	spoofed := enrollTestAgentFrom(
+		t,
+		otherPod,
+		"198.51.100.10:42310",
+		"203.0.113.45",
+		uuid.NewString(),
+	)
+	if spoofed.Code != http.StatusForbidden ||
+		!strings.Contains(spoofed.Body.String(), "AGENT_SOURCE_NOT_ALLOWED") {
+		t.Fatalf(
+			"spoofed forwarding status = %d body = %s",
+			spoofed.Code,
+			spoofed.Body.String(),
+		)
+	}
+
+	exact := enrollTestAgentFrom(
+		t,
+		server,
+		"10.20.30.40:55000",
+		"",
+		uuid.NewString(),
+	)
+	if exact.Code != http.StatusCreated {
+		t.Fatalf(
+			"exact IP enrollment status = %d body = %s",
+			exact.Code,
+			exact.Body.String(),
+		)
+	}
+}
 
 func TestAdminCanManageAgentEnrollmentPolicyAcrossServerInstances(
 	t *testing.T,
@@ -238,4 +333,35 @@ func enrollTestAgent(
 		},
 		headers,
 	)
+}
+
+func enrollTestAgentFrom(
+	t *testing.T,
+	server *Server,
+	remoteAddress string,
+	forwardedFor string,
+	agentID string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"agent_id":    agentID,
+		"hostname":    "network-enrolled-host",
+		"claim_token": "ivq_ec_" + strings.Repeat("b", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/agent/enroll",
+		bytes.NewReader(body),
+	)
+	request.RemoteAddr = remoteAddress
+	request.Header.Set("Content-Type", "application/json")
+	if forwardedFor != "" {
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
 }

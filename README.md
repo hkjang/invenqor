@@ -41,7 +41,16 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - PostgreSQL advisory migration lock과 공용 Secret을 사용하는 K8s 멀티 파드
 - 연결 테스트·암호화 저장을 제공하는 PostgreSQL 및 Keycloak OIDC 설정 화면
 - 재기동 없이 URL-only/Token 보호/차단을 전환하고 등록 Token을 발급·회전·
-  폐기하는 DB 기반 Agent 등록 설정 화면
+  폐기하며 IP/CIDR·신뢰 프록시를 통제하는 DB 기반 Agent 등록 설정 화면
+- 최초 Agent 접속 즉시 IP host 자산을 생성하고 첫 system inventory를 중복 없이
+  승격·병합하는 zero-touch 자산화
+- Keycloak URL·Realm·Client 정보만으로 Discovery, Callback/Logout URI,
+  표준 claim을 자동 구성하고 검증 후 활성화하는 빠른 연동
+- Agent와 Server가 오류 코드·request ID를 공유하고 모든 Server Pod의 진단을
+  공용 DB에서 검색하는 보존 제한 Server 로그 화면
+- 주 메뉴와 설정 하위 메뉴를 URL·사용자별 브라우저 상태에 동기화해 새로고침
+  후에도 유지하는 콘솔 탐색
+- 외부 HTTPS 443을 내부 단일 Service 7070으로 연결하는 선택적 Helm Ingress
 - 로컬/SSO 역할 원천 분리, 계정 잠금·세션 폐기와 안전장치를 갖춘 사용자 관리
 - 자산 최신성·Agent 건전성·수집 실패·7일 추이를 제공하는 운영 통계 화면
 - 자산·관계·병합/분리·Query·감사·키·설정 API를 실제로 연결한 관리 콘솔

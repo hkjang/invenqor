@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +13,87 @@ import (
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
+
+func TestKeycloakAutoConfigureDiscoversAndPersistsMinimumSettings(
+	t *testing.T,
+) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	var providerURL string
+	provider := httptest.NewTLSServer(http.HandlerFunc(
+		func(response http.ResponseWriter, request *http.Request) {
+			if request.URL.Path != "/realms/inventory/.well-known/openid-configuration" {
+				http.NotFound(response, request)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"issuer":                                providerURL + "/realms/inventory",
+				"authorization_endpoint":                providerURL + "/auth",
+				"token_endpoint":                        providerURL + "/token",
+				"jwks_uri":                              providerURL + "/jwks",
+				"response_types_supported":              []string{"code"},
+				"subject_types_supported":               []string{"public"},
+				"id_token_signing_alg_values_supported": []string{"RS256"},
+			})
+		},
+	))
+	defer provider.Close()
+	providerURL = provider.URL
+	caPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: provider.Certificate().Raw,
+	}))
+
+	response := performAuthenticatedJSON(
+		t,
+		server,
+		http.MethodPost,
+		"/api/v1/admin/settings/keycloak/auto-configure",
+		map[string]any{
+			"keycloak_url":    providerURL,
+			"realm":           "inventory",
+			"client_id":       "invenqor",
+			"client_secret":   "minimum-secret",
+			"application_url": "https://invenqor.example.test",
+			"private_ca_pem":  caPEM,
+			"reason":          "minimum setup",
+		},
+		cookie,
+		csrf,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"auto configure status = %d body = %s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	settings, err := server.oidcService.Settings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.Enabled ||
+		settings.EffectiveIssuer() != providerURL+"/realms/inventory" ||
+		settings.RedirectURI !=
+			"https://invenqor.example.test/api/v1/auth/keycloak/callback" ||
+		settings.RoleClaim != "realm_access.roles" ||
+		!settings.LastConnectionOK {
+		t.Fatalf("stored automatic settings = %#v", settings)
+	}
+	configured, err := server.oidcService.ClientSecretConfigured()
+	if err != nil || !configured {
+		t.Fatalf("client secret configured = %v, error = %v", configured, err)
+	}
+}
 
 func TestKeycloakSettingsNormalizeNullableCollections(t *testing.T) {
 	runtime, err := storage.Open(context.Background(), storage.Options{

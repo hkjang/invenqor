@@ -353,7 +353,7 @@ export function AgentsPage({
       <Panel title="서명된 Agent 업데이트" action="최대 128 MiB">
         <form className="compact-form update-form" onSubmit={publish}>
           <label>Artifact<input type="file" onChange={event => setFile(event.target.files?.[0] || null)} required/></label>
-          <label>버전<input value={version} onChange={event => setVersion(event.target.value)} placeholder="0.2.4" required/></label>
+          <label>버전<input value={version} onChange={event => setVersion(event.target.value)} placeholder="0.2.3" required/></label>
           <label>채널<select value={channel} onChange={event => setChannel(event.target.value)}><option>stable</option><option>beta</option></select></label>
           <label>아키텍처<select value={architecture} onChange={event => setArchitecture(event.target.value)}><option>x86_64</option><option>aarch64</option></select></label>
           <label className="wide">Ed25519 Signature (Base64)<textarea value={signature} onChange={event => setSignature(event.target.value)} required/></label>
@@ -460,6 +460,111 @@ export function AuditPage() {
           <pre>{pretty({before: item.before, after: item.after, metadata: item.metadata})}</pre>
         </div>
       </details>)}</div>
+    </Panel>
+  </section>;
+}
+
+export function ServerLogsPage() {
+  const [items, setItems] = React.useState<DiagnosticLog[]>([]);
+  const [instances, setInstances] = React.useState<string[]>([]);
+  const [retention, setRetention] = React.useState({days: 30, maximum_events: 10000});
+  const [query, setQuery] = React.useState("");
+  const [level, setLevel] = React.useState("");
+  const [component, setComponent] = React.useState("");
+  const [instance, setInstance] = React.useState("");
+  const [limit, setLimit] = React.useState(200);
+  const [autoRefresh, setAutoRefresh] = React.useState(true);
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(async () => {
+    const parameters = new URLSearchParams({limit: String(limit)});
+    if (query.trim()) parameters.set("q", query.trim());
+    if (level) parameters.set("level", level);
+    if (component) parameters.set("component", component);
+    if (instance) parameters.set("instance_id", instance);
+    try {
+      const value = await api<{
+        items: DiagnosticLog[];
+        instances: string[];
+        retention: {days: number; maximum_events: number};
+      }>(`/api/v1/admin/diagnostics/logs?${parameters}`);
+      setItems(value.items);
+      setInstances(value.instances);
+      setRetention(value.retention);
+      setError("");
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  }, [component, instance, level, limit, query]);
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, load]);
+  const errors = items.filter(item => item.level === "error").length;
+  const warnings = items.filter(item => item.level === "warning").length;
+  return <section>
+    <PageTitle
+      kicker="MULTI-POD DIAGNOSTICS"
+      title="Server 진단 로그"
+      subtitle="모든 Server Pod의 Agent 등록·전송 실패와 운영 오류를 공용 DB에서 request ID로 추적합니다."
+      action={<button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>}
+    />
+    <div className="status-grid diagnostic-summary">
+      <div><span>조회 이벤트</span><strong>{items.length}</strong></div>
+      <div><span>Error</span><strong>{errors}</strong></div>
+      <div><span>Warning</span><strong>{warnings}</strong></div>
+      <div><span>확인된 Pod</span><strong>{instances.length}</strong></div>
+    </div>
+    <div className="filter-bar diagnostic-filters">
+      <div className="search"><Search size={16}/><input value={query}
+        onChange={event => setQuery(event.target.value)}
+        onKeyDown={event => event.key === "Enter" && load()}
+        placeholder="request ID, Agent ID, 오류 코드, IP 검색"/></div>
+      <select value={level} onChange={event => setLevel(event.target.value)}>
+        <option value="">모든 수준</option><option value="error">Error</option>
+        <option value="warning">Warning</option><option value="info">Info</option>
+      </select>
+      <select value={component} onChange={event => setComponent(event.target.value)}>
+        <option value="">모든 구성요소</option>
+        <option value="agent_enrollment">Agent 등록</option>
+        <option value="agent_transport">Agent 전송</option>
+        <option value="http">Server HTTP</option>
+      </select>
+      <select value={instance} onChange={event => setInstance(event.target.value)}>
+        <option value="">모든 Pod</option>
+        {instances.map(value => <option value={value} key={value}>{value}</option>)}
+      </select>
+      <select value={limit} onChange={event => setLimit(Number(event.target.value))}>
+        <option value="100">100건</option><option value="200">200건</option>
+        <option value="500">500건</option>
+      </select>
+      <label className="auto-refresh"><input type="checkbox" checked={autoRefresh}
+        onChange={event => setAutoRefresh(event.target.checked)}/>15초 자동 갱신</label>
+    </div>
+    {error && <div className="error">{error}</div>}
+    <Panel title={`${items.length}개 진단 이벤트`} action={`보존 ${retention.days}일 · 최대 ${retention.maximum_events.toLocaleString()}건`}>
+      <div className="audit-table diagnostic-log-table">
+        {items.map(item => <details key={item.id}>
+          <summary>
+            <i className={item.level === "info" ? "ok" : "bad"}/>
+            <time>{formatDate(item.occurred_at)}</time>
+            <strong>{item.event_code}</strong>
+            <span>{item.instance_id} · {item.component}</span>
+            <Badge value={item.level}/>
+          </summary>
+          <div className="audit-detail">
+            <DataRow label="Message" value={item.message}/>
+            <DataRow label="Pod / Instance" value={item.instance_id}/>
+            <DataRow label="Request ID" value={item.request_id || "—"}/>
+            <DataRow label="Agent ID" value={item.agent_id || "—"}/>
+            <DataRow label="Source IP" value={item.source_ip || "—"}/>
+            <DataRow label="Component" value={item.component}/>
+            <pre>{pretty(item.details)}</pre>
+          </div>
+        </details>)}
+        {!items.length && <Empty icon={ShieldCheck} text="조건에 맞는 진단 이벤트가 없습니다."/>}
+      </div>
     </Panel>
   </section>;
 }
@@ -665,8 +770,8 @@ function Drawer({title, onClose, children}: {title: string; onClose: () => void;
     <div className="drawer-content">{children}</div></aside></div>;
 }
 function Badge({value}: {value: string}) {
-  return <span className={`badge ${["active", "success", "processed", "정상"].includes(value) ? "good" :
-    ["blocked", "failed", "deleted"].includes(value) ? "bad" : ""}`}>{value}</span>;
+  return <span className={`badge ${["active", "success", "processed", "정상", "info"].includes(value) ? "good" :
+    ["blocked", "failed", "deleted", "warning", "error"].includes(value) ? "bad" : ""}`}>{value}</span>;
 }
 function Empty({icon: Icon, text}: {icon: React.ElementType; text: string}) {
   return <div className="empty"><Icon/><p>{text}</p></div>;
@@ -689,6 +794,20 @@ type AuditEvent = {
   id: string; occurred_at: string; actor_type: string; actor_name: string; action: string;
   resource_type: string; resource_id?: string; request_id: string; source_ip: string;
   result: string; reason: string; before: unknown; after: unknown; metadata: unknown;
+};
+
+type DiagnosticLog = {
+  id: string;
+  occurred_at: string;
+  level: "info" | "warning" | "error";
+  component: string;
+  event_code: string;
+  message: string;
+  request_id: string;
+  instance_id: string;
+  agent_id: string;
+  source_ip: string;
+  details: Record<string, unknown>;
 };
 const pretty = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 const formatDate = (value?: string|null) => value

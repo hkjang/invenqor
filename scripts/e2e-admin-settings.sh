@@ -165,7 +165,10 @@ fi
 index=$(curl -fsS "http://127.0.0.1:$port/")
 printf '%s' "$index" | grep -q '<div id="root"></div>'
 asset_path=$(printf '%s' "$index" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p')
-curl -fsS "http://127.0.0.1:$port$asset_path" | grep -q 'Keycloak OIDC'
-curl -fsS "http://127.0.0.1:$port$asset_path" | grep -q 'Agent 자동 등록'
+curl -fsS "http://127.0.0.1:$port$asset_path" -o "$work/console.js"
+grep -q 'Keycloak OIDC' "$work/console.js"
+grep -q '최소 정보 빠른 연동' "$work/console.js"
+grep -q '자동 등록 허용 IP / CIDR' "$work/console.js"
+grep -q 'Server 진단 로그' "$work/console.js"
 
-echo "E2E PASS: PostgreSQL, bootstrap admin, user RBAC, Agent enrollment, Keycloak, and web console"
+echo "E2E PASS: PostgreSQL, bootstrap admin, RBAC, enrollment, Keycloak, diagnostics, and web console"

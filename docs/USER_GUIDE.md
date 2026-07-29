@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.2 · Server v0.2.4</p>
+    <p><strong>대상 버전</strong> Agent v0.2.3 · Server v0.2.5</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.2는 Server v0.2.4와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.3는 Server v0.2.5와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -105,8 +105,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -190,7 +190,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.2`입니다.
+예상 출력은 `invenqor-agent 0.2.3`입니다.
 
 ## 5. 최초 설정
 
@@ -400,6 +400,20 @@ sudo -u invenqor-agent \
 5. bearer token이 장비에 맞게 발급됐고 공백 없이 입력됐는지 확인합니다.
 6. 게이트웨이가 `{"accepted":true}` JSON을 반환하는지 관리자에게 확인합니다.
 
+Server가 요청을 거부하면 Agent 로그에는 다음처럼 HTTP 상태 외에 안전한 오류
+코드, API 경로와 request ID가 함께 표시됩니다.
+
+```text
+automatic enrollment returned HTTP 403 Forbidden
+code=AGENT_SOURCE_NOT_ALLOWED path=/v1/agent/enroll
+request_id=01J... message=The Agent source IP is not permitted...
+```
+
+`request_id` 전체를 관리자에게 전달하십시오. 관리자는 **Server 로그** 화면에서
+같은 ID를 검색해 요청을 처리한 Pod, 판정 IP, 정책 버전과 실패 단계를 확인할 수
+있습니다. Agent 로그나 문의 내용에 등록 Token, 장비 Token, Secret, 원문
+인벤토리를 붙이지 마십시오.
+
 ### 8.3 수집기 오류
 
 에이전트는 한 수집기가 실패해도 나머지 수집을 계속합니다. 권한, 오래된
@@ -497,10 +511,11 @@ Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO �
 | 자산 | 검색·필터·페이징, 등록·수정·삭제·복원, 상세·원천·이력·관계 조회 |
 | 자산 고급 작업 | 선택 자산 병합, 선택 수집 원천을 새 자산으로 분리, 관계 생성·삭제 |
 | Agent | 상태·최근 수집 시각 확인, 예외 장비 수동 등록, Token 회전, 차단·해제, mTLS 인증서 등록 |
-| 설정 → Agent 등록 | 신규 Agent의 URL-only 자동 등록, 등록 Token 보호 또는 등록 차단을 즉시 전환 |
+| 설정 → Agent 등록 | 신규 Agent의 URL-only/Token 모드, IP/CIDR allowlist와 신뢰 프록시를 즉시 전환 |
 | Query DSL | 실행 전 구문과 AST 검증, 제한 건수 내 결과 조회 |
 | API · MCP 키 | 최소권한 scope 선택, 이름 변경, scope 추가·삭제, 무중단 회전과 폐기 |
 | 감사 로그 | 행위자·대상·요청 ID·IP·사유와 변경 전후 데이터 확인 |
+| Server 로그 | 모든 Pod의 Agent 등록·전송 실패와 Server 오류를 request ID로 검색 |
 | 내 보안 | 로컬 비밀번호 변경, TOTP 설정·활성화·비활성화 |
 | 우측 상단 프로필 | 내 보안, 개인화, 로그아웃으로 이동 |
 | 개인화 | 테마, 화면 밀도, 시작 화면, 통계 갱신 주기, 모션 축소 |
@@ -510,7 +525,10 @@ Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO �
 페이지를 새로 열거나 Keycloak에서 돌아온 경우에도 브라우저는 현재 Session에
 연결된 CSRF 보호 값을 자동 사용하므로 사용자가 Token을 복사할 필요가 없습니다.
 개인화 설정은 사용자 ID별로 현재 브라우저에 저장되며 다른 사용자나 Server
-운영 설정에는 영향을 주지 않습니다.
+운영 설정에는 영향을 주지 않습니다. 현재 주 메뉴와 **설정**의 하위 메뉴는
+`#/settings/keycloak` 같은 URL과 사용자별 브라우저 상태에 함께 저장되어
+새로고침·뒤로가기·다시 로그인 후에도 유지됩니다. 권한이 회수된 메뉴나 잘못된
+URL은 접근 가능한 첫 화면으로 안전하게 복구됩니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

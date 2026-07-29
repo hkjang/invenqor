@@ -15,6 +15,7 @@ import (
 	"github.com/hkjang/invenqor/server/internal/apikeys"
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
+	"github.com/hkjang/invenqor/server/internal/diagnostics"
 	"github.com/hkjang/invenqor/server/internal/ingest"
 	"github.com/hkjang/invenqor/server/internal/spool"
 	"github.com/hkjang/invenqor/server/internal/storage"
@@ -47,6 +48,7 @@ type Server struct {
 	postgresEnvironmentOverride  bool
 	databaseSchema               string
 	databaseTimeout              time.Duration
+	diagnosticStore              *diagnostics.Store
 }
 
 type Options struct {
@@ -102,6 +104,7 @@ func New(options Options) *Server {
 		postgresEnvironmentOverride: options.PostgresEnvironmentOverride,
 		databaseSchema:              options.DatabaseSchema,
 		databaseTimeout:             options.DatabaseTimeout,
+		diagnosticStore:             diagnostics.NewStore(options.Database.DB()),
 	}
 	if options.AgentEnrollmentToken != "" {
 		server.agentEnrollmentTokenHash = sha256.Sum256(
@@ -133,7 +136,6 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.router.Use(middleware.RequestID)
-	s.router.Use(middleware.RealIP)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(s.securityHeaders)
 	s.router.Use(s.requestLog)
@@ -222,6 +224,10 @@ func (s *Server) routes() {
 		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
 			"/api/v1/admin/settings/keycloak/test",
 			s.testKeycloakSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/keycloak/auto-configure",
+			s.autoConfigureKeycloak,
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/settings/agent-enrollment",
@@ -331,6 +337,9 @@ func (s *Server) routes() {
 		)
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/audit", s.listAudit,
+		)
+		protected.With(s.requirePermission("audit.read")).Get(
+			"/api/v1/admin/diagnostics/logs", s.listDiagnosticLogs,
 		)
 		protected.With(s.requirePermission("users.read")).Get(
 			"/api/v1/admin/users", s.listUsers,

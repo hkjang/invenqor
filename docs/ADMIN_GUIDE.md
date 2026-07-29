@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.2 · Server v0.2.4</p>
+    <p><strong>대상 버전</strong> Agent v0.2.3 · Server v0.2.5</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.4 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.5 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -31,7 +31,7 @@
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.2를 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.3를 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +40,7 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.2에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.3에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -104,13 +104,13 @@ Linux 호스트
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.2는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.3는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -367,7 +367,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.2 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.3 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -433,7 +433,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.2에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.3에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -447,7 +447,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.2의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.3의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -588,7 +588,7 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.2
+User-Agent: invenqor-agent/0.2.3
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -618,7 +618,7 @@ Authorization: Bearer <token>   # 구성한 경우
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.2는 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.3는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -665,8 +665,9 @@ HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_ver
 ### 10.3 보안 경계와 잔여 위험
 
 - 아카이브 SHA-256은 제공하지만 서명, SBOM, provenance는 없음
-- URL-only 자동 등록은 7070에 도달 가능한 장비의 최초 등록을 허용하므로 신뢰
-  경계 밖에 노출할 때 enrollment token 보호 모드 또는 자동 등록 비활성화 필요
+- URL-only 자동 등록은 7070에 도달 가능한 장비의 최초 등록을 허용하므로
+  IP/CIDR allowlist로 신뢰 대역을 제한하고, 경계 밖에 노출할 때 enrollment
+  token 보호 모드 또는 자동 등록 비활성화 필요
 - 보호 모드의 enrollment token은 최초 등록 권한이므로 Secret 관리와 정기 회전 필요
 - 자동 등록 Agent는 장비 Token 무효화 시 device claim으로 자동 복구하지만,
   mTLS 인증서 발급·폐기는 조직 PKI 수명주기를 따름
@@ -721,6 +722,30 @@ sudo find /var/lib/invenqor-agent/queue -maxdepth 1 \
 - 이벤트 처리 지연 p50/p95/p99
 - 스키마 버전 분포
 
+### 11.1 멀티 Pod Server 진단 로그
+
+`audit.read` 권한 사용자는 **Server 로그**에서 모든 Pod가 공용 PostgreSQL에
+기록한 구조화 진단 이벤트를 조회합니다. Load Balancer가 어느 Pod로 화면 요청을
+보내도 결과는 같으며 다음 필터를 제공합니다.
+
+- `error`, `warning`, `info` 수준
+- Agent 등록, Agent 전송, Server HTTP 구성요소
+- Pod/instance ID
+- request ID, Agent ID, 오류 코드, source IP 검색
+- 15초 자동 갱신과 100/200/500건 조회
+
+DB에는 일반 성공 access log나 원문 인벤토리를 복제하지 않습니다. Agent
+등록 성공, 정책 거부, 인증·schema·처리 실패와 Server 내부 오류처럼 조사에
+필요한 이벤트만 저장합니다. Token, Secret, Authorization, URL password는
+기록 전에 redaction합니다. 기본 보존은 30일 또는 최신 10,000건 중 먼저
+도달하는 한도이며, 컨테이너 stdout 로그는 조직의 중앙 로그 플랫폼으로 별도
+수집하십시오.
+
+Agent가 출력한 `request_id=...`를 화면 검색창에 붙여 넣으면 같은 요청을 처리한
+Pod, 판정 source IP, 정책 버전과 실패 단계를 확인할 수 있습니다. Server API는
+`GET /api/v1/admin/diagnostics/logs`이며 `level`, `component`, `instance_id`,
+`q`, `limit` 필터를 지원합니다.
+
 ## 12. 운영 절차
 
 ### 12.1 설정 변경
@@ -742,6 +767,19 @@ Server의 Agent 등록 정책은 예외적으로 재기동 없이 적용됩니�
   `enrollment_token_file`에 배포한 뒤 등록
 - `disabled`: 신규 등록만 차단하고 기존 Agent 수집은 유지
 
+인증 모드와 별도로 **접속 IP 정책**을 `모든 IP` 또는 `지정 IP만 허용`으로
+설정합니다. 단일 주소와 CIDR을 한 줄에 하나씩 입력하고, Ingress/LB 뒤에서는
+해당 프록시의 실제 peer 주소만 **신뢰 프록시**에 추가합니다. 신뢰 프록시가
+아닌 접속의 `X-Forwarded-For`는 무시되므로 헤더 위조로 allowlist를 우회할 수
+없습니다. 정책 변경 후 허용 대역의 canary Agent와 허용되지 않은 대역을 각각
+시험하십시오.
+
+등록 성공 시 자산 목록에는 수집 주기를 기다리지 않고 `discovered` host와 접속
+IP 식별자가 나타납니다. 첫 system inventory 후 같은 자산이 `active`로
+승격되어야 합니다. 동일 Agent UUID에 host가 두 개 생기거나 `discovered`가
+계속 유지되면 Agent 이벤트 실패, claim 충돌, DB transaction 오류를 감사 로그와
+`agent_events.processing_error`에서 확인합니다.
+
 발급/회전 Token 원문은 한 번만 보이며 DB에는 SHA-256 비교값만 저장됩니다.
 Token 폐기 시 자동 등록이 활성 상태면 Open 모드가 됩니다. 정책과 버전은 공용
 DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉시 동일하게
@@ -750,7 +788,7 @@ DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉
 
 ### 12.2 업그레이드
 
-v0.2.2는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
+v0.2.3는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
 root helper 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에
 배포하지 않고 오프라인 환경에서 보관합니다. Agent는 더 높은 버전, 일치하는
 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이 모두 맞을 때만
@@ -902,6 +940,13 @@ client, Redirect URI, Scope, claim, Email domain, Role/Group mapping과 사설
 CA를 관리합니다. 연결 테스트는 실제 discovery와 TLS 신뢰를 확인하며 Client
 Secret은 Master Key로 암호화되어 구성 여부만 표시됩니다. Client Secret 없이
 SSO를 활성화하거나 존재하지 않는 내부 역할을 mapping하는 설정은 거부됩니다.
+
+일반 구성은 **최소 정보 빠른 연동**에서 Keycloak 주소, Realm, Client ID,
+Client Secret만 입력합니다. InvenQor 외부 주소는 현재 브라우저 origin으로
+채워지며 Ingress 외부 URL이 다를 때만 수정합니다. Server는 OIDC Discovery와
+TLS 신뢰를 먼저 확인하고 Callback/Logout URI, 표준 scope·claim을 생성한 뒤
+SSO를 활성화합니다. 기존 Secret이 있으면 재입력 없이 재검증할 수 있습니다.
+Discovery 실패 시 기존 운영 설정은 유지됩니다.
 
 권장 Keycloak claim 구성:
 

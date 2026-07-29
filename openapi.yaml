@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.4
+  version: 0.2.5
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
@@ -276,6 +276,15 @@ paths:
               required: [mode]
               properties:
                 mode: {type: string, enum: [disabled, open, token]}
+                network_mode: {type: string, enum: [any, allowlist], default: any}
+                allowed_networks:
+                  type: array
+                  maxItems: 256
+                  items: {type: string, description: Exact IPv4/IPv6 address or CIDR}
+                trusted_proxies:
+                  type: array
+                  maxItems: 64
+                  items: {type: string, description: Exact ingress/LB IP or CIDR}
                 reason: {type: string}
       responses:
         "200":
@@ -381,6 +390,64 @@ paths:
         "200": {description: Issuer discovery succeeded}
         "400": {description: Invalid OIDC settings}
         "502": {description: Discovery or TLS validation failed}
+  /api/v1/admin/settings/keycloak/auto-configure:
+    post:
+      operationId: autoConfigureKeycloak
+      summary: Discover, validate, save, and enable Keycloak from minimum inputs
+      description: Requires settings.write and X-CSRF-Token. Derives callback/logout URIs and standard scopes/claims, validates discovery and TLS first, then saves the OIDC settings and encrypted Client Secret.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keycloak_url, client_id, application_url]
+              properties:
+                keycloak_url: {type: string, format: uri}
+                realm: {type: string}
+                client_id: {type: string}
+                client_secret: {type: string, format: password, writeOnly: true}
+                application_url: {type: string, format: uri}
+                private_ca_pem: {type: string, writeOnly: true}
+                reason: {type: string}
+      responses:
+        "200": {description: Discovery succeeded and Keycloak login was enabled}
+        "400": {description: Missing Client Secret or invalid role mapping}
+        "502": {description: "Invalid URL, issuer discovery, or TLS trust failure"}
+  /api/v1/admin/diagnostics/logs:
+    get:
+      operationId: listDiagnosticLogs
+      summary: List bounded multi-pod Server and Agent connectivity diagnostics
+      description: Requires audit.read. Warning/error and Agent enrollment diagnostics are stored in the shared database for 30 days with a 10,000-event cap. Secrets and raw inventory are not retained.
+      security: [{session: []}]
+      parameters:
+        - {in: query, name: level, schema: {type: string, enum: [info, warning, error]}}
+        - {in: query, name: component, schema: {type: string}}
+        - {in: query, name: instance_id, schema: {type: string}}
+        - {in: query, name: q, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 500, default: 200}}
+      responses:
+        "200":
+          description: Diagnostics from every Server instance sharing the database
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, instances, retention, instance_id]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/DiagnosticLog"}
+                  instances: {type: array, items: {type: string}}
+                  retention:
+                    type: object
+                    properties:
+                      days: {type: integer, const: 30}
+                      maximum_events: {type: integer, const: 10000}
+                  instance_id: {type: string}
+        "401": {description: Authentication required}
+        "403": {description: audit.read permission required}
   /api/v1/admin/users:
     get:
       operationId: listUsers
@@ -511,15 +578,39 @@ components:
   schemas:
     AgentEnrollmentPolicy:
       type: object
-      required: [enabled, mode, token_configured, version, updated_at, updated_by, source]
+      required: [enabled, mode, token_configured, network_mode, allowed_networks, trusted_proxies, version, updated_at, updated_by, source]
       properties:
         enabled: {type: boolean}
         mode: {type: string, enum: [disabled, open, token]}
         token_configured: {type: boolean}
+        network_mode: {type: string, enum: [any, allowlist]}
+        allowed_networks:
+          type: array
+          maxItems: 256
+          items: {type: string}
+        trusted_proxies:
+          type: array
+          maxItems: 64
+          items: {type: string}
         version: {type: integer, minimum: 1}
         updated_at: {type: string, format: date-time}
         updated_by: {type: string}
         source: {type: string, const: database}
+    DiagnosticLog:
+      type: object
+      required: [id, occurred_at, level, component, event_code, message, request_id, instance_id, agent_id, source_ip, details]
+      properties:
+        id: {type: string, format: uuid}
+        occurred_at: {type: string, format: date-time}
+        level: {type: string, enum: [info, warning, error]}
+        component: {type: string}
+        event_code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
+        instance_id: {type: string}
+        agent_id: {type: string}
+        source_ip: {type: string}
+        details: {type: object, additionalProperties: true}
     OIDCSettings:
       type: object
       required:
