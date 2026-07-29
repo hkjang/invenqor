@@ -38,6 +38,9 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - rustls, 사설 CA, 장비별 mTLS PEM 또는 장비별 bearer token
 - Ed25519 서명·SHA-256·단계적 rollout 기반 Agent 자동 업데이트
 - PostgreSQL advisory migration lock과 공용 Secret을 사용하는 K8s 멀티 파드
+- 연결 테스트·암호화 저장을 제공하는 PostgreSQL 및 Keycloak OIDC 설정 화면
+- 로컬/SSO 역할 원천 분리, 계정 잠금·세션 폐기와 안전장치를 갖춘 사용자 관리
+- 로그인 화면과 콘솔 상단의 실행 Server 버전 표시
 - scoped API key 수명주기와 stateless Streamable HTTP MCP 자산 도구
 - systemd, SysV init, OpenRC 서비스 정의
 - x86_64와 aarch64용 musl 정적 빌드 구성

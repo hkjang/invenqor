@@ -146,18 +146,22 @@ func run(logger *slog.Logger) error {
 	}
 
 	api := httpapi.New(httpapi.Options{
-		Database:         database,
-		AuthService:      authService,
-		OIDCService:      oidcService,
-		TOTPService:      totpService,
-		BootstrapManager: bootstrapManager,
-		AgentService:     agentService,
-		IngestService:    ingestService,
-		Spool:            eventSpool,
-		BootstrapStore:   bootstrapStore,
-		UpdateStore:      updateStore,
-		APIKeyService:    apiKeyService,
-		Logger:           logger,
+		Database:                    database,
+		AuthService:                 authService,
+		OIDCService:                 oidcService,
+		TOTPService:                 totpService,
+		BootstrapManager:            bootstrapManager,
+		AgentService:                agentService,
+		IngestService:               ingestService,
+		Spool:                       eventSpool,
+		BootstrapStore:              bootstrapStore,
+		UpdateStore:                 updateStore,
+		APIKeyService:               apiKeyService,
+		Logger:                      logger,
+		CurrentPostgresDSN:          processConfig.PostgresDSN,
+		PostgresEnvironmentOverride: processConfig.PostgresDSNFromEnv,
+		DatabaseSchema:              processConfig.DatabaseSchema,
+		DatabaseTimeout:             processConfig.DatabaseTimeout,
 	})
 	go api.RunSpoolReplay(rootContext, 5*time.Second)
 	httpServer := &http.Server{

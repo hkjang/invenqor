@@ -80,6 +80,21 @@ func TestUnavailablePostgresFallsBackToSQLite(t *testing.T) {
 	}
 }
 
+func TestCheckPostgresRejectsMalformedDSNWithoutLeakingPassword(t *testing.T) {
+	secret := "check-do-not-expose"
+	failure := CheckPostgres(context.Background(), Options{
+		PostgresDSN: "postgres://user:" + secret + "@%zz/invenqor",
+		Timeout:     time.Second,
+	})
+	if failure == nil || failure.Code != FailureInvalidDSN {
+		t.Fatalf("CheckPostgres() failure = %#v, want INVALID_DSN", failure)
+	}
+	if strings.Contains(failure.Summary, secret) ||
+		strings.Contains(failure.Host, secret) {
+		t.Fatal("CheckPostgres() failure leaked the PostgreSQL password")
+	}
+}
+
 func TestSQLiteCreationFailureFailsStartup(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

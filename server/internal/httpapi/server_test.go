@@ -117,6 +117,7 @@ func testServer(t *testing.T, runtime *storage.Runtime) *Server {
 		OIDCService:      oidcService,
 		TOTPService:      totpService,
 		BootstrapManager: bootstrapManager,
+		BootstrapStore:   bootstrapStore,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 }

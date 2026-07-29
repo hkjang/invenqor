@@ -119,6 +119,50 @@ func TestLoadRejectsDirectAndFileBootstrapPasswords(t *testing.T) {
 	}
 }
 
+func TestLoadReadsPostgresDSNFromLowercaseEnvironment(t *testing.T) {
+	clearPostgresEnvironment(t)
+	t.Setenv(
+		"postgres_dsn",
+		"postgres://invenqor:secret@database.example/invenqor?sslmode=require",
+	)
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.PostgresDSN !=
+		"postgres://invenqor:secret@database.example/invenqor?sslmode=require" {
+		t.Fatal("Load() did not read the lowercase PostgreSQL DSN alias")
+	}
+	if !config.PostgresDSNFromEnv {
+		t.Fatal("Load() did not mark the PostgreSQL environment override")
+	}
+}
+
+func TestLoadPrefersCanonicalPostgresDSNEnvironment(t *testing.T) {
+	clearPostgresEnvironment(t)
+	t.Setenv("INVENQOR_POSTGRES_DSN", "postgres://canonical/invenqor")
+	t.Setenv("POSTGRES_DSN", "postgres://uppercase/invenqor")
+	t.Setenv("postgres_dsn", "postgres://lowercase/invenqor")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.PostgresDSN != "postgres://canonical/invenqor" {
+		t.Fatalf("PostgresDSN = %q, want canonical value", config.PostgresDSN)
+	}
+}
+
+func clearPostgresEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"INVENQOR_POSTGRES_DSN",
+		"POSTGRES_DSN",
+		"postgres_dsn",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
 func clearBootstrapEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{

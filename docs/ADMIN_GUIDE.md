@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.2</p>
+    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.3</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.2 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.3 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -872,6 +872,36 @@ sudo namei -l /var/lib/invenqor-agent
 - [ ] 업그레이드·롤백 시험
 - [ ] 제거 후 설정/상태 보존 동작 확인
 - [ ] 데이터 분류, 접근, 보존, 파기 승인
+
+## 16. 중앙 인증·사용자 운영
+
+Server 관리 콘솔의 **설정 → Keycloak**은 OIDC Issuer/Realm, confidential
+client, Redirect URI, Scope, claim, Email domain, Role/Group mapping과 사설
+CA를 관리합니다. 연결 테스트는 실제 discovery와 TLS 신뢰를 확인하며 Client
+Secret은 Master Key로 암호화되어 구성 여부만 표시됩니다. Client Secret 없이
+SSO를 활성화하거나 존재하지 않는 내부 역할을 mapping하는 설정은 거부됩니다.
+
+권장 Keycloak claim 구성:
+
+| 목적 | Claim 예시 | Invenqor 입력 |
+|---|---|---|
+| 사용자 ID | `preferred_username` | Username Claim |
+| Email | `email` | Email Claim |
+| 표시 이름 | `name` | Name Claim |
+| Realm 역할 | `realm_access.roles` | Role Claim |
+| 전체 그룹 경로 | `groups` | Group Claim |
+
+점으로 구분한 중첩 claim을 지원합니다. SSO 계정은 최초 로그인 때 생성되고 이후
+로그인마다 프로필과 Keycloak 원천 역할을 재동기화합니다. 로컬 관리자가 추가한
+역할은 `local`, IdP가 제공한 역할은 `keycloak` 원천으로 분리되어 IdP 역할 회수
+시 로컬 예외 권한까지 우연히 삭제되지 않습니다.
+
+**사용자** 화면에서는 로컬 계정 생성, 역할 관리, 비활성화, 잠금 해제, 비밀번호
+초기화와 삭제를 수행합니다. 자기 잠금과 마지막 Super Admin 제거는 서버가
+트랜잭션 안에서 차단합니다. 계정 비활성화·삭제는 Session과 API key를 함께
+폐기하며, SSO 계정 비밀번호/프로필은 Keycloak에서 관리합니다. 긴급 접근을 위해
+TOTP가 적용된 로컬 Super Admin 하나 이상을 Keycloak 장애 도메인 밖에
+보관하십시오.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

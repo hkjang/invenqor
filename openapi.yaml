@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.2
+  version: 0.2.3
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
@@ -74,7 +74,7 @@ paths:
               required: [artifact, version, channel, os, architecture, signature, rollout_percent]
               properties:
                 artifact: {type: string, format: binary}
-                version: {type: string, example: 0.2.2}
+                version: {type: string, example: 0.2.3}
                 channel: {type: string, enum: [stable, beta]}
                 os: {type: string, const: linux}
                 architecture: {type: string, enum: [x86_64, aarch64]}
@@ -178,6 +178,161 @@ paths:
       responses:
         "200": {description: Scope removed}
         "404": {description: Key or scope not found}
+  /api/v1/admin/settings/postgresql:
+    get:
+      operationId: getPostgresqlSettings
+      summary: Read safe PostgreSQL status without DSN credentials
+      security: [{session: []}]
+      responses:
+        "200": {description: Effective and saved connection summaries}
+        "401": {description: Authentication required}
+    patch:
+      operationId: updatePostgresqlSettings
+      summary: Test and encrypt a PostgreSQL DSN for restart-time application
+      description: Requires settings.write and X-CSRF-Token. Environment variables take precedence.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dsn]
+              properties:
+                dsn: {type: string, format: password, writeOnly: true}
+                reason: {type: string}
+      responses:
+        "200": {description: Connection tested and encrypted setting saved}
+        "400": {description: Invalid DSN}
+        "502": {description: PostgreSQL connection failed}
+  /api/v1/admin/settings/postgresql/test:
+    post:
+      operationId: testPostgresqlSettings
+      summary: Test a PostgreSQL DSN without saving or migrating
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dsn]
+              properties:
+                dsn: {type: string, format: password, writeOnly: true}
+      responses:
+        "200": {description: Connection succeeded}
+        "400": {description: Invalid DSN}
+        "502": {description: Connection failed without credential disclosure}
+  /api/v1/admin/settings/keycloak:
+    get:
+      operationId: getKeycloakSettings
+      summary: Read OIDC settings and Client Secret configured state
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Keycloak settings; secret value is never returned
+        "401": {description: Authentication required}
+    patch:
+      operationId: updateKeycloakSettings
+      summary: Validate and save Keycloak OIDC settings
+      description: Requires settings.write and X-CSRF-Token. Applies to new logins.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings: {$ref: "#/components/schemas/OIDCSettings"}
+                client_secret: {type: string, format: password, writeOnly: true}
+                reason: {type: string}
+      responses:
+        "200": {description: Saved}
+        "400": {description: "Invalid setting, missing secret, or unknown mapped role"}
+  /api/v1/admin/settings/keycloak/test:
+    post:
+      operationId: testKeycloakSettings
+      summary: Validate OIDC discovery and TLS/Private CA trust without saving
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings: {$ref: "#/components/schemas/OIDCSettings"}
+      responses:
+        "200": {description: Issuer discovery succeeded}
+        "400": {description: Invalid OIDC settings}
+        "502": {description: Discovery or TLS validation failed}
+  /api/v1/admin/users:
+    get:
+      operationId: listUsers
+      summary: List safe user profiles and local/Keycloak role sources
+      security: [{session: []}]
+      responses:
+        "200": {description: User list}
+        "401": {description: Authentication required}
+    post:
+      operationId: createUser
+      summary: Create an active local user with Argon2id credentials
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/UserCreate"}
+      responses:
+        "201": {description: User created}
+        "400": {description: "Invalid profile, password, or role"}
+        "409": {description: Username already exists}
+  /api/v1/admin/roles:
+    get:
+      operationId: listRoles
+      summary: List role definitions and permissions
+      security: [{session: []}]
+      responses:
+        "200": {description: Role catalog}
+        "401": {description: Authentication required}
+  /api/v1/admin/users/{userId}:
+    patch:
+      operationId: updateUser
+      summary: Update profile, active state, or locally managed roles
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/UserId"}]
+      responses:
+        "200": {description: Updated; deactivation revokes sessions and API keys}
+        "409": {description: Self-lockout or last Super Admin protection}
+    delete:
+      operationId: deleteUser
+      summary: Soft-delete a user and revoke all access
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/UserId"}]
+      responses:
+        "204": {description: Deleted}
+        "409": {description: Self-delete or last Super Admin protection}
+  /api/v1/admin/users/{userId}/password:
+    post:
+      operationId: resetUserPassword
+      summary: Replace a local password and revoke existing sessions
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/UserId"}]
+      responses:
+        "200": {description: Password reset}
+        "409": {description: Password is managed by Keycloak}
+  /api/v1/admin/users/{userId}/unlock:
+    post:
+      operationId: unlockUser
+      summary: Clear local login failures and lock timeout
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/UserId"}]
+      responses:
+        "200": {description: Unlocked}
+        "404": {description: User not found}
   /api/v1/external/assets:
     get:
       operationId: externalListAssets
@@ -230,7 +385,49 @@ components:
     externalBearer: {type: http, scheme: bearer, bearerFormat: Invenqor scoped API key}
   parameters:
     KeyId: {in: path, name: keyId, required: true, schema: {type: string, format: uuid}}
+    UserId: {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
   schemas:
+    OIDCSettings:
+      type: object
+      required:
+        - enabled
+        - issuer_url
+        - client_id
+        - redirect_uri
+        - scopes
+        - username_claim
+        - role_mappings
+        - group_mappings
+        - auto_create_users
+      properties:
+        enabled: {type: boolean}
+        issuer_url: {type: string, format: uri}
+        realm: {type: string}
+        client_id: {type: string}
+        redirect_uri: {type: string, format: uri}
+        logout_redirect_uri: {type: string, format: uri}
+        scopes: {type: array, items: {type: string}, example: [openid, profile, email]}
+        username_claim: {type: string, example: preferred_username}
+        email_claim: {type: string, example: email}
+        name_claim: {type: string, example: name}
+        role_claim: {type: string, example: realm_access.roles}
+        group_claim: {type: string, example: groups}
+        role_mappings: {type: object, additionalProperties: {type: string}}
+        group_mappings: {type: object, additionalProperties: {type: string}}
+        auto_create_users: {type: boolean}
+        default_role: {type: string, example: viewer}
+        allowed_email_domains: {type: array, items: {type: string}}
+        private_ca_pem: {type: string, writeOnly: true}
+    UserCreate:
+      type: object
+      required: [username, password, roles]
+      properties:
+        username: {type: string}
+        display_name: {type: string}
+        email: {type: string, format: email}
+        password: {type: string, format: password, writeOnly: true}
+        roles: {type: array, minItems: 1, items: {type: string}}
+        reason: {type: string}
     Envelope:
       type: object
       required: [schema_version, event_id, agent_id, created_at, kind, snapshot_hash]

@@ -30,6 +30,9 @@ var (
 	ErrOIDCDomain       = errors.New("OIDC email domain is not allowed")
 	ErrOIDCProvisioning = errors.New("OIDC user provisioning is disabled")
 	ErrOIDCUsername     = errors.New("OIDC response has no usable username")
+	ErrOIDCUserInactive = errors.New("Keycloak-linked user is inactive")
+	ErrOIDCSecret       = errors.New("Keycloak client secret is required")
+	ErrOIDCRole         = errors.New("Keycloak role mapping references an unknown role")
 )
 
 const keycloakSettingKey = "auth.keycloak"
@@ -93,11 +96,24 @@ func (settings OIDCSettings) Validate() error {
 		return errors.New("Keycloak client ID is required")
 	}
 	redirect, err := url.Parse(settings.RedirectURI)
-	if err != nil || redirect.Scheme == "" || redirect.Host == "" {
+	if err != nil ||
+		!containsString([]string{"https", "http"}, redirect.Scheme) ||
+		redirect.Host == "" {
 		return errors.New("Keycloak redirect URI is invalid")
+	}
+	if strings.TrimSpace(settings.LogoutRedirectURI) != "" {
+		logoutRedirect, logoutErr := url.Parse(settings.LogoutRedirectURI)
+		if logoutErr != nil ||
+			!containsString([]string{"https", "http"}, logoutRedirect.Scheme) ||
+			logoutRedirect.Host == "" {
+			return errors.New("Keycloak logout redirect URI is invalid")
+		}
 	}
 	if settings.UsernameClaim == "" {
 		return errors.New("Keycloak username claim is required")
+	}
+	if len(settings.AllowedEmailDomains) > 0 && strings.TrimSpace(settings.EmailClaim) == "" {
+		return errors.New("Keycloak email claim is required when domain filtering is enabled")
 	}
 	if len(settings.Scopes) == 0 || !containsString(settings.Scopes, oidc.ScopeOpenID) {
 		return errors.New("Keycloak scopes must include openid")
@@ -105,6 +121,28 @@ func (settings OIDCSettings) Validate() error {
 	for _, domain := range settings.AllowedEmailDomains {
 		if strings.ContainsAny(domain, "@/ ") || strings.TrimSpace(domain) == "" {
 			return errors.New("allowed email domain is invalid")
+		}
+	}
+	if len(settings.RoleMappings) > 0 && strings.TrimSpace(settings.RoleClaim) == "" {
+		return errors.New("Keycloak role claim is required when role mappings are configured")
+	}
+	if len(settings.GroupMappings) > 0 && strings.TrimSpace(settings.GroupClaim) == "" {
+		return errors.New("Keycloak group claim is required when group mappings are configured")
+	}
+	for external, internal := range settings.RoleMappings {
+		if strings.TrimSpace(external) == "" || strings.TrimSpace(internal) == "" {
+			return errors.New("Keycloak role mapping contains an empty value")
+		}
+	}
+	for external, internal := range settings.GroupMappings {
+		if strings.TrimSpace(external) == "" || strings.TrimSpace(internal) == "" {
+			return errors.New("Keycloak group mapping contains an empty value")
+		}
+	}
+	if strings.TrimSpace(settings.PrivateCAPEM) != "" {
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM([]byte(settings.PrivateCAPEM)) {
+			return errors.New("Keycloak private CA PEM is invalid")
 		}
 	}
 	return nil
@@ -179,11 +217,22 @@ func (service *OIDCService) SaveSettings(
 	if err := settings.Validate(); err != nil {
 		return err
 	}
-	if clientSecret != nil {
-		values, err := service.bootstrapStore.Load()
-		if err != nil {
-			return err
+	if err := service.validateRoleMappings(ctx, settings); err != nil {
+		return err
+	}
+	values, err := service.bootstrapStore.Load()
+	if err != nil {
+		return err
+	}
+	if settings.Enabled {
+		if clientSecret == nil && strings.TrimSpace(values.KeycloakClientSecret) == "" {
+			return ErrOIDCSecret
 		}
+		if clientSecret != nil && strings.TrimSpace(*clientSecret) == "" {
+			return ErrOIDCSecret
+		}
+	}
+	if clientSecret != nil {
 		values.KeycloakClientSecret = *clientSecret
 		if err := service.bootstrapStore.Save(values); err != nil {
 			return err
@@ -246,12 +295,84 @@ func (service *OIDCService) TestConnection(
 	if err := settings.Validate(); err != nil {
 		return err
 	}
+	if err := service.validateRoleMappings(ctx, settings); err != nil {
+		return err
+	}
 	oidcContext, err := oidcHTTPContext(ctx, settings.PrivateCAPEM)
 	if err != nil {
 		return err
 	}
 	if _, err := oidc.NewProvider(oidcContext, settings.EffectiveIssuer()); err != nil {
 		return fmt.Errorf("discover Keycloak issuer: %w", err)
+	}
+	return nil
+}
+
+func (service *OIDCService) LogoutURL(
+	ctx context.Context,
+	userID string,
+) (string, error) {
+	settings, err := service.Settings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(settings.LogoutRedirectURI) == "" ||
+		strings.TrimSpace(settings.ClientID) == "" ||
+		strings.TrimSpace(settings.EffectiveIssuer()) == "" {
+		return "", nil
+	}
+	var linked int
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM external_identities
+		  WHERE user_id=$1 AND provider='keycloak'`,
+		userID,
+	).Scan(&linked); err != nil {
+		return "", fmt.Errorf("check Keycloak identity for logout: %w", err)
+	}
+	if linked == 0 {
+		return "", nil
+	}
+	endpoint, err := url.Parse(
+		strings.TrimRight(settings.EffectiveIssuer(), "/") +
+			"/protocol/openid-connect/logout",
+	)
+	if err != nil {
+		return "", fmt.Errorf("construct Keycloak logout URL: %w", err)
+	}
+	query := endpoint.Query()
+	query.Set("client_id", settings.ClientID)
+	query.Set("post_logout_redirect_uri", settings.LogoutRedirectURI)
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
+func (service *OIDCService) validateRoleMappings(
+	ctx context.Context,
+	settings OIDCSettings,
+) error {
+	names := map[string]struct{}{}
+	if role := strings.TrimSpace(settings.DefaultRole); role != "" {
+		names[role] = struct{}{}
+	}
+	for _, role := range settings.RoleMappings {
+		names[strings.TrimSpace(role)] = struct{}{}
+	}
+	for _, role := range settings.GroupMappings {
+		names[strings.TrimSpace(role)] = struct{}{}
+	}
+	for name := range names {
+		var count int
+		if err := service.db.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM roles WHERE name=$1",
+			name,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("validate Keycloak role mapping: %w", err)
+		}
+		if count != 1 {
+			return fmt.Errorf("%w: %s", ErrOIDCRole, name)
+		}
 	}
 	return nil
 }
@@ -486,26 +607,84 @@ func (service *OIDCService) provisionUser(
 	claims map[string]any,
 ) (User, error) {
 	var user User
+	var active, notDeleted bool
 	err := service.db.QueryRowContext(
 		ctx,
-		`SELECT u.id, u.username, u.display_name, u.email, u.super_admin
+		`SELECT u.id, u.username, u.display_name, u.email, u.super_admin,
+		        u.active, CASE WHEN u.deleted_at IS NULL THEN TRUE ELSE FALSE END
 		 FROM users u
 		 JOIN external_identities e ON e.user_id = u.id
-		 WHERE e.provider = 'keycloak' AND e.subject = $1
-		   AND u.active = TRUE AND u.deleted_at IS NULL`,
+		 WHERE e.provider = 'keycloak' AND e.subject = $1`,
 		subject,
-	).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Email, &user.SuperAdmin)
+	).Scan(
+		&user.ID,
+		&user.Username,
+		&user.DisplayName,
+		&user.Email,
+		&user.SuperAdmin,
+		&active,
+		&notDeleted,
+	)
 	if err == nil {
+		if !active || !notDeleted {
+			return User{}, ErrOIDCUserInactive
+		}
+		email := claimString(claims, settings.EmailClaim)
+		if !allowedEmail(email, settings.AllowedEmailDomains) {
+			return User{}, ErrOIDCDomain
+		}
+		if email == "" {
+			email = user.Email
+		}
+		displayName := claimString(claims, settings.NameClaim)
+		if displayName == "" {
+			displayName = user.DisplayName
+		}
 		claimsJSON, _ := json.Marshal(claims)
-		_, updateErr := service.db.ExecContext(
+		transaction, beginErr := service.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return User{}, fmt.Errorf("begin Keycloak user synchronization: %w", beginErr)
+		}
+		defer transaction.Rollback()
+		if _, updateErr := transaction.ExecContext(
 			ctx,
 			`UPDATE external_identities
 			 SET claims_json = $1, last_login_at = CURRENT_TIMESTAMP
 			 WHERE provider = 'keycloak' AND subject = $2`,
 			string(claimsJSON),
 			subject,
+		); updateErr != nil {
+			return User{}, fmt.Errorf("update Keycloak identity: %w", updateErr)
+		}
+		superAdmin, syncErr := replaceKeycloakRoles(
+			ctx,
+			transaction,
+			user.ID,
+			mappedRoles(settings, claims),
 		)
-		return user, updateErr
+		if syncErr != nil {
+			return User{}, syncErr
+		}
+		if _, updateErr := transaction.ExecContext(
+			ctx,
+			`UPDATE users
+			    SET display_name=$1,email=$2,super_admin=$3,
+			        updated_at=CURRENT_TIMESTAMP
+			  WHERE id=$4`,
+			displayName,
+			email,
+			superAdmin,
+			user.ID,
+		); updateErr != nil {
+			return User{}, fmt.Errorf("synchronize Keycloak user profile: %w", updateErr)
+		}
+		if commitErr := transaction.Commit(); commitErr != nil {
+			return User{}, fmt.Errorf("commit Keycloak user synchronization: %w", commitErr)
+		}
+		user.DisplayName = displayName
+		user.Email = email
+		user.SuperAdmin = superAdmin
+		return user, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return User{}, fmt.Errorf("lookup Keycloak identity: %w", err)
@@ -561,33 +740,71 @@ func (service *OIDCService) provisionUser(
 	); err != nil {
 		return User{}, fmt.Errorf("link Keycloak identity: %w", err)
 	}
-	roleNames := mappedRoles(settings, claims)
-	for _, roleName := range roleNames {
-		var roleID string
-		if err := transaction.QueryRowContext(
-			ctx,
-			"SELECT id FROM roles WHERE name = $1",
-			roleName,
-		).Scan(&roleID); errors.Is(err, sql.ErrNoRows) {
-			continue
-		} else if err != nil {
-			return User{}, fmt.Errorf("resolve Keycloak role mapping: %w", err)
-		}
-		if _, err := transaction.ExecContext(
-			ctx,
-			`INSERT INTO user_roles(user_id, role_id, source)
-			 VALUES ($1, $2, 'keycloak')
-			 ON CONFLICT (user_id, role_id, source) DO NOTHING`,
-			user.ID,
-			roleID,
-		); err != nil {
-			return User{}, fmt.Errorf("grant mapped Keycloak role: %w", err)
-		}
+	superAdmin, err := replaceKeycloakRoles(
+		ctx,
+		transaction,
+		user.ID,
+		mappedRoles(settings, claims),
+	)
+	if err != nil {
+		return User{}, err
 	}
+	if _, err := transaction.ExecContext(
+		ctx,
+		"UPDATE users SET super_admin=$1 WHERE id=$2",
+		superAdmin,
+		user.ID,
+	); err != nil {
+		return User{}, fmt.Errorf("synchronize Keycloak super administrator flag: %w", err)
+	}
+	user.SuperAdmin = superAdmin
 	if err := transaction.Commit(); err != nil {
 		return User{}, fmt.Errorf("commit Keycloak user provisioning: %w", err)
 	}
 	return user, nil
+}
+
+func replaceKeycloakRoles(
+	ctx context.Context,
+	transaction *sql.Tx,
+	userID string,
+	roleNames []string,
+) (bool, error) {
+	if _, err := transaction.ExecContext(
+		ctx,
+		"DELETE FROM user_roles WHERE user_id=$1 AND source='keycloak'",
+		userID,
+	); err != nil {
+		return false, fmt.Errorf("clear Keycloak role grants: %w", err)
+	}
+	for _, roleName := range roleNames {
+		result, err := transaction.ExecContext(
+			ctx,
+			`INSERT INTO user_roles(user_id, role_id, source)
+			 SELECT $1,id,'keycloak' FROM roles WHERE name=$2
+			 ON CONFLICT (user_id, role_id, source) DO NOTHING`,
+			userID,
+			roleName,
+		)
+		if err != nil {
+			return false, fmt.Errorf("grant mapped Keycloak role: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return false, fmt.Errorf("%w: %s", ErrOIDCRole, roleName)
+		}
+	}
+	var superAdmin bool
+	if err := transaction.QueryRowContext(
+		ctx,
+		`SELECT CASE WHEN EXISTS(
+		    SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
+		     WHERE ur.user_id=$1 AND r.name='super_admin'
+		  ) THEN TRUE ELSE FALSE END`,
+		userID,
+	).Scan(&superAdmin); err != nil {
+		return false, fmt.Errorf("resolve super administrator role: %w", err)
+	}
+	return superAdmin, nil
 }
 
 func oidcHTTPContext(ctx context.Context, privateCAPEM string) (context.Context, error) {
@@ -639,12 +856,12 @@ func maskKeycloakSettings(value any) any {
 }
 
 func claimString(claims map[string]any, name string) string {
-	value, _ := claims[name].(string)
+	value, _ := claimValue(claims, name).(string)
 	return strings.TrimSpace(value)
 }
 
 func claimStrings(claims map[string]any, name string) []string {
-	switch value := claims[name].(type) {
+	switch value := claimValue(claims, name).(type) {
 	case string:
 		return []string{value}
 	case []any:
@@ -660,6 +877,21 @@ func claimStrings(claims map[string]any, name string) []string {
 	default:
 		return nil
 	}
+}
+
+func claimValue(claims map[string]any, name string) any {
+	var value any = claims
+	for _, component := range strings.Split(name, ".") {
+		current, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		value, ok = current[component]
+		if !ok {
+			return nil
+		}
+	}
+	return value
 }
 
 func mappedRoles(settings OIDCSettings, claims map[string]any) []string {

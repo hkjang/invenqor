@@ -3,27 +3,25 @@ import { createRoot } from "react-dom/client";
 import {
   Activity, Boxes, ChevronRight, Database, FileSearch, LayoutDashboard,
   Copy, KeyRound, LogOut, Menu, RefreshCw, Search, Settings, ShieldCheck,
-  Trash2, X,
+  Trash2, Users, X,
 } from "lucide-react";
+import { api } from "./api";
+import { SettingsPage, UsersPage } from "./adminPages";
+import { ProductVersion, type SystemInfo } from "./productVersion";
 import "./styles.css";
 
-type Page = "dashboard" | "assets" | "agents" | "query" | "settings" | "keys" | "audit";
-type User = { display_name: string; username: string; permissions: string[]; super_admin: boolean };
-type SystemInfo = { database_mode: string; server_version: string };
+type Page = "dashboard" | "assets" | "agents" | "query" | "settings" | "users" | "keys" | "audit";
+type User = { id: string; display_name: string; username: string; permissions: string[]; super_admin: boolean };
 type Asset = { id: string; name: string; type: string; status: string; criticality: string; environment: string; last_seen_at: string };
 type Agent = { id: string; agent_id: string; hostname: string; status: string; version: string; os_name: string };
 type ApiKey = { id: string; name: string; prefix: string; scopes: string[]; expires_at?: string; last_used_at?: string; revoked_at?: string };
 type Scope = { name: string; description: string };
 
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { credentials: "include", ...init });
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(body?.error?.message || "요청을 처리하지 못했습니다.");
-  return body;
-};
-
-function Login({ onLogin }: { onLogin: (user: User, csrf: string) => void }) {
+function Login({ onLogin, systemInfo, keycloakEnabled }: {
+  onLogin: (user: User, csrf: string) => void;
+  systemInfo: SystemInfo | null;
+  keycloakEnabled: boolean;
+}) {
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState("");
@@ -53,17 +51,22 @@ function Login({ onLogin }: { onLogin: (user: User, csrf: string) => void }) {
         <label>비밀번호<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" required /></label>
         {error && <div className="error">{error}</div>}
         <button className="primary" type="submit">안전하게 로그인 <ChevronRight size={18}/></button>
-        <a className="sso" href="/api/v1/auth/keycloak/start">Keycloak으로 계속</a>
+        {keycloakEnabled && <a className="sso" href="/api/v1/auth/keycloak/start">Keycloak으로 계속</a>}
+        <ProductVersion info={systemInfo}/>
       </form>
     </section>
   </main>;
 }
 
-const navigation: {id: Page; label: string; icon: React.ElementType}[] = [
-  {id:"dashboard",label:"운영 현황",icon:LayoutDashboard},{id:"assets",label:"자산",icon:Boxes},
-  {id:"agents",label:"Agent",icon:Activity},{id:"query",label:"Query DSL",icon:Search},
-  {id:"settings",label:"설정",icon:Settings},{id:"keys",label:"API · MCP 키",icon:KeyRound},
-  {id:"audit",label:"감사 로그",icon:ShieldCheck},
+const navigation: {id: Page; label: string; icon: React.ElementType; permission: string}[] = [
+  {id:"dashboard",label:"운영 현황",icon:LayoutDashboard,permission:"assets.read"},
+  {id:"assets",label:"자산",icon:Boxes,permission:"assets.read"},
+  {id:"agents",label:"Agent",icon:Activity,permission:"agents.read"},
+  {id:"query",label:"Query DSL",icon:Search,permission:"queries.execute"},
+  {id:"settings",label:"설정",icon:Settings,permission:"settings.read"},
+  {id:"users",label:"사용자",icon:Users,permission:"users.read"},
+  {id:"keys",label:"API · MCP 키",icon:KeyRound,permission:"api_keys.manage"},
+  {id:"audit",label:"감사 로그",icon:ShieldCheck,permission:"audit.read"},
 ];
 
 function App() {
@@ -71,26 +74,39 @@ function App() {
   const [csrf, setCsrf] = React.useState(sessionStorage.getItem("csrf") || "");
   const [page, setPage] = React.useState<Page>("dashboard");
   const [mobile, setMobile] = React.useState(false);
+  const [systemInfo, setSystemInfo] = React.useState<SystemInfo|null>(null);
+  const [keycloakEnabled, setKeycloakEnabled] = React.useState(false);
   React.useEffect(()=>{ api<{user:User}>("/api/v1/auth/me").then(v=>setUser(v.user)).catch(()=>{}); },[]);
-  if (!user) return <Login onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
-  const logout=async()=>{await api("/api/v1/auth/logout",{method:"POST",headers:{"X-CSRF-Token":csrf}});sessionStorage.clear();setUser(null)};
+  React.useEffect(()=>{ api<SystemInfo>("/api/v1/system/info").then(setSystemInfo).catch(()=>{}); },[]);
+  React.useEffect(()=>{ api<{keycloak:boolean}>("/api/v1/auth/methods").then(v=>setKeycloakEnabled(v.keycloak)).catch(()=>{}); },[]);
+  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
+  const visibleNavigation=navigation.filter(item=>user.super_admin||user.permissions.includes(item.permission));
+  const activePage=visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;
+  const logout=async()=>{
+    const result=await api<{logout_url?:string}>("/api/v1/auth/logout",{method:"POST",headers:{"X-CSRF-Token":csrf}});
+    sessionStorage.clear();
+    setUser(null);
+    if(result.logout_url) window.location.assign(result.logout_url);
+  };
   return <div className="app-shell">
     <aside className={mobile?"sidebar open":"sidebar"}>
       <div className="brand"><div className="brand-mark small">IQ</div><div><strong>INVENQOR</strong><span>CONTROL PLANE</span></div><button className="mobile-close" onClick={()=>setMobile(false)}><X/></button></div>
-      <nav>{navigation.map(item=><button key={item.id} className={page===item.id?"active":""} onClick={()=>{setPage(item.id);setMobile(false)}}><item.icon size={19}/>{item.label}</button>)}</nav>
+      <nav>{visibleNavigation.map(item=><button key={item.id} className={activePage===item.id?"active":""} onClick={()=>{setPage(item.id);setMobile(false)}}><item.icon size={19}/>{item.label}</button>)}</nav>
       <div className="user-card"><div className="avatar">{(user.display_name||user.username)[0].toUpperCase()}</div><div><strong>{user.display_name||user.username}</strong><span>{user.super_admin?"최고 관리자":"사용자"}</span></div><button onClick={logout} title="로그아웃"><LogOut size={17}/></button></div>
     </aside>
-    <main className="content"><header><button className="menu" onClick={()=>setMobile(true)}><Menu/></button><div><span className="crumb">INVENQOR / {navigation.find(n=>n.id===page)?.label}</span></div><div className="live"><i/> LIVE</div></header>
-      {page==="dashboard"&&<Dashboard/>}{page==="assets"&&<Assets/>}{page==="agents"&&<Agents/>}
-      {page==="query"&&<Query csrf={csrf}/>} {page==="settings"&&<SettingsPage csrf={csrf}/>}
-      {page==="keys"&&<ApiKeys csrf={csrf}/>} {page==="audit"&&<Audit/>}
+    <main className="content"><header><button className="menu" onClick={()=>setMobile(true)}><Menu/></button><div><span className="crumb">INVENQOR / {visibleNavigation.find(n=>n.id===activePage)?.label || "접근 권한 없음"}</span></div><div className="header-meta"><ProductVersion info={systemInfo} compact/><div className="live"><i/> LIVE</div></div></header>
+      {!activePage&&<Empty icon={ShieldCheck} text="이 계정에 콘솔 접근 권한이 없습니다."/>}
+      {activePage==="dashboard"&&<Dashboard systemInfo={systemInfo}/>} {activePage==="assets"&&<Assets/>}{activePage==="agents"&&<Agents/>}
+      {activePage==="query"&&<Query csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo}/>}
+      {activePage==="users"&&<UsersPage csrf={csrf} currentUserID={user.id}/>}
+      {activePage==="keys"&&<ApiKeys csrf={csrf}/>} {activePage==="audit"&&<Audit/>}
     </main>
   </div>;
 }
 
-function Dashboard(){
-  const [info,setInfo]=React.useState<SystemInfo|null>(null); const [assets,setAssets]=React.useState<Asset[]>([]); const [agents,setAgents]=React.useState<Agent[]>([]);
-  React.useEffect(()=>{api<SystemInfo>("/api/v1/system/info").then(setInfo);api<{items:Asset[]}>("/api/v1/assets?limit=6").then(v=>setAssets(v.items));api<{agents:Agent[]}>("/api/v1/admin/agents").then(v=>setAgents(v.agents));},[]);
+function Dashboard({systemInfo:info}:{systemInfo:SystemInfo|null}){
+  const [assets,setAssets]=React.useState<Asset[]>([]); const [agents,setAgents]=React.useState<Agent[]>([]);
+  React.useEffect(()=>{api<{items:Asset[]}>("/api/v1/assets?limit=6").then(v=>setAssets(v.items));api<{agents:Agent[]}>("/api/v1/admin/agents").then(v=>setAgents(v.agents));},[]);
   const active=agents.filter(a=>a.status==="active").length;
   return <section><PageTitle kicker="COMMAND OVERVIEW" title="운영 현황" subtitle="인프라 자산과 수집 상태를 실시간으로 확인합니다."/>
     {info?.database_mode==="SQLITE_FALLBACK"&&<div className="warning"><Database size={20}/><div><strong>SQLite 대체 모드</strong><span>PostgreSQL이 구성되지 않았습니다. 설정에서 운영 DB 연결을 준비하세요.</span></div></div>}
@@ -102,7 +118,6 @@ function Assets(){const [items,setItems]=React.useState<Asset[]>([]);const [q,se
 function AssetTable({items}:{items:Asset[]}){return <div className="table-wrap"><table><thead><tr><th>자산</th><th>유형</th><th>환경</th><th>중요도</th><th>상태</th><th>최근 확인</th></tr></thead><tbody>{items.map(a=><tr key={a.id}><td><strong>{a.name}</strong><span>{a.id.slice(0,13)}…</span></td><td>{a.type}</td><td>{a.environment}</td><td>{a.criticality}</td><td><Badge value={a.status}/></td><td>{formatDate(a.last_seen_at)}</td></tr>)}</tbody></table>{!items.length&&<Empty icon={Boxes} text="표시할 자산이 없습니다."/>}</div>}
 function Agents(){const [items,setItems]=React.useState<Agent[]>([]);React.useEffect(()=>{api<{agents:Agent[]}>("/api/v1/admin/agents").then(v=>setItems(v.agents))},[]);return <section><PageTitle kicker="COLLECTION FLEET" title="Agent 관리" subtitle="등록 자격 증명과 수집 노드의 상태를 관리합니다."/><div className="card-grid">{items.map(a=><article className="agent-card" key={a.id}><div className="host-icon"><Activity/></div><Badge value={a.status}/><h3>{a.hostname||"이름 없는 Agent"}</h3><p>{a.agent_id}</p><dl><dt>버전</dt><dd>{a.version||"—"}</dd><dt>운영체제</dt><dd>{a.os_name||"—"}</dd></dl></article>)}{!items.length&&<Empty icon={Activity} text="등록된 Agent가 없습니다."/>}</div></section>}
 function Query({csrf}:{csrf:string}){const [query,setQuery]=React.useState('type = "host" AND environment = "production"');const [result,setResult]=React.useState<Asset[]>([]);const [error,setError]=React.useState("");const run=async()=>{try{setError("");const v=await api<{items:Asset[]}>("/api/v1/query/execute",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({query})});setResult(v.items)}catch(e){setError((e as Error).message)}};return <section><PageTitle kicker="SAFE DISCOVERY" title="Query DSL" subtitle="허용된 자산 필드만 사용해 안전하게 인벤토리를 탐색합니다."/><div className="query-box"><div className="query-head"><FileSearch size={20}/><strong>질의 편집기</strong><span>SQL 실행 불가 · 최대 500건</span></div><textarea value={query} onChange={e=>setQuery(e.target.value)} spellCheck={false}/><div className="query-actions">{error&&<span className="error-text">{error}</span>}<button className="primary compact" onClick={run}>질의 실행</button></div></div><Panel title={`결과 ${result.length}건`} action="바인딩 파라미터 적용"><AssetTable items={result}/></Panel></section>}
-function SettingsPage({csrf}:{csrf:string}){const [items,setItems]=React.useState<{key:string;value:unknown;apply_mode:string;secret:boolean}[]>([]);React.useEffect(()=>{api<{items:typeof items}>("/api/v1/admin/settings").then(v=>setItems(v.items))},[]);return <section><PageTitle kicker="CONTROL CENTER" title="운영 설정" subtitle="인증, 수집, 데이터베이스, 보존 정책을 한 곳에서 관리합니다."/><div className="settings-layout"><div className="settings-nav">{["일반","PostgreSQL","인증","Agent","자산","수집","보안","백업"].map((v,i)=><button className={i===0?"active":""} key={v}><Settings size={17}/>{v}</button>)}</div><Panel title="현재 적용 설정" action="비밀값 자동 마스킹"><div className="setting-list">{items.map(item=><div key={item.key}><div><strong>{item.key}</strong><span>{item.apply_mode} · {item.secret?"암호화됨":"일반 값"}</span></div><code>{item.secret?"••••••••":JSON.stringify(item.value)}</code></div>)}{!items.length&&<Empty icon={Settings} text="저장된 사용자 설정이 없습니다. 제품 기본값으로 실행 중입니다."/>}</div></Panel></div></section>}
 function ApiKeys({csrf}:{csrf:string}){
   const [keys,setKeys]=React.useState<ApiKey[]>([]);const [catalog,setCatalog]=React.useState<Scope[]>([]);
   const [name,setName]=React.useState("");const [selected,setSelected]=React.useState<string[]>(["assets.read","mcp.access"]);

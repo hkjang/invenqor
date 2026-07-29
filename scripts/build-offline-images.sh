@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=${1:-0.2.2}
+version=${1:-0.2.3}
 output_dir=${2:-"$root/dist"}
 server_image="invenqor-server:$version"
 postgres_image="postgres:17-alpine"

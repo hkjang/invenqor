@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -48,6 +49,7 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 	settings.IssuerURL = provider.URL
 	settings.ClientID = "invenqor-test"
 	settings.RedirectURI = "https://invenqor.example.test/api/v1/auth/keycloak/callback"
+	settings.LogoutRedirectURI = "https://invenqor.example.test/"
 	settings.PrivateCAPEM = provider.CAPEM
 	settings.RoleMappings = map[string]string{"inventory-view": "viewer"}
 	settings.AllowedEmailDomains = []string{"example.test"}
@@ -107,6 +109,20 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 	if session.Token == "" || session.CSRFToken == "" {
 		t.Fatal("OIDC callback omitted session tokens")
 	}
+	logoutURL, err := service.LogoutURL(context.Background(), session.User.ID)
+	if err != nil {
+		t.Fatalf("LogoutURL() error = %v", err)
+	}
+	parsedLogoutURL, err := url.Parse(logoutURL)
+	if err != nil {
+		t.Fatalf("url.Parse(logoutURL) error = %v", err)
+	}
+	if parsedLogoutURL.Path != "/protocol/openid-connect/logout" ||
+		parsedLogoutURL.Query().Get("client_id") != "invenqor-test" ||
+		parsedLogoutURL.Query().Get("post_logout_redirect_uri") !=
+			settings.LogoutRedirectURI {
+		t.Fatalf("LogoutURL() = %q", logoutURL)
+	}
 	if _, _, err := service.Callback(
 		context.Background(),
 		query.Get("state"),
@@ -116,6 +132,68 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 		"request-replay",
 	); err == nil {
 		t.Fatal("Callback() accepted a replayed OIDC state")
+	}
+	settings.RoleMappings = map[string]string{"inventory-view": "auditor"}
+	if err := service.SaveSettings(
+		context.Background(),
+		settings,
+		nil,
+		admin,
+		"change mapped role",
+	); err != nil {
+		t.Fatalf("SaveSettings() role update error = %v", err)
+	}
+	secondStart, err := service.Start(
+		context.Background(),
+		"/audit",
+		"192.0.2.20",
+		"test-agent",
+	)
+	if err != nil {
+		t.Fatalf("second Start() error = %v", err)
+	}
+	secondURL, err := url.Parse(secondStart.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse(secondStart) error = %v", err)
+	}
+	secondQuery := secondURL.Query()
+	provider.SetAuthorization(
+		secondQuery.Get("nonce"),
+		secondQuery.Get("code_challenge"),
+	)
+	secondSession, _, err := service.Callback(
+		context.Background(),
+		secondQuery.Get("state"),
+		"valid-code",
+		"192.0.2.20",
+		"test-agent",
+		"request-role-sync",
+	)
+	if err != nil {
+		t.Fatalf("second Callback() error = %v", err)
+	}
+	if !containsString(secondSession.User.Roles, "auditor") ||
+		containsString(secondSession.User.Roles, "viewer") {
+		t.Fatalf("synchronized OIDC roles = %v, want auditor only", secondSession.User.Roles)
+	}
+	if _, err := runtime.DB().Exec(
+		"UPDATE users SET active=FALSE WHERE id=$1",
+		secondSession.User.ID,
+	); err != nil {
+		t.Fatalf("deactivate OIDC user error = %v", err)
+	}
+	if _, err := service.provisionUser(
+		context.Background(),
+		settings,
+		"subject-123",
+		map[string]any{
+			"preferred_username": "oidc.user",
+			"email":              "oidc.user@example.test",
+			"name":               "OIDC User",
+			"roles":              []any{"inventory-view"},
+		},
+	); !errors.Is(err, ErrOIDCUserInactive) {
+		t.Fatalf("inactive provisionUser() error = %v, want ErrOIDCUserInactive", err)
 	}
 	var linkedIdentities int
 	if err := runtime.DB().QueryRow(
@@ -151,9 +229,10 @@ func TestOIDCSettingsValidationAndRoleMapping(t *testing.T) {
 	}
 	settings.RoleMappings = map[string]string{"kc-admin": "asset_manager"}
 	settings.GroupMappings = map[string]string{"/audit": "auditor"}
+	settings.RoleClaim = "realm_access.roles"
 	roles := mappedRoles(settings, map[string]any{
-		"roles":  []any{"kc-admin"},
-		"groups": []any{"/audit"},
+		"realm_access": map[string]any{"roles": []any{"kc-admin"}},
+		"groups":       []any{"/audit"},
 	})
 	if strings.Join(roles, ",") != "asset_manager,auditor" {
 		t.Fatalf("mappedRoles() = %v", roles)
@@ -161,6 +240,45 @@ func TestOIDCSettingsValidationAndRoleMapping(t *testing.T) {
 	if !allowedEmail("user@example.test", []string{"example.test"}) ||
 		allowedEmail("user@other.test", []string{"example.test"}) {
 		t.Fatal("allowedEmail() domain policy mismatch")
+	}
+}
+
+func TestOIDCSettingsRequireSecretAndKnownMappedRoles(t *testing.T) {
+	runtime, admin := setupAuthUser(t)
+	defer runtime.Close()
+	bootstrapStore, err := bootstrap.Open(filepath.Dir(runtime.SQLitePath()))
+	if err != nil {
+		t.Fatalf("bootstrap.Open() error = %v", err)
+	}
+	localAuth, err := NewService(runtime.DB(), DefaultServiceOptions())
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	service := NewOIDCService(runtime.DB(), bootstrapStore, localAuth)
+	settings := DefaultOIDCSettings()
+	settings.Enabled = true
+	settings.IssuerURL = "https://keycloak.example.test"
+	settings.ClientID = "invenqor"
+	settings.RedirectURI = "https://invenqor.example.test/api/v1/auth/keycloak/callback"
+	if err := service.SaveSettings(
+		context.Background(),
+		settings,
+		nil,
+		admin,
+		"missing secret test",
+	); !errors.Is(err, ErrOIDCSecret) {
+		t.Fatalf("SaveSettings() error = %v, want ErrOIDCSecret", err)
+	}
+	secret := "client-secret"
+	settings.RoleMappings = map[string]string{"realm-user": "not-a-role"}
+	if err := service.SaveSettings(
+		context.Background(),
+		settings,
+		&secret,
+		admin,
+		"invalid mapping test",
+	); !errors.Is(err, ErrOIDCRole) {
+		t.Fatalf("SaveSettings() error = %v, want ErrOIDCRole", err)
 	}
 }
 

@@ -23,36 +23,44 @@ import (
 )
 
 type Server struct {
-	router           chi.Router
-	database         *storage.Runtime
-	authService      *auth.Service
-	oidcService      *auth.OIDCService
-	totpService      *auth.TOTPService
-	bootstrapManager *auth.BootstrapManager
-	agentService     *agents.Service
-	ingestService    *ingest.Service
-	agentRateLimit   *agentRateLimiter
-	spool            *spool.Manager
-	bootstrapStore   *bootstrap.Store
-	updateStore      *updates.Store
-	apiKeyService    *apikeys.Service
-	apiRateLimit     *agentRateLimiter
-	logger           *slog.Logger
+	router                      chi.Router
+	database                    *storage.Runtime
+	authService                 *auth.Service
+	oidcService                 *auth.OIDCService
+	totpService                 *auth.TOTPService
+	bootstrapManager            *auth.BootstrapManager
+	agentService                *agents.Service
+	ingestService               *ingest.Service
+	agentRateLimit              *agentRateLimiter
+	spool                       *spool.Manager
+	bootstrapStore              *bootstrap.Store
+	updateStore                 *updates.Store
+	apiKeyService               *apikeys.Service
+	apiRateLimit                *agentRateLimiter
+	logger                      *slog.Logger
+	currentPostgresDSN          string
+	postgresEnvironmentOverride bool
+	databaseSchema              string
+	databaseTimeout             time.Duration
 }
 
 type Options struct {
-	Database         *storage.Runtime
-	AuthService      *auth.Service
-	OIDCService      *auth.OIDCService
-	TOTPService      *auth.TOTPService
-	BootstrapManager *auth.BootstrapManager
-	AgentService     *agents.Service
-	IngestService    *ingest.Service
-	Spool            *spool.Manager
-	BootstrapStore   *bootstrap.Store
-	UpdateStore      *updates.Store
-	APIKeyService    *apikeys.Service
-	Logger           *slog.Logger
+	Database                    *storage.Runtime
+	AuthService                 *auth.Service
+	OIDCService                 *auth.OIDCService
+	TOTPService                 *auth.TOTPService
+	BootstrapManager            *auth.BootstrapManager
+	AgentService                *agents.Service
+	IngestService               *ingest.Service
+	Spool                       *spool.Manager
+	BootstrapStore              *bootstrap.Store
+	UpdateStore                 *updates.Store
+	APIKeyService               *apikeys.Service
+	Logger                      *slog.Logger
+	CurrentPostgresDSN          string
+	PostgresEnvironmentOverride bool
+	DatabaseSchema              string
+	DatabaseTimeout             time.Duration
 }
 
 func New(options Options) *Server {
@@ -66,21 +74,31 @@ func New(options Options) *Server {
 		options.APIKeyService = apikeys.NewService(options.Database.DB())
 	}
 	server := &Server{
-		router:           chi.NewRouter(),
-		database:         options.Database,
-		authService:      options.AuthService,
-		oidcService:      options.OIDCService,
-		totpService:      options.TOTPService,
-		bootstrapManager: options.BootstrapManager,
-		agentService:     options.AgentService,
-		ingestService:    options.IngestService,
-		agentRateLimit:   newAgentRateLimiter(120, time.Minute),
-		spool:            options.Spool,
-		bootstrapStore:   options.BootstrapStore,
-		updateStore:      options.UpdateStore,
-		apiKeyService:    options.APIKeyService,
-		apiRateLimit:     newAgentRateLimiter(600, time.Minute),
-		logger:           options.Logger,
+		router:                      chi.NewRouter(),
+		database:                    options.Database,
+		authService:                 options.AuthService,
+		oidcService:                 options.OIDCService,
+		totpService:                 options.TOTPService,
+		bootstrapManager:            options.BootstrapManager,
+		agentService:                options.AgentService,
+		ingestService:               options.IngestService,
+		agentRateLimit:              newAgentRateLimiter(120, time.Minute),
+		spool:                       options.Spool,
+		bootstrapStore:              options.BootstrapStore,
+		updateStore:                 options.UpdateStore,
+		apiKeyService:               options.APIKeyService,
+		apiRateLimit:                newAgentRateLimiter(600, time.Minute),
+		logger:                      options.Logger,
+		currentPostgresDSN:          options.CurrentPostgresDSN,
+		postgresEnvironmentOverride: options.PostgresEnvironmentOverride,
+		databaseSchema:              options.DatabaseSchema,
+		databaseTimeout:             options.DatabaseTimeout,
+	}
+	if server.databaseSchema == "" {
+		server.databaseSchema = "public"
+	}
+	if server.databaseTimeout <= 0 {
+		server.databaseTimeout = 5 * time.Second
 	}
 	server.routes()
 	return server
@@ -250,6 +268,15 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/settings", s.listSettings,
 		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/postgresql", s.getPostgresSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/postgresql/test", s.testPostgresSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/postgresql", s.updatePostgresSettings,
+		)
 		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
 			"/api/v1/admin/settings", s.updateSettings,
 		)
@@ -261,6 +288,27 @@ func (s *Server) routes() {
 		)
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/audit", s.listAudit,
+		)
+		protected.With(s.requirePermission("users.read")).Get(
+			"/api/v1/admin/users", s.listUsers,
+		)
+		protected.With(s.requirePermission("users.read")).Get(
+			"/api/v1/admin/roles", s.listRoles,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Post(
+			"/api/v1/admin/users", s.createUser,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Patch(
+			"/api/v1/admin/users/{userID}", s.updateUser,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Post(
+			"/api/v1/admin/users/{userID}/password", s.resetUserPassword,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Post(
+			"/api/v1/admin/users/{userID}/unlock", s.unlockUser,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Delete(
+			"/api/v1/admin/users/{userID}", s.deleteUser,
 		)
 		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
 			"/api/v1/admin/agent-updates", s.publishAgentUpdate,

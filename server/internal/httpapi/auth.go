@@ -170,6 +170,10 @@ func (s *Server) me(response http.ResponseWriter, request *http.Request) {
 
 func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
 	principal := principalFromContext(request.Context())
+	logoutURL, logoutURLError := s.oidcService.LogoutURL(
+		request.Context(),
+		principal.User.ID,
+	)
 	if err := s.authService.RevokeSession(
 		request.Context(),
 		principal,
@@ -179,6 +183,13 @@ func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
 	); err != nil {
 		s.internalError(response, request, err)
 		return
+	}
+	if logoutURLError != nil {
+		s.logger.Warn(
+			"keycloak_logout_url_failed",
+			"request_id", middleware.GetReqID(request.Context()),
+			"error", logoutURLError,
+		)
 	}
 	http.SetCookie(response, &http.Cookie{
 		Name:     auth.SessionCookie,
@@ -190,7 +201,10 @@ func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),
 	})
-	writeJSON(response, http.StatusOK, map[string]any{"logged_out": true})
+	writeJSON(response, http.StatusOK, map[string]any{
+		"logged_out": true,
+		"logout_url": logoutURL,
+	})
 }
 
 func (s *Server) changePassword(response http.ResponseWriter, request *http.Request) {

@@ -155,6 +155,41 @@ func (r *Runtime) Close() error {
 }
 
 func openPostgres(ctx context.Context, options Options) (*sql.DB, *ConnectionFailure) {
+	database, connectionFailure := connectPostgres(ctx, options)
+	if connectionFailure != nil {
+		return nil, connectionFailure
+	}
+	timeoutContext, cancel := context.WithTimeout(ctx, options.Timeout)
+	defer cancel()
+	if err := applyMigrations(timeoutContext, database, "postgres"); err != nil {
+		database.Close()
+		return nil, failure(
+			FailureSchemaMigration,
+			"PostgreSQL schema migration failed",
+			postgresHost(options.PostgresDSN),
+			time.Now(),
+		)
+	}
+	return database, nil
+}
+
+// CheckPostgres validates and connects to PostgreSQL without changing its
+// schema. It returns only classified, credential-free failure metadata.
+func CheckPostgres(ctx context.Context, options Options) *ConnectionFailure {
+	if options.Timeout <= 0 {
+		options.Timeout = 5 * time.Second
+	}
+	database, connectionFailure := connectPostgres(ctx, options)
+	if database != nil {
+		_ = database.Close()
+	}
+	return connectionFailure
+}
+
+func connectPostgres(
+	ctx context.Context,
+	options Options,
+) (*sql.DB, *ConnectionFailure) {
 	config, err := pgx.ParseConfig(options.PostgresDSN)
 	if err != nil {
 		return nil, failure(FailureInvalidDSN, "PostgreSQL DSN validation failed", "", time.Now())
@@ -171,16 +206,15 @@ func openPostgres(ctx context.Context, options Options) (*sql.DB, *ConnectionFai
 		database.Close()
 		return nil, classifyPostgresFailure(err, host)
 	}
-	if err := applyMigrations(timeoutContext, database, "postgres"); err != nil {
-		database.Close()
-		return nil, failure(
-			FailureSchemaMigration,
-			"PostgreSQL schema migration failed",
-			host,
-			time.Now(),
-		)
-	}
 	return database, nil
+}
+
+func postgresHost(dsn string) string {
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return ""
+	}
+	return config.Host
 }
 
 func openSQLite(ctx context.Context, path string) (*sql.DB, error) {

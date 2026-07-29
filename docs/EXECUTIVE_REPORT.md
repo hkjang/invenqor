@@ -1,9 +1,9 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · EXECUTIVE BRIEF</p>
   <h1>임원 보고서</h1>
-  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.1·Server v0.2.2 도입 가치, 통제 경계와 단계별 확산 제안</p>
+  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.1·Server v0.2.3 도입 가치, 통제 경계와 단계별 확산 제안</p>
   <div class="meta">
-    <p><strong>대상 릴리즈</strong> Agent v0.2.1 · Server v0.2.2</p>
+    <p><strong>대상 릴리즈</strong> Agent v0.2.1 · Server v0.2.3</p>
     <p><strong>보고서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>의사결정 등급</strong> 제한 운영 승인 검토</p>
@@ -290,6 +290,8 @@ v0.2.1 릴리즈 시 확인된 항목:
 5. **성과지표**: 커버리지, 최신성, 전달 성공률, 오류율, 운영 부하 목표
 6. **확대 Gate**: Pilot 종료 후 보안·운영·데이터 품질 공동 승인
 7. **보완 로드맵**: SBOM/서명/provenance, 자동화, 중앙 모니터링 투자
+8. **Identity Governance**: Keycloak OIDC 연계, 역할/그룹 mapping 책임자,
+   로컬 비상 관리자와 정기 접근권한 검토 기준
 
 ## 12. 결론
 

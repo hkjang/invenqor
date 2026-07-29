@@ -332,8 +332,18 @@ func validateUsername(value string) (string, error) {
 	return value, nil
 }
 
+// ValidateUsername applies the same account-name policy used by initial setup.
+func ValidateUsername(value string) (string, error) {
+	return validateUsername(value)
+}
+
 func normalizeUsername(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// NormalizeUsername returns the case-insensitive lookup form stored for users.
+func NormalizeUsername(value string) string {
+	return normalizeUsername(value)
 }
 
 func newSecret() (string, string, error) {

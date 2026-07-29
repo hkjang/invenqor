@@ -30,12 +30,18 @@ type Config struct {
 	ShutdownTimeout        time.Duration
 	MasterKeyPath          string
 	UpdateDir              string
+	PostgresDSNFromEnv     bool
 	BootstrapAdmin         string
 	BootstrapAdminPassword string
 }
 
 func Load() (Config, error) {
 	stateDir := envOrDefault("INVENQOR_STATE_DIR", defaultStateDir)
+	postgresDSN, postgresDSNFromEnv := firstTrimmedEnvWithPresence(
+		"INVENQOR_POSTGRES_DSN",
+		"POSTGRES_DSN",
+		"postgres_dsn",
+	)
 	bootstrapAdmin, bootstrapPassword, err := bootstrapCredentials()
 	if err != nil {
 		return Config{}, err
@@ -45,12 +51,13 @@ func Load() (Config, error) {
 		BaseURL:                strings.TrimRight(os.Getenv("INVENQOR_BASE_URL"), "/"),
 		StateDir:               stateDir,
 		SQLitePath:             envOrDefault("INVENQOR_SQLITE_PATH", filepath.Join(stateDir, "invenqor.db")),
-		PostgresDSN:            strings.TrimSpace(os.Getenv("INVENQOR_POSTGRES_DSN")),
+		PostgresDSN:            postgresDSN,
 		DatabaseSchema:         envOrDefault("INVENQOR_POSTGRES_SCHEMA", "public"),
 		DatabaseTimeout:        durationEnv("INVENQOR_DATABASE_TIMEOUT", 5*time.Second),
 		ShutdownTimeout:        durationEnv("INVENQOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		MasterKeyPath:          strings.TrimSpace(os.Getenv("INVENQOR_MASTER_KEY_FILE")),
 		UpdateDir:              envOrDefault("INVENQOR_UPDATE_DIR", filepath.Join(stateDir, "updates")),
+		PostgresDSNFromEnv:     postgresDSNFromEnv,
 		BootstrapAdmin:         bootstrapAdmin,
 		BootstrapAdminPassword: bootstrapPassword,
 	}
@@ -151,6 +158,15 @@ func firstTrimmedEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstTrimmedEnvWithPresence(names ...string) (string, bool) {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func firstEnv(names ...string) string {

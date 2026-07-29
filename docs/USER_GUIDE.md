@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.2</p>
+    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.3</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.1은 Server v0.2.2와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.1은 Server v0.2.3와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -444,6 +444,23 @@ sudo ./scripts/uninstall.sh
 이전 바이너리를 `.previous`로 보존합니다. 설정 방법은
 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md#8-서명된-agent-자동-업데이트)를
 참조하십시오. 원격 셸이나 임의 명령 실행은 지원하지 않습니다.
+
+## 11. 관리 콘솔 로그인과 계정
+
+로그인 화면 하단에는 현재 Server 버전이 표시됩니다. 로그인 후에는 상단 버전
+chip에서 같은 버전과 build 정보를 확인할 수 있어 장애 문의 시 실행 버전을
+정확히 전달할 수 있습니다.
+
+조직 관리자가 Keycloak을 활성화한 경우에만 **Keycloak으로 계속** 버튼이
+나타납니다. 버튼을 누르면 조직 로그인 화면으로 이동하며, 인증 후 원래
+Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO 역할은 로그인
+때마다 조직 정책에 맞게 동기화됩니다.
+
+- 로컬 계정 비밀번호를 잊은 경우 Invenqor 관리자에게 초기화를 요청합니다.
+- Keycloak 비밀번호·MFA·잠금은 조직 Keycloak 관리자에게 문의합니다.
+- 계정이 비활성화되면 기존 브라우저 Session과 API key도 사용할 수 없습니다.
+- 화면 메뉴는 부여된 역할의 권한에 따라 자동으로 숨겨집니다.
+- SSO 장애 시 로컬 비상 관리자 계정 사용 여부는 조직 운영 절차를 따릅니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

@@ -112,7 +112,14 @@ func (s *Server) updateKeycloakSettings(response http.ResponseWriter, request *h
 			"request_id", middleware.GetReqID(request.Context()),
 			"error", err,
 		)
-		writeAPIError(response, request, http.StatusBadRequest, "INVALID_KEYCLOAK_SETTINGS", "The Keycloak settings are invalid.")
+		switch {
+		case errors.Is(err, auth.ErrOIDCSecret):
+			writeAPIError(response, request, http.StatusBadRequest, "KEYCLOAK_SECRET_REQUIRED", "A Keycloak client secret is required before enabling login.")
+		case errors.Is(err, auth.ErrOIDCRole):
+			writeAPIError(response, request, http.StatusBadRequest, "INVALID_KEYCLOAK_ROLE", "A Keycloak mapping references an unknown InvenQor role.")
+		default:
+			writeAPIError(response, request, http.StatusBadRequest, "INVALID_KEYCLOAK_SETTINGS", "The Keycloak settings are invalid.")
+		}
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"saved": true})

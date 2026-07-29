@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.2 · Agent 버전: v0.2.1 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.3 · Agent 버전: v0.2.1 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -64,17 +64,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.2.tar.gz`
-- `invenqor-0.2.2.tar.gz.sha256`
+- `invenqor-0.2.3.tar.gz`
+- `invenqor-0.2.3.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.2.tar.gz.sha256
-gzip -t invenqor-0.2.2.tar.gz
-docker load < invenqor-0.2.2.tar.gz
-docker image inspect invenqor-server:0.2.2 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.3.tar.gz.sha256
+gzip -t invenqor-0.2.3.tar.gz
+docker load < invenqor-0.2.3.tar.gz
+docker image inspect invenqor-server:0.2.3 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -94,7 +94,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.2
+./scripts/build-offline-images.sh 0.2.3
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -109,7 +109,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.2
+  invenqor-server:0.2.3
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -280,7 +280,7 @@ Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.2`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.3`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -289,7 +289,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.2 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.3 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -318,3 +318,108 @@ v0.2.2 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하
   rollout bucket과 systemd update path unit을 확인합니다.
 - 멀티 파드 일부 실패: 공통 Master Key, RWX 권한, PostgreSQL advisory lock,
   해당 Pod의 state/spool PVC를 확인합니다.
+
+## 13. PostgreSQL 설정 화면과 환경변수
+
+Super Admin은 **설정 → PostgreSQL**에서 현재 DB 모드, 대상 host/port/database,
+schema, 설정 원천과 최근 기동 실패를 비밀정보 없이 확인할 수 있습니다. 새 DSN은
+다음 순서로 처리됩니다.
+
+1. **연결 테스트**는 일회성 connect/ping만 수행하며 schema를 변경하거나 값을
+   저장하지 않습니다.
+2. **검증 후 저장**은 연결 성공 후 DSN을 `bootstrap.enc`에 AES-256-GCM으로
+   암호화합니다. API와 화면에는 비밀번호나 원문 DSN을 다시 반환하지 않습니다.
+3. Server를 순차 재기동하면 저장값이 적용됩니다. SQLite 데이터는 자동 이관하지
+   않으므로 운영 데이터가 있다면 별도 백업·이관 승인이 필요합니다.
+4. Kubernetes에서는 화면의 Pod 로컬 저장값 대신 모든 Pod에 동일한 Secret
+   환경변수를 배포하고 rolling restart 합니다.
+
+환경변수 우선순위는 아래와 같습니다. 앞의 값이 있으면 뒤의 값과 화면 저장값을
+덮어씁니다.
+
+| 우선순위 | 이름 | 용도 |
+|---:|---|---|
+| 1 | `INVENQOR_POSTGRES_DSN` | 권장 표준 이름 |
+| 2 | `POSTGRES_DSN` | Compose 호환 이름 |
+| 3 | `postgres_dsn` | 기존 배포 호환용 소문자 이름 |
+| 4 | 암호화된 화면 저장값 | 단일 인스턴스 편의 구성 |
+
+```bash
+docker run -d --name invenqor-server \
+  -p 7070:7070 \
+  -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
+  -v invenqor-server-state:/var/lib/invenqor-server \
+  invenqor-server:0.2.3
+```
+
+환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
+다른 DSN을 저장해도 실행 중인 값은 바뀌지 않으며, 해당 환경변수를 제거하고
+재기동해야 암호화 저장값이 적용됩니다.
+
+## 14. Keycloak SSO/OIDC 구성
+
+Keycloak에서는 Invenqor용 **confidential OpenID Connect client**를 만들고
+Standard Flow를 활성화합니다. Direct Access Grant와 Implicit Flow는 끕니다.
+
+| Keycloak 항목 | 권장값 |
+|---|---|
+| Valid Redirect URI | `https://invenqor.example.com/api/v1/auth/keycloak/callback` |
+| Valid Post Logout Redirect URI | 서비스 기본 URL |
+| Web Origin | 서비스 기본 URL |
+| Client authentication | On |
+| PKCE | S256 |
+
+Invenqor의 **설정 → Keycloak** 화면에서 Issuer URL, Realm, Client ID/Secret,
+Redirect/Logout URI, Scope, 사용자·Email·이름·역할·그룹 claim, 허용 Email
+domain, 기본 역할과 자동 사용자 생성을 설정합니다. 사내 TLS를 쓰면 루트/중간
+CA 인증서를 PEM으로 등록할 수 있습니다.
+
+역할과 그룹 매핑은 한 줄에 하나씩 입력합니다.
+
+```text
+# Keycloak realm role = Invenqor role
+inventory-admin=asset_manager
+inventory-read=viewer
+
+# Keycloak full group path = Invenqor role
+/invenqor/operators=operator
+/invenqor/auditors=auditor
+```
+
+Keycloak 표준 realm role을 직접 읽으려면 Role Claim에
+`realm_access.roles`를 지정할 수 있습니다. 점(`.`)으로 구분한 중첩 claim을
+지원합니다. 별도 protocol mapper로 평면 `roles` claim을 ID Token에 넣어도
+됩니다. 그룹은 Group Membership mapper에서 **Full group path**와 ID Token
+포함을 활성화하십시오.
+
+저장 전 확인 사항:
+
+- Issuer는 HTTPS이고 discovery endpoint에 Server가 접근할 수 있어야 합니다.
+- Scope에는 반드시 `openid`가 포함되어야 합니다.
+- 활성화 시 Client Secret이 필수이며 암호화 저장되고 다시 노출되지 않습니다.
+- 기본 역할과 모든 mapping 대상은 실제 Invenqor 역할이어야 합니다.
+- 허용 Email domain을 지정했다면 Email Claim도 필수입니다.
+- **연결 테스트**는 Issuer discovery와 TLS/사설 CA 신뢰를 검증합니다.
+
+최초 로그인은 Authorization Code + PKCE S256, State, Nonce를 검증합니다.
+기존 SSO 사용자는 로그인할 때마다 프로필과 `keycloak` 원천 역할이 동기화되며,
+Keycloak에서 회수된 역할도 제거됩니다. 관리 콘솔에서 비활성화하거나 삭제한
+계정은 같은 Keycloak subject로 자동 재생성되지 않습니다. 로컬 로그인은
+비상 접근 경로로 유지하되 최소 한 개의 로컬 Super Admin을 별도로 보호하십시오.
+Logout Redirect URI가 설정된 SSO 사용자는 로컬 Session 폐기 후 Keycloak
+end-session endpoint로 이동해 IdP Session 종료도 이어서 수행합니다.
+
+## 15. 사용자 관리
+
+**사용자** 화면은 계정 생성, 검색, 프로필 수정, 활성/비활성, 잠금 해제,
+로컬 비밀번호 초기화, 역할 부여와 삭제를 제공합니다.
+
+- 비밀번호 변경 시 Argon2id로 다시 hash하고 기존 세션을 모두 폐기합니다.
+- 비활성화와 삭제는 사용자 Session과 해당 사용자가 만든 API key를 즉시
+  폐기합니다.
+- 현재 로그인한 관리자는 자기 계정을 비활성화·강등·삭제할 수 없습니다.
+- 마지막 활성 Super Admin은 비활성화·강등·삭제할 수 없습니다.
+- `SSO` 표시 역할은 매 로그인마다 Keycloak에서 동기화되므로 콘솔에서 제거할
+  수 없습니다. 별도 로컬 역할만 콘솔에서 추가·회수할 수 있습니다.
+- Keycloak 사용자의 비밀번호와 프로필 원본은 Keycloak에서 관리합니다.
+- 모든 관리 변경은 행위자, 대상, 결과와 사유를 감사 로그에 기록합니다.
