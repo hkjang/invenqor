@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -41,9 +40,12 @@ func (s *Server) agentUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	if manifest == nil || !newerVersion(
-		r.URL.Query().Get("current_version"), manifest.Version,
-	) {
+	current := r.URL.Query().Get("current_version")
+	// A rollback is the one case where "not newer" is the intent. It stays safe
+	// because the artifact is signed and hash-checked either way.
+	if manifest == nil ||
+		(!newerVersion(current, manifest.Version) &&
+			!(manifest.AllowDowngrade && manifest.Version != current)) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -86,18 +88,50 @@ func (s *Server) publishAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	rollout, _ := strconv.Atoi(r.FormValue("rollout_percent"))
-	manifest, err := s.updateStore.Publish(updates.Manifest{
-		Version: r.FormValue("version"), Channel: r.FormValue("channel"),
-		OS: r.FormValue("os"), Architecture: r.FormValue("architecture"),
-		Signature: strings.TrimSpace(r.FormValue("signature")), Rollout: rollout,
-	}, io.LimitReader(file, 128*1024*1024+1))
+	signature, allowDowngrade, notes, rollout, err := publishOptions(r)
 	if err != nil {
 		writeAPIError(w, r, 400, "INVALID_UPDATE", err.Error())
 		return
 	}
+	// Default the platform fields: a publisher who omits them means "linux, this
+	// architecture", and making them mandatory only invited typos.
+	osName := strings.TrimSpace(r.FormValue("os"))
+	if osName == "" {
+		osName = "linux"
+	}
+	channel := strings.TrimSpace(r.FormValue("channel"))
+	if channel == "" {
+		channel = "stable"
+	}
+	manifest, err := s.updateStore.Publish(updates.Manifest{
+		Version:        strings.TrimSpace(r.FormValue("version")),
+		Channel:        channel,
+		OS:             osName,
+		Architecture:   strings.TrimSpace(r.FormValue("architecture")),
+		Signature:      signature,
+		Rollout:        rollout,
+		AllowDowngrade: allowDowngrade,
+		Notes:          notes,
+		PublishedBy:    principalFromContext(r.Context()).User.Username,
+	}, io.LimitReader(file, 128*1024*1024+1))
+	if err != nil {
+		// A rejected signature is the one failure worth its own code: it means the
+		// operator signed the wrong file or pasted the wrong value, and every
+		// agent would otherwise have failed silently.
+		code := "INVALID_UPDATE"
+		status := 400
+		switch {
+		case errors.Is(err, updates.ErrSignatureRejected):
+			code = "UPDATE_SIGNATURE_REJECTED"
+		case errors.Is(err, updates.ErrSignatureUnverifiable):
+			code = "UPDATE_SIGNING_KEY_MISSING"
+			status = 503
+		}
+		writeAPIError(w, r, status, code, err.Error())
+		return
+	}
 	s.recordAdminAudit(r, "agent_update.publish", "agent_update",
-		manifest.Version+"-"+manifest.Architecture, nil, manifest, "")
+		manifest.Version+"-"+manifest.Architecture, nil, manifest, notes)
 	writeJSON(w, 201, manifest)
 }
 

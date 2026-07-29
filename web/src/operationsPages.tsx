@@ -99,6 +99,26 @@ type EnrollmentDiagnostics = {
   enrollment?: {mode: string; network_mode: string; allowed_networks: string[]};
 };
 type Bucket = {label: string; count: number};
+type Release = {
+  base: string;
+  version: string;
+  channel: string;
+  architecture: string;
+  rollout_percent: number;
+  allow_downgrade?: boolean;
+  notes?: string;
+  signature_verified: boolean;
+  published_at?: string;
+  published_by?: string;
+  adopted_agents: number;
+  eligible_agents: number;
+};
+type ReleaseListing = {
+  releases: Release[];
+  agent_versions: Bucket[];
+  agents: number;
+  signature_verified: boolean;
+};
 type Statistics = {
   generated_at: string;
   assets: {
@@ -317,15 +337,46 @@ export function AgentsPage({
   const [architecture, setArchitecture] = React.useState("x86_64");
   const [channel, setChannel] = React.useState("stable");
   const [signature, setSignature] = React.useState("");
-  const [rollout, setRollout] = React.useState(100);
+  const [signatureFile, setSignatureFile] = React.useState<File|null>(null);
+  const [notes, setNotes] = React.useState("");
+  const [allowDowngrade, setAllowDowngrade] = React.useState(false);
+  const [rollout, setRollout] = React.useState(10);
+  const [releases, setReleases] = React.useState<Release[]>([]);
+  const [releaseInfo, setReleaseInfo] = React.useState<ReleaseListing|null>(null);
   const load = React.useCallback(() =>
     api<{agents: Agent[]}>("/api/v1/admin/agents").then(value => setItems(value.agents)),
   []);
+  const loadReleases = React.useCallback(() =>
+    api<ReleaseListing>("/api/v1/admin/agent-updates").then(value => {
+      setReleaseInfo(value);
+      setReleases(value.releases);
+    }).catch(() => {}),
+  []);
   React.useEffect(() => {
     load().catch(reason => setError((reason as Error).message));
-    const timer = window.setInterval(() => load().catch(() => {}), 15000);
+    loadReleases();
+    const timer = window.setInterval(() => {
+      load().catch(() => {});
+      loadReleases();
+    }, 15000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [load, loadReleases]);
+  const setReleaseRollout = (release: Release, percent: number) => mutate(async () => {
+    await api(`/api/v1/admin/agent-updates/${release.base}`, jsonRequest(csrf, {
+      rollout_percent: percent,
+      reason: percent === 0 ? "관리 콘솔 배포 중단" : `관리 콘솔 rollout ${percent}%`,
+    }, "PATCH"));
+    await loadReleases();
+  });
+  const retireRelease = (release: Release) => {
+    if (!window.confirm(`${release.version} (${release.architecture}) 릴리즈를 삭제합니까?`)) return;
+    return mutate(async () => {
+      await api(`/api/v1/admin/agent-updates/${release.base}`, {
+        method: "DELETE", headers: {"X-CSRF-Token": csrf},
+      });
+      await loadReleases();
+    });
+  };
   const mutate = async (work: () => Promise<unknown>) => {
     setError("");
     try { await work(); await load(); } catch (reason) { setError((reason as Error).message); }
@@ -358,14 +409,24 @@ export function AgentsPage({
     event.preventDefault();
     if (!file) return;
     const body = new FormData();
-    body.set("artifact", file); body.set("version", version); body.set("channel", channel);
-    body.set("os", "linux"); body.set("architecture", architecture);
-    body.set("signature", signature); body.set("rollout_percent", String(rollout));
+    body.set("artifact", file);
+    body.set("version", version);
+    body.set("channel", channel);
+    body.set("architecture", architecture);
+    body.set("rollout_percent", String(rollout));
+    if (notes) body.set("notes", notes);
+    if (allowDowngrade) body.set("allow_downgrade", "true");
+    // A signature file is what the signing step actually produces, so accept it
+    // directly instead of making the operator base64 it by hand.
+    if (signatureFile) body.set("signature_file", signatureFile);
+    else body.set("signature", signature);
     try {
       await api("/api/v1/admin/agent-updates", {
         method: "POST", headers: {"X-CSRF-Token": csrf}, body,
       });
-      setFile(null); setVersion(""); setSignature("");
+      setFile(null); setVersion(""); setSignature(""); setSignatureFile(null);
+      setNotes(""); setAllowDowngrade(false);
+      await loadReleases();
     } catch (reason) { setError((reason as Error).message); }
   };
   return <section>
@@ -396,18 +457,95 @@ export function AgentsPage({
           <button className="primary compact"><KeyRound size={15}/>장비 토큰 발급</button>
         </form>
       </Panel>
-      <Panel title="서명된 Agent 업데이트" action="최대 128 MiB">
+      <Panel title="서명된 Agent 업데이트 게시" action="최대 128 MiB">
         <form className="compact-form update-form" onSubmit={publish}>
           <label>Artifact<input type="file" onChange={event => setFile(event.target.files?.[0] || null)} required/></label>
-          <label>버전<input value={version} onChange={event => setVersion(event.target.value)} placeholder="0.2.3" required/></label>
+          <label>버전<input value={version} onChange={event => setVersion(event.target.value)} placeholder="0.2.7" required/></label>
           <label>채널<select value={channel} onChange={event => setChannel(event.target.value)}><option>stable</option><option>beta</option></select></label>
           <label>아키텍처<select value={architecture} onChange={event => setArchitecture(event.target.value)}><option>x86_64</option><option>aarch64</option></select></label>
-          <label className="wide">Ed25519 Signature (Base64)<textarea value={signature} onChange={event => setSignature(event.target.value)} required/></label>
-          <label>Rollout %<input type="number" min="0" max="100" value={rollout} onChange={event => setRollout(Number(event.target.value))}/></label>
-          <button className="primary compact"><Save size={15}/>업데이트 게시</button>
+          <label>서명 파일 <small className="optional">.sig 업로드</small>
+            <input type="file" onChange={event => setSignatureFile(event.target.files?.[0] || null)}/></label>
+          <label>최초 Rollout %<input type="number" min="0" max="100" value={rollout}
+            onChange={event => setRollout(Number(event.target.value))}/></label>
+          {!signatureFile && <label className="wide">Ed25519 Signature (Base64)
+            <textarea value={signature} onChange={event => setSignature(event.target.value)}
+              placeholder="서명 파일을 올리면 비워 두어도 됩니다" required/></label>}
+          <label className="wide">릴리즈 메모<input value={notes}
+            onChange={event => setNotes(event.target.value)} placeholder="무엇이 바뀌었는지"/></label>
+          <label className="wide inline-check">
+            <input type="checkbox" checked={allowDowngrade}
+              onChange={event => setAllowDowngrade(event.target.checked)}/>
+            이전 버전으로 되돌리는 롤백 릴리즈
+          </label>
+          <button className="primary compact"><Save size={15}/>게시</button>
         </form>
+        <p className="hint update-hint">
+          {releaseInfo?.signature_verified
+            ? "Server에 서명 공개키가 설정되어 있어 게시 시점에 서명을 검증합니다. 잘못된 서명은 여기서 거부됩니다."
+            : "Server에 서명 공개키가 없어 게시 시점 검증을 할 수 없습니다. INVENQOR_UPDATE_PUBLIC_KEY를 설정하면 잘못된 서명을 fleet 전체가 실패하기 전에 잡아냅니다."}
+          {" 처음에는 10% 정도로 게시하고 아래에서 단계적으로 넓히십시오."}
+        </p>
       </Panel>
     </div>}
+    {!!releases.length && <Panel
+      title={`게시된 릴리즈 ${releases.length}건`}
+      action={`Agent ${(releaseInfo?.agents ?? 0).toLocaleString("ko-KR")}대`}
+    >
+      <div className="release-list">
+        {releases.map(release => {
+          const share = releaseInfo?.agents
+            ? Math.round(release.adopted_agents * 100 / releaseInfo.agents)
+            : 0;
+          return <div key={release.base} className={release.rollout_percent === 0 ? "release halted" : "release"}>
+            <div className="release-head">
+              <strong>{release.version}<span>{release.architecture} · {release.channel}</span></strong>
+              <div className="release-flags">
+                {release.signature_verified
+                  ? <em className="ok" title="게시 시점에 서명을 검증했습니다.">서명 검증됨</em>
+                  : <em title="Server에 공개키가 없어 검증하지 못했습니다.">서명 미검증</em>}
+                {release.allow_downgrade && <em className="warn">롤백</em>}
+                {release.rollout_percent === 0 && <em className="warn">중단</em>}
+              </div>
+              {can(access, "agents.manage") && <div className="release-actions">
+                {[10, 25, 50, 100].map(percent => <button
+                  key={percent}
+                  className={release.rollout_percent === percent ? "selected" : ""}
+                  onClick={() => setReleaseRollout(release, percent)}
+                >{percent}%</button>)}
+                <button className="danger" onClick={() => setReleaseRollout(release, 0)}>중단</button>
+                <button className="danger" onClick={() => retireRelease(release)}>
+                  <Trash2 size={13}/>
+                </button>
+              </div>}
+            </div>
+            <div className="release-progress">
+              <div className="meter" role="img"
+                aria-label={`적용 ${release.adopted_agents}대, rollout ${release.rollout_percent}%`}>
+                <i style={{width: `${Math.min(100, share)}%`}}/>
+                <b style={{width: `${Math.min(100, release.rollout_percent)}%`}}/>
+              </div>
+              <span>
+                적용 {release.adopted_agents.toLocaleString("ko-KR")}대 · 대상
+                {" "}{release.rollout_percent}% ({release.eligible_agents.toLocaleString("ko-KR")}대)
+                {release.notes ? ` · ${release.notes}` : ""}
+              </span>
+            </div>
+          </div>;
+        })}
+      </div>
+      {!!releaseInfo?.agent_versions.length && <div className="breakdown version-breakdown">
+        {releaseInfo.agent_versions.slice(0, 6).map((bucket, index) =>
+          <div key={bucket.label}>
+            <span className={`chart-color c${index % 6}`}/>
+            <strong>{bucket.label}</strong><b>{bucket.count.toLocaleString("ko-KR")}</b>
+          </div>)}
+      </div>}
+      <p className="hint">
+        진한 막대는 이미 그 버전을 보고한 Agent 비율, 옅은 막대는 현재 rollout 대상
+        비율입니다. 문제가 보이면 <strong>중단</strong>을 누르십시오. 즉시 아무 Agent도
+        해당 릴리즈를 제안받지 않으며, 이미 적용된 Agent는 롤백 릴리즈를 게시해 되돌립니다.
+      </p>
+    </Panel>}
     <div className="card-grid agent-cards">{items.map(agent =>
       <article className="agent-card" key={agent.id}>
         <div className="host-icon"><Activity/></div><Badge value={agent.status}/>

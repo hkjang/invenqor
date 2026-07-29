@@ -49,8 +49,14 @@ for _ in $(seq 1 30); do
   docker exec "$postgres" pg_isready -U invenqor >/dev/null 2>&1 && break
   sleep 1
 done
+openssl genpkey -algorithm ED25519 -out "$work/update-private.pem" >/dev/null 2>&1
+update_public_key=$(
+  openssl pkey -in "$work/update-private.pem" -pubout -outform DER |
+    tail -c 32 | base64 | tr -d '\r\n'
+)
 docker run -d --name "$server" --network "$network" -p "127.0.0.1:$port:7070" \
   -e INVENQOR_POSTGRES_DSN='postgres://invenqor:e2e-contract-password@invenqor-e2e-postgres-'$suffix':5432/invenqor?sslmode=disable' \
+  -e INVENQOR_UPDATE_PUBLIC_KEY="$update_public_key" \
   -v "$state_volume:/var/lib/invenqor-server" invenqor-server:e2e >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
@@ -121,22 +127,45 @@ jq -e '.totals.succeeded >= 1 and
 docker volume create "$agent_volume" >/dev/null
 mkdir -p "$work/config"
 
-openssl genpkey -algorithm ED25519 -out "$work/update-private.pem" >/dev/null 2>&1
-update_public_key=$(
-  openssl pkey -in "$work/update-private.pem" -pubout -outform DER |
-    tail -c 32 | base64 | tr -d '\r\n'
-)
 openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
   -in "$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
   -out "$work/update.sig"
-update_signature=$(base64 < "$work/update.sig" | tr -d '\r\n')
+
+# A signature over the wrong bytes must be refused when it is published, not
+# discovered later by every agent in the fleet.
+openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
+  -in "$work/token" -out "$work/wrong.sig"
+rejected_publish=$(curl -sS -o "$work/rejected-publish.json" -w '%{http_code}' \
+  -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
+  -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
+  -F version=99.0.0 -F architecture=x86_64 \
+  -F "signature_file=@$work/wrong.sig" -F rollout_percent=100 \
+  "http://127.0.0.1:$port/api/v1/admin/agent-updates")
+test "$rejected_publish" = 400
+jq -e '.error.code == "UPDATE_SIGNATURE_REJECTED"' "$work/rejected-publish.json" >/dev/null
+
+# The raw .sig file openssl produced is accepted as-is, and a canary rollout
+# starts small.
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -F version=0.2.4 -F channel=stable -F os=linux -F architecture=x86_64 \
-  -F "signature=$update_signature" -F rollout_percent=100 \
+  -F version=99.0.0 -F channel=stable -F architecture=x86_64 \
+  -F "signature_file=@$work/update.sig" -F rollout_percent=10 \
+  -F "notes=e2e canary" \
   "http://127.0.0.1:$port/api/v1/admin/agent-updates" \
   > "$work/update-manifest.json"
-jq -e '.version == "0.2.4" and .size > 0' "$work/update-manifest.json" >/dev/null
+jq -e '.version == "99.0.0" and .size > 0 and .signature_verified == true and
+       .rollout_percent == 10' "$work/update-manifest.json" >/dev/null
+
+# Rollout is widened without re-uploading, and the listing reports progress.
+curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" -X PATCH \
+  -H 'Content-Type: application/json' -d '{"rollout_percent":100}' \
+  "http://127.0.0.1:$port/api/v1/admin/agent-updates/99.0.0-linux-x86_64" |
+  jq -e '.release.rollout_percent == 100' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/agent-updates" |
+  jq -e '.signature_verified == true and
+         (.releases[] | select(.version == "99.0.0") |
+          .signature_verified == true and .rollout_percent == 100)' >/dev/null
 
 sed \
   -e 's|# url = .*|url = "http://'"$server"':7070"|' \
@@ -171,9 +200,9 @@ docker run --name "$update_client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
   invenqor-agent:e2e --check-update > "$work/update-check.txt"
-grep -q 'staged invenqor-agent update 0.2.4' "$work/update-check.txt"
+grep -q 'staged invenqor-agent update 99.0.0' "$work/update-check.txt"
 docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
-  cat /state/updates/pending.json | jq -e '.manifest.version == "0.2.4"' >/dev/null
+  cat /state/updates/pending.json | jq -e '.manifest.version == "99.0.0"' >/dev/null
 docker rm "$update_client" >/dev/null
 docker run -d --name "$client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \

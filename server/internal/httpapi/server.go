@@ -388,8 +388,17 @@ func (s *Server) routes() {
 		protected.With(s.requireCSRF, s.requirePermission("users.manage")).Delete(
 			"/api/v1/admin/users/{userID}", s.deleteUser,
 		)
+		protected.With(s.requirePermission("agents.read")).Get(
+			"/api/v1/admin/agent-updates", s.listAgentUpdates,
+		)
 		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
 			"/api/v1/admin/agent-updates", s.publishAgentUpdate,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Patch(
+			"/api/v1/admin/agent-updates/{release}", s.updateAgentUpdateRollout,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Delete(
+			"/api/v1/admin/agent-updates/{release}", s.retireAgentUpdate,
 		)
 		protected.With(s.requirePermission("api_keys.manage")).Get(
 			"/api/v1/admin/api-key-scopes", s.apiKeyScopes,

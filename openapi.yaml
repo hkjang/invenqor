@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.6
+  version: 0.2.7
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
@@ -139,6 +139,50 @@ paths:
         "401": {description: Invalid agent credential}
         "404": {description: Artifact not found}
   /api/v1/admin/agent-updates:
+    get:
+      operationId: listAgentUpdates
+      summary: List published releases with their rollout and adoption
+      description: Requires agents.read. Reports each release's rollout percent, how many agents already report that version, how many the rollout can reach, and whether this server was able to verify the signature at publish time.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Releases, fleet version distribution and verification capability
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [releases, agent_versions, agents, signature_verified]
+                properties:
+                  releases:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        base: {type: string, description: Release identifier used by the rollout and delete endpoints}
+                        version: {type: string}
+                        channel: {type: string, enum: [stable, beta]}
+                        architecture: {type: string, enum: [x86_64, aarch64]}
+                        rollout_percent: {type: integer, minimum: 0, maximum: 100}
+                        allow_downgrade: {type: boolean, description: A deliberate rollback release, which agents accept even though it is older}
+                        notes: {type: string}
+                        signature_verified: {type: boolean, description: Whether the server checked the signature when it was published}
+                        published_at: {type: string, format: date-time}
+                        published_by: {type: string}
+                        sha256: {type: string}
+                        size: {type: integer}
+                        adopted_agents: {type: integer}
+                        eligible_agents: {type: integer}
+                  agent_versions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        label: {type: string}
+                        count: {type: integer}
+                  agents: {type: integer}
+                  signature_verified: {type: boolean, description: Whether a signing public key is configured on this server}
+        "401": {description: Authentication required}
+        "403": {description: agents.read permission required}
     post:
       operationId: publishAgentUpdate
       summary: Publish an administrator-approved signed agent update
@@ -166,6 +210,38 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/UpdateManifest"}
         "400": {description: "Invalid metadata, signature encoding, or artifact"}
+  /api/v1/admin/agent-updates/{release}:
+    patch:
+      operationId: setAgentUpdateRollout
+      summary: Widen or halt a release without re-uploading it
+      description: Requires agents.manage and the X-CSRF-Token header. Setting rollout_percent to 0 is the emergency stop: no agent is offered the release again, and nothing is deleted. Recorded in the audit log as agent_update.halt.
+      security: [{session: []}]
+      parameters:
+        - {in: path, name: release, required: true, schema: {type: string}, description: "The release base identifier, for example 0.2.7-linux-x86_64"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rollout_percent]
+              properties:
+                rollout_percent: {type: integer, minimum: 0, maximum: 100}
+                reason: {type: string}
+      responses:
+        "200": {description: Rollout updated}
+        "400": {description: The rollout percent is out of range}
+        "404": {description: The release does not exist}
+    delete:
+      operationId: retireAgentUpdate
+      summary: Delete a published release and its artifact
+      description: Requires agents.manage and the X-CSRF-Token header. Halting with rollout_percent 0 is the reversible action; this is the cleanup that follows.
+      security: [{session: []}]
+      parameters:
+        - {in: path, name: release, required: true, schema: {type: string}}
+      responses:
+        "204": {description: Retired}
+        "404": {description: The release does not exist}
   /api/v1/admin/api-keys:
     get:
       operationId: listApiKeys

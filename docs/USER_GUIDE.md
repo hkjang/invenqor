@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.6 · Server v0.2.6</p>
+    <p><strong>대상 버전</strong> Agent v0.2.7 · Server v0.2.7</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.6는 Server v0.2.6와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.7는 Server v0.2.7와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -105,8 +105,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -190,7 +190,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.6`입니다.
+예상 출력은 `invenqor-agent 0.2.7`입니다.
 
 ## 5. 최초 설정
 
@@ -283,7 +283,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.6 registration diagnosis at 2026-07-29T09:12:44Z
+invenqor-agent 0.2.7 registration diagnosis at 2026-07-29T09:12:44Z
   host          app-web-01
   agent-id      d8d847a5-7a75-48bc-8ee8-c8e1af94f74c
   config        /etc/invenqor-agent/config.toml
@@ -297,7 +297,7 @@ invenqor-agent 0.2.6 registration diagnosis at 2026-07-29T09:12:44Z
   [PASS] transport encryption          HTTPS is configured
   [PASS] name resolution               inventory.example resolves to 10.10.4.20:7070
   [PASS] server reachability           GET /health/ready answered READY
-  [PASS] server identity               Invenqor Server 0.2.6 (pod invenqor-0, database POSTGRES)
+  [PASS] server identity               Invenqor Server 0.2.7 (pod invenqor-0, database POSTGRES)
   [PASS] observed source address       the Server sees this host as 10.20.7.31
   [PASS] registration policy           mode open, network any: this host may register
   [PASS] device credential             accepted by the Server as agent d8d847a5… (auto_bearer)
@@ -391,7 +391,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.6 on app-web-01
+invenqor-agent 0.2.7 on app-web-01
   updated       2026-07-29T09:14:02Z
   server.url    https://inventory.example:7070
   registration  failed (the Server rejected or could not be reached for registration)
@@ -612,8 +612,11 @@ sudo ./scripts/uninstall.sh
 
 서명된 Agent 자동 업데이트는 선택적으로 지원합니다. 관리자가 승인·서명한
 새 버전만 다운로드하고 SHA-256, 크기, OS/Architecture와 고정 Ed25519 공개키를
-검증한 뒤 스테이징합니다. systemd 환경에서는 전용 root helper가 원자 교체하고
-이전 바이너리를 `.previous`로 보존합니다. 설정 방법은
+검증한 뒤 스테이징합니다. 설치 직전에 새 바이너리를 실행해 버전을 확인하므로
+실행되지 않는 빌드는 설치되지 않고 기존 바이너리가 유지됩니다. 교체는 원자적이며
+이전 바이너리를 `.previous`로 보존합니다. systemd는 즉시, OpenRC와 SysV는 서비스
+시작 시 적용합니다. 한 대를 지금 갱신하려면 `--update-now`를 실행하고, 현재 실행
+버전과 대기 중인 버전은 `--status`로 확인합니다. 설정 방법은
 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md#8-서명된-agent-자동-업데이트)를
 참조하십시오. 원격 셸이나 임의 명령 실행은 지원하지 않습니다.
 

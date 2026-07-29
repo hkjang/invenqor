@@ -14,7 +14,19 @@ CONFIG=/etc/invenqor-agent/config.toml
 PIDFILE=/var/run/invenqor-agent.pid
 USER=invenqor-agent
 
+# systemd installs a path unit that applies a staged update as soon as it
+# appears. SysV has no equivalent, so apply it here, where the script already
+# runs as root. Without this an update stages forever and never installs.
+apply_staged_update() {
+    if [ -e /var/lib/invenqor-agent/updates/pending.json ]; then
+        echo "Applying staged $NAME update"
+        "$DAEMON" --config "$CONFIG" --apply-pending-update ||
+            echo "Staged update was not applied" >&2
+    fi
+}
+
 start_agent() {
+    apply_staged_update
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon --start --quiet --background --make-pidfile \
             --pidfile "$PIDFILE" --chuid "$USER" --exec "$DAEMON" -- \

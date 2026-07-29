@@ -48,6 +48,10 @@ impl Agent {
         {
             status.record_enrolled(unix_time());
         }
+        // Recorded here rather than only in run(): a one-shot invocation writes
+        // the same status file, and reporting updates as disabled there would be
+        // wrong.
+        status.record_update_settings(config.updates.enabled, &config.updates.channel);
         let agent = Self {
             config,
             identity,
@@ -344,11 +348,19 @@ impl Agent {
     }
 
     pub async fn run(mut self) -> Result<()> {
+        self.status
+            .record_update_settings(self.config.updates.enabled, &self.config.updates.channel);
+        self.persist_status();
         if self.config.updates.enabled {
             tokio::spawn(crate::updater::run_checker(
                 self.config.clone(),
                 self.identity.agent_id.clone(),
             ));
+        } else {
+            info!(
+                "automatic updates are disabled; set updates.enabled and updates.public_key \
+                 to let this Agent take signed releases"
+            );
         }
         if let Err(error) = self.collect_once().await {
             warn!(error = %format!("{error:#}"), "initial collection cycle failed");

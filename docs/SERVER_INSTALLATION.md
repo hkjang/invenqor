@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.6 · Agent 버전: v0.2.6 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.7 · Agent 버전: v0.2.7 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -66,17 +66,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.6.tar.gz`
-- `invenqor-0.2.6.tar.gz.sha256`
+- `invenqor-0.2.7.tar.gz`
+- `invenqor-0.2.7.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.6.tar.gz.sha256
-gzip -t invenqor-0.2.6.tar.gz
-docker load < invenqor-0.2.6.tar.gz
-docker image inspect invenqor-server:0.2.6 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.7.tar.gz.sha256
+gzip -t invenqor-0.2.7.tar.gz
+docker load < invenqor-0.2.7.tar.gz
+docker image inspect invenqor-server:0.2.7 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -96,7 +96,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.6
+./scripts/build-offline-images.sh 0.2.7
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -111,7 +111,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.6
+  invenqor-server:0.2.7
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -207,8 +207,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -240,19 +240,28 @@ SysV와 OpenRC 정의도 패키지에 포함됩니다. 상태 디렉터리와 `a
 
 ## 8. 서명된 Agent 자동 업데이트
 
+### 8.1 키 준비
+
 업데이트 전용 Ed25519 개인키는 Server에 두지 말고 오프라인 서명 환경에
-보관합니다. Agent에는 32-byte 공개키의 base64만 고정합니다.
+보관합니다. 같은 공개키를 Agent(검증용)와 Server(게시 시점 검증용)에 각각
+설정합니다.
 
 ```bash
 openssl genpkey -algorithm ED25519 -out update-private.pem
 openssl pkey -in update-private.pem -pubout -outform DER |
-  tail -c 32 | base64 | tr -d '\n'
+  tail -c 32 | base64 | tr -d '\n'          # 이 값을 양쪽에 설정
 openssl pkeyutl -sign -rawin -inkey update-private.pem \
-  -in invenqor-agent -out invenqor-agent.sig
-base64 < invenqor-agent.sig | tr -d '\n'
+  -in invenqor-agent -out invenqor-agent.sig  # 이 .sig 파일을 그대로 업로드
 ```
 
-Agent 설정:
+Server:
+
+```bash
+INVENQOR_UPDATE_PUBLIC_KEY="위에서-구한-base64-공개키"
+# 또는 INVENQOR_UPDATE_PUBLIC_KEY_FILE=/run/secrets/update-public-key
+```
+
+Agent:
 
 ```toml
 [updates]
@@ -263,17 +272,86 @@ public_key = "위에서-구한-base64-공개키"
 install_path = "/opt/invenqor-agent/bin/invenqor-agent"
 ```
 
-관리자는 `agents.manage` 권한과 CSRF Token으로 artifact, version, channel,
-OS, architecture, signature, rollout percentage를
-`POST /api/v1/admin/agent-updates`에 multipart로 게시합니다. Agent는 자신보다
-높은 버전만 받고, 인증된 단일 `7070` 연결로 다운로드합니다. 최대 128 MiB,
-SHA-256, 크기, OS/Architecture와 Ed25519 서명을 모두 확인한 뒤에만
-`updates/pending.json`을 만듭니다. 적용 시 기존 바이너리는 `.previous`로
-보존되고 원자적 rename 실패 시 즉시 복원됩니다.
+<div class="callout warning">
+<strong>Server 공개키를 반드시 설정하십시오.</strong> 설정하지 않으면 Server는
+서명 형식만 확인합니다. 잘못된 서명으로 게시해도 게시는 성공하고, 그 뒤 fleet의
+모든 Agent가 검증에 실패합니다. 증상은 각 호스트 로그 한 줄뿐이므로 발견이
+늦습니다. 공개키가 있으면 게시 시점에 <code>UPDATE_SIGNATURE_REJECTED</code>로
+거부되어 잘못을 즉시 알 수 있습니다. 콘솔 게시 화면에도 현재 검증 가능 여부가
+표시됩니다.
+</div>
 
-Canary는 `rollout_percent`를 1~10으로 시작하고 중앙 수신·오류율을 확인한 뒤
-단계적으로 100까지 올리십시오. 개인키 유출 시 즉시 배포 중단, 공개키 교체,
-새 패키지 배포를 수행합니다.
+### 8.2 게시와 단계적 확대
+
+**Agent 관리** 화면에서 artifact와 `.sig` 파일을 올리고 버전·아키텍처·최초
+rollout을 입력하면 게시됩니다. `.sig`는 `openssl pkeyutl -sign`이 만든 64 byte
+원본을 그대로 올려도 되고, base64 문자열을 붙여넣어도 됩니다(줄바꿈 허용).
+
+게시 후에는 **재업로드 없이** rollout을 조절합니다.
+
+| 작업 | API | 콘솔 |
+|---|---|---|
+| 릴리즈·적용 현황 조회 | `GET /api/v1/admin/agent-updates` | 게시된 릴리즈 목록 |
+| rollout 확대 | `PATCH /api/v1/admin/agent-updates/{release}` | 10 / 25 / 50 / 100% 버튼 |
+| 즉시 배포 중단 | 같은 API에 `rollout_percent: 0` | **중단** 버튼 |
+| 릴리즈 삭제 | `DELETE /api/v1/admin/agent-updates/{release}` | 휴지통 버튼 |
+
+권장 절차는 10% → 확인 → 25% → 50% → 100%입니다. 화면의 진한 막대는 해당 버전을
+이미 보고한 Agent 비율, 옅은 막대는 현재 rollout 대상 비율입니다. 문제가 보이면
+**중단**을 누르십시오. 즉시 어떤 Agent도 그 릴리즈를 제안받지 않습니다.
+
+Rollout 대상 선정은 Agent UUID 해시로 결정되므로 같은 호스트가 항상 같은 순번에
+들어갑니다. Canary가 매번 다른 장비로 바뀌면 비교가 불가능하기 때문입니다.
+20,000대 시뮬레이션에서 각 구간 편차는 ±10% 이내입니다.
+
+### 8.3 롤백
+
+이미 적용된 Agent를 되돌리려면 **이전 버전을 롤백 릴리즈로 게시**합니다.
+`allow_downgrade`가 설정된 릴리즈만 Agent가 하위 버전으로 받아들이며, 서명과
+SHA-256 검증은 동일하게 수행합니다. 이 표시가 없으면 Agent는 자신보다 낮은
+버전을 거부하므로, 잘못된 릴리즈에 갇힌 fleet을 꺼낼 수 없습니다.
+
+### 8.4 적용 경로와 안전장치
+
+Agent는 비특권 계정으로 실행되므로 스스로 바이너리를 교체하지 않습니다. 검증이
+끝난 업데이트는 `updates/pending.json`으로 스테이징되고, 실제 설치는 권한을 가진
+경로가 수행합니다.
+
+| init | 적용 시점 |
+|---|---|
+| systemd | `invenqor-agent-update.path`가 스테이징을 감지해 즉시 적용하고 서비스를 재시작 |
+| OpenRC | 서비스 시작 시 `start_pre`에서 적용 |
+| SysV | 서비스 시작 시 적용 |
+
+설치 직전에 **스테이징된 바이너리를 실제로 실행해 `--version`을 확인**합니다.
+서명과 해시가 맞아도 실행되지 않는 빌드(아키텍처 계열 불일치, 잘못된 빌드)를
+활성화하면 그 릴리즈를 받은 모든 호스트에서 수집이 멈추고 장비마다 손으로
+복구해야 합니다. 자기 점검에 실패하면 설치를 중단하고 기존 바이너리를 그대로
+유지합니다. 성공 시 기존 바이너리는 `.previous`로 남고 rename 실패 시 즉시
+복원되며, 스테이징 파일은 적용 후 삭제됩니다.
+
+관리자가 직접 즉시 갱신할 때는 한 번의 명령으로 끝냅니다.
+
+```bash
+sudo /opt/invenqor-agent/bin/invenqor-agent \
+  --config /etc/invenqor-agent/config.toml --update-now
+```
+
+확인, 다운로드, 서명·해시 검증, 자기 점검, 설치를 순서대로 수행하고 결과를
+출력합니다. 설치 권한이 없으면 스테이징까지만 진행하고 종료 코드 3과 함께 필요한
+명령을 알려 주므로, 운영 중 Agent는 영향을 받지 않습니다.
+
+현재 상태는 Agent에서 바로 확인할 수 있습니다.
+
+```bash
+invenqor-agent --config /etc/invenqor-agent/config.toml --status
+#   updates       자동 · 실행 0.2.7 · 대기 0.2.8
+invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
+#   [WARN] automatic updates  a verified update is staged and is waiting to be installed
+```
+
+개인키가 유출되면 즉시 모든 릴리즈를 **중단**하고 공개키를 교체한 뒤 새 패키지를
+배포하십시오.
 
 ## 9. Kubernetes 멀티 파드
 
@@ -352,7 +430,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.6`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.7`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -361,7 +439,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.6 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.7 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -554,7 +632,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.6
+  invenqor-server:0.2.7
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서

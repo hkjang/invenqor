@@ -10,6 +10,22 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG: &str = "/etc/invenqor-agent/config.toml";
 
+/// The flags the help text documents. Kept beside the parser so the two cannot
+/// drift: a documented flag that the parser rejects is a bug a user meets first.
+const HELP_FLAGS: &[&str] = &[
+    "--once",
+    "--diagnose",
+    "--status",
+    "--json",
+    "--validate-config",
+    "--apply-pending-update",
+    "--check-update",
+    "--update-now",
+    "--print-default-config",
+    "--help",
+    "--version",
+];
+
 #[tokio::main]
 async fn main() {
     match run().await {
@@ -40,6 +56,7 @@ async fn run() -> Result<i32> {
     let validate = args.iter().any(|v| v == "--validate-config");
     let apply_update = args.iter().any(|v| v == "--apply-pending-update");
     let check_update = args.iter().any(|v| v == "--check-update");
+    let update_now = args.iter().any(|v| v == "--update-now");
     let diagnose_flag = args.iter().any(|v| v == "--diagnose");
     let status_flag = args.iter().any(|v| v == "--status");
     let json = args.iter().any(|v| v == "--json");
@@ -63,7 +80,10 @@ async fn run() -> Result<i32> {
     }
     if apply_update {
         match updater::apply_pending(&config)? {
-            Some(version) => println!("applied invenqor-agent update {version}"),
+            Some(version) => {
+                record_applied_update(&config, &version);
+                println!("applied invenqor-agent update {version}");
+            }
             None => println!("no pending update"),
         }
         return Ok(0);
@@ -112,6 +132,9 @@ async fn run() -> Result<i32> {
         }
         return Ok(0);
     }
+    if update_now {
+        return update_in_one_step(&config, &identity.agent_id).await;
+    }
     let mut agent = Agent::new(config, identity, &config_path)?;
     if once {
         let snapshot = agent.collect_once().await?;
@@ -134,6 +157,65 @@ async fn run() -> Result<i32> {
     } else {
         agent.run().await.map(|()| 0)
     }
+}
+
+/// Checks, verifies, stages and installs in one command. The staged-then-applied
+/// split exists because the collector runs unprivileged and only a root helper may
+/// replace the binary; when an operator is already root, making them run two
+/// commands in the right order is needless ceremony.
+async fn update_in_one_step(config: &Config, agent_id: &str) -> Result<i32> {
+    let staged = updater::check_and_stage(config, agent_id).await?;
+    match &staged {
+        Some(version) => println!("verified and staged invenqor-agent {version}"),
+        None => {
+            println!("already up to date on channel {}", config.updates.channel);
+            return Ok(0);
+        }
+    }
+    match updater::apply_pending(config) {
+        Ok(Some(version)) => {
+            record_applied_update(config, &version);
+            println!(
+                "installed invenqor-agent {version} at {}",
+                config.updates.install_path.display()
+            );
+            println!("restart the service to run it: systemctl restart invenqor-agent");
+            Ok(0)
+        }
+        Ok(None) => {
+            println!("nothing to install");
+            Ok(0)
+        }
+        Err(error) => {
+            // Staging succeeded, so the download and signature were fine; this is
+            // a permission or self-test failure and the running agent is untouched.
+            eprintln!("could not install the staged update: {error:#}");
+            eprintln!(
+                "the running agent is unchanged. Install it as root with: \
+                 invenqor-agent --config {} --apply-pending-update",
+                config_path_hint(config)
+            );
+            Ok(3)
+        }
+    }
+}
+
+fn config_path_hint(config: &Config) -> String {
+    let _ = config;
+    DEFAULT_CONFIG.to_string()
+}
+
+/// Records the applied version in the status report so an operator can confirm
+/// the update without reading the journal.
+fn record_applied_update(config: &Config, version: &str) {
+    let Ok(store) = StateStore::open(&config.agent.state_dir, config.agent.max_queue_bytes) else {
+        return;
+    };
+    let Some(mut status) = store.read_status() else {
+        return;
+    };
+    status.record_update_applied(version, invenqor_agent::model::unix_time());
+    let _ = store.write_status(&status);
 }
 
 fn print_status(config: &Config, json: bool) -> Result<i32> {
@@ -191,6 +273,29 @@ fn print_status(config: &Config, json: bool) -> Result<i32> {
             }
             println!("                fix: {}", error.remediation);
         }
+        println!(
+            "  updates       {} · 실행 {}{}",
+            if status.updates.enabled {
+                "자동"
+            } else {
+                "비활성"
+            },
+            status.updates.running_version,
+            match (
+                &status.updates.staged_version,
+                &status.updates.applied_version
+            ) {
+                (Some(staged), _) => format!(" · 대기 {staged}"),
+                (None, Some(applied)) => format!(" · 최근 적용 {applied}"),
+                _ => String::new(),
+            }
+        );
+        if let Some(error) = &status.updates.last_error {
+            println!(
+                "                update error {}: {}",
+                error.code, error.detail
+            );
+        }
         println!("  summary       {}", status.headline());
     }
     Ok(if status.degraded() { 1 } else { 0 })
@@ -214,15 +319,13 @@ fn reject_unknown_arguments(args: &[String]) -> Result<()> {
             continue;
         }
         match arg.as_str() {
-            "--once"
-            | "--validate-config"
-            | "--apply-pending-update"
-            | "--check-update"
-            | "--diagnose"
-            | "--status"
-            | "--json" => {}
+            // The short forms of the two flags that have one. Everything else is
+            // accepted straight from the documented list below, so a flag cannot
+            // be offered in --help and refused here.
+            "-h" | "-V" => {}
             "--config" => skip = true,
             value if value.starts_with("--config=") => {}
+            value if HELP_FLAGS.contains(&value) => {}
             value => anyhow::bail!("unknown argument: {value}"),
         }
     }
@@ -256,8 +359,55 @@ Options:
   --validate-config       Validate configuration and exit
   --apply-pending-update  Root helper: verify and atomically apply staged update
   --check-update          Check, verify, and stage an available signed update
+  --update-now            Check, stage and install in one step (needs write
+                          access to the install path; the running agent is left
+                          untouched if the new binary fails its self-test)
   --print-default-config  Print a complete default configuration
   -V, --version           Print version
   -h, --help              Print help"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every flag the help text offers must also be accepted. These two lists sat
+    /// apart, and `--update-now` shipped documented but rejected.
+    #[test]
+    fn every_documented_flag_is_accepted() {
+        let mut help = Vec::new();
+        for line in HELP_FLAGS {
+            help.push((*line).to_string());
+        }
+        for flag in &help {
+            reject_unknown_arguments(&[flag.clone()]).unwrap_or_else(|error| {
+                panic!("the help text documents {flag} but it is rejected: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn unknown_flags_are_still_refused() {
+        assert!(reject_unknown_arguments(&["--wat".to_string()]).is_err());
+        // A path-taking flag must not swallow the end of the arguments.
+        assert!(reject_unknown_arguments(&["--config".to_string()]).is_err());
+        reject_unknown_arguments(&["--config".to_string(), "/tmp/x.toml".to_string()]).unwrap();
+        reject_unknown_arguments(&["--config=/tmp/x.toml".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn argument_value_reads_both_forms() {
+        let separated = vec!["--config".to_string(), "/etc/a.toml".to_string()];
+        assert_eq!(
+            argument_value(&separated, "--config").as_deref(),
+            Some("/etc/a.toml")
+        );
+        let joined = vec!["--config=/etc/b.toml".to_string()];
+        assert_eq!(
+            argument_value(&joined, "--config").as_deref(),
+            Some("/etc/b.toml")
+        );
+        assert!(argument_value(&[], "--config").is_none());
+    }
 }

@@ -103,6 +103,21 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// With the key configured, a bad signature is rejected at publish time
+	// instead of failing silently on every agent in the fleet.
+	signingKey, err := updates.ParsePublicKey(processConfig.UpdateSigningPublicKey)
+	if err != nil {
+		return err
+	}
+	if signingKey != nil {
+		updateStore.SetSigningKey(signingKey)
+		logger.Info("agent_update_signature_verification_enabled")
+	} else {
+		logger.Warn(
+			"agent_update_signature_not_verified",
+			"guidance", "set INVENQOR_UPDATE_PUBLIC_KEY so a mistyped update signature is rejected when it is published",
+		)
+	}
 	apiKeyService := apikeys.NewService(database.DB())
 	bootstrapStatus, err := bootstrapManager.Ensure(rootContext)
 	if err != nil {

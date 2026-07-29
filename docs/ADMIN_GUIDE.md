@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.6 · Server v0.2.6</p>
+    <p><strong>대상 버전</strong> Agent v0.2.7 · Server v0.2.7</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.6 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.7 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -31,7 +31,7 @@
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.6를 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.7를 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +40,7 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.6에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.7에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -104,13 +104,13 @@ Linux 호스트
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.7/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.6는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.7는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -322,6 +322,9 @@ sudo systemctl restart invenqor-agent
 | `--status` | 없음 | 등록·전송이 밀려 있으면 1 | 마지막 실패 코드, Server `request_id`, 큐 깊이 확인 |
 | `status.json` | 매 주기 기록 | — | 저널 열람이 불가능한 환경의 사후 분석 |
 | `--once` | 수집·전송 1회 | 전송 실패 시 2 | 설치 자동화의 검증 단계 |
+| `--check-update` | 스테이징만 | 확인 실패 시 1 | 서명 검증까지만 수행하고 설치하지 않음 |
+| `--update-now` | 설치까지 1회 | 권한 부족 시 3 | 한 대를 즉시 갱신하거나 canary를 손으로 확인 |
+| `--apply-pending-update` | 설치 | 실패 시 1 | 스테이징된 업데이트를 권한 있는 계정으로 적용 |
 
 `--diagnose`와 `--status`는 등록도, 전송도, 자격 증명 교체도 하지 않으므로 운영
 중 아무 때나 실행할 수 있습니다. `--once`는 운영 서비스와 같은 상태 디렉터리를
@@ -336,6 +339,9 @@ sudo systemctl restart invenqor-agent
 | `delivery.consecutive_failures` | 연속 전송 실패 횟수 |
 | `queue.pending_events`, `queue.bytes` | 미전송 이벤트 수와 크기 |
 | `collection.collector_errors` | 마지막 주기의 수집기 실패 수 |
+| `updates.enabled`, `updates.channel` | 자동 업데이트 설정 상태 |
+| `updates.running_version`, `updates.staged_version` | 실행 중 버전과 재시작 시 적용될 버전 |
+| `updates.last_error` | 마지막 업데이트 실패 코드와 조치 문구 |
 
 감시 시스템에서는 다음 한 줄로 판정할 수 있습니다.
 
@@ -401,7 +407,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.6 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.7 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -467,7 +473,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.6에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.7에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -481,7 +487,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.6의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.7의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -622,7 +628,7 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.6
+User-Agent: invenqor-agent/0.2.7
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -652,7 +658,7 @@ Authorization: Bearer <token>   # 구성한 경우
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.6는 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.7는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -822,25 +828,50 @@ DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉
 
 ### 12.2 업그레이드
 
-v0.2.6는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
-root helper 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에
-배포하지 않고 오프라인 환경에서 보관합니다. Agent는 더 높은 버전, 일치하는
-OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이 모두 맞을 때만
-`pending.json`을 생성합니다. 기존 바이너리는 `.previous`로 보존됩니다.
+v0.2.7는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
+기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에 배포하지 않고
+오프라인 환경에서 보관합니다. Agent는 더 높은 버전(또는 `allow_downgrade`가
+지정된 릴리즈), 일치하는 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이
+모두 맞을 때만 `pending.json`을 생성합니다.
+
+설치 직전에 Agent는 스테이징된 바이너리를 실행해 `--version`이 약속한 버전을
+보고하는지 확인합니다. 실패하면 설치를 중단하고 기존 바이너리를 유지하므로,
+실행되지 않는 빌드가 fleet의 수집을 멈추지 않습니다. 교체된 기존 바이너리는
+`.previous`로 보존됩니다.
+
+적용 시점은 init 시스템에 따라 다릅니다. systemd는 감시 경로로 즉시,
+OpenRC와 SysV는 서비스 시작 시 적용합니다.
 
 1. 새 바이너리와 SHA-256, 변경 내역, 설정 호환성을 승인합니다.
 2. 오프라인 Ed25519 키로 바이너리 원문을 서명합니다.
-3. `agents.manage` 관리자 API로 stable/beta, 아키텍처와 rollout 비율을 게시합니다.
-4. 1~10% canary에서 설치·수집·전송·재시작을 확인합니다.
-5. 중앙 오류율과 `.previous` 생성 상태를 확인한 뒤 단계적으로 100% 확산합니다.
-6. 실패하면 서비스를 중지하고 `.previous`를 원래 경로로 복원합니다.
+
+   ```bash
+   openssl pkeyutl -sign -rawin -inkey update-signing.pem \
+     -in invenqor-agent -out invenqor-agent.sig
+   ```
+
+   Server에 `INVENQOR_UPDATE_PUBLIC_KEY`를 설정해 두면 게시 시점에 서명을
+   검증하고, 맞지 않으면 `UPDATE_SIGNATURE_REJECTED`로 거부합니다. 설정하지
+   않으면 검증 없이 게시되며 콘솔이 그 사실을 표시합니다.
+3. 콘솔 **운영 → Agent 업데이트**에서 채널·아키텍처와 rollout 비율(초기 10%)로
+   게시합니다. `.sig` 파일은 그대로 올릴 수 있습니다.
+4. canary에서 설치·수집·전송·재시작을 확인합니다. 특정 한 대를 즉시 확인하려면
+   해당 호스트에서 `--update-now`를 실행합니다.
+5. 콘솔의 적용 대수와 fleet 버전 분포, 중앙 오류율을 확인한 뒤 25 → 50 → 100%로
+   확산합니다. 재업로드는 필요하지 않습니다.
+6. 문제가 발견되면 **중단**(rollout 0)을 누릅니다. 이미 받은 호스트는 12.3에
+   따라 되돌립니다.
 
 상태 디렉터리와 `agent-id`를 유지해야 중앙에서 같은 장비로 연속 인식합니다.
 
 ### 12.3 롤백
 
+장비 수가 적으면 호스트에서 직접 되돌립니다. 여러 대를 되돌려야 하면 이전
+버전을 `allow_downgrade`로 게시합니다. Agent는 그 표시가 있는 릴리즈만 하위
+버전으로 받아들이므로, 잘못된 릴리즈에 갇힌 fleet을 중앙에서 꺼낼 수 있습니다.
+
 1. 서비스 중지
-2. 이전 검증 바이너리 복원
+2. 이전 검증 바이너리 복원(`<바이너리>.previous`)
 3. 설정/상태 스키마가 이전 버전과 호환되는지 확인
 4. 이전 설정이 필요하면 승인된 백업 복원
 5. 서비스 시작 후 큐와 중앙 수신 확인

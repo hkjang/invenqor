@@ -14,7 +14,7 @@ services:
       timeout: 3s
       retries: 20
   server:
-    image: invenqor-server:0.2.6
+    image: invenqor-server:0.2.7
     pull_policy: never
     environment:
       INVENQOR_LISTEN_ADDRESS: 0.0.0.0:7070

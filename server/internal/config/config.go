@@ -35,6 +35,9 @@ type Config struct {
 	BootstrapAdminPassword string
 	AgentAutoEnrollment    bool
 	AgentEnrollmentToken   string
+	// UpdateSigningPublicKey lets the server verify an update signature when it
+	// is published instead of discovering the mistake on every agent later.
+	UpdateSigningPublicKey string
 }
 
 func Load() (Config, error) {
@@ -72,6 +75,21 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	updateSigningKey, err := secretFromEnvironment(
+		[]string{
+			"INVENQOR_UPDATE_PUBLIC_KEY",
+			"UPDATE_PUBLIC_KEY",
+			"update_public_key",
+		},
+		[]string{
+			"INVENQOR_UPDATE_PUBLIC_KEY_FILE",
+			"UPDATE_PUBLIC_KEY_FILE",
+			"update_public_key_file",
+		},
+	)
+	if err != nil {
+		return Config{}, fmt.Errorf("update signing public key: %w", err)
+	}
 	config := Config{
 		ListenAddress:          envOrDefault("INVENQOR_LISTEN_ADDRESS", defaultListenAddress),
 		BaseURL:                strings.TrimRight(os.Getenv("INVENQOR_BASE_URL"), "/"),
@@ -88,6 +106,7 @@ func Load() (Config, error) {
 		BootstrapAdminPassword: bootstrapPassword,
 		AgentAutoEnrollment:    agentAutoEnrollment,
 		AgentEnrollmentToken:   agentEnrollmentToken,
+		UpdateSigningPublicKey: updateSigningKey,
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err

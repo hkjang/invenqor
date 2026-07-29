@@ -15,3 +15,14 @@ depend() {
     after firewall
 }
 
+# systemd installs a path unit that applies a staged update the moment it
+# appears. OpenRC has no equivalent, so without this an update downloaded and
+# verified by the agent would stage forever and never install.
+start_pre() {
+    if [ -e /var/lib/invenqor-agent/updates/pending.json ]; then
+        einfo "Applying staged Invenqor agent update"
+        "$command" --config /etc/invenqor-agent/config.toml \
+            --apply-pending-update || ewarn "Staged update was not applied"
+    fi
+}
+

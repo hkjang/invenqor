@@ -435,7 +435,57 @@ pub async fn run(config: &Config, config_path: &Path, config_present: bool) -> R
         }
     }
 
+    // Automatic updates are the other thing an operator cannot see from outside.
+    checks.push(update_check(config));
+
     finish(config, config_path, agent_id, now, checks)
+}
+
+/// Reports whether this host can actually take a signed release. The three ways
+/// it silently cannot are: updates switched off, no pinned public key, and a
+/// staged update that nothing privileged ever applies.
+fn update_check(config: &Config) -> Check {
+    if !config.updates.enabled {
+        return Check::skip(
+            "automatic updates",
+            "disabled in the configuration; releases must be installed by hand",
+        );
+    }
+    if config
+        .updates
+        .public_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Check::fail(
+            "automatic updates",
+            "enabled without a pinned Ed25519 public key",
+            "Set updates.public_key to the release signing key; without it no \
+             update can be verified.",
+        );
+    }
+    let pending = config.agent.state_dir.join("updates/pending.json");
+    if pending.exists() {
+        return Check::warn(
+            "automatic updates",
+            format!(
+                "a verified update is staged at {} and is waiting to be installed",
+                pending.display()
+            ),
+            "systemd applies it through invenqor-agent-update.path; on OpenRC and \
+             SysV it installs at the next service restart, or run \
+             --apply-pending-update as root now.",
+        );
+    }
+    Check::pass(
+        "automatic updates",
+        format!(
+            "channel {}, checked every {} seconds",
+            config.updates.channel, config.updates.check_interval_seconds
+        ),
+    )
 }
 
 fn finish(

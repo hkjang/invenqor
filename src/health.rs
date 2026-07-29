@@ -21,6 +21,25 @@ pub struct StatusReport {
     pub delivery: DeliveryStatus,
     pub queue: QueueStatus,
     pub collection: CollectionStatus,
+    #[serde(default)]
+    pub updates: UpdateStatus,
+}
+
+/// What the automatic update path has actually done on this host. Without this,
+/// "did the fleet take the update" could only be answered by logging into each
+/// machine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    pub enabled: bool,
+    pub channel: String,
+    pub running_version: String,
+    pub last_check_at: Option<u64>,
+    pub last_check_at_utc: Option<String>,
+    pub staged_version: Option<String>,
+    pub staged_at_utc: Option<String>,
+    pub applied_version: Option<String>,
+    pub applied_at_utc: Option<String>,
+    pub last_error: Option<FailureRecord>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -150,7 +169,43 @@ impl StatusReport {
             delivery: DeliveryStatus::default(),
             queue: QueueStatus::default(),
             collection: CollectionStatus::default(),
+            updates: UpdateStatus {
+                running_version: env!("CARGO_PKG_VERSION").to_string(),
+                ..UpdateStatus::default()
+            },
         }
+    }
+
+    pub fn record_update_settings(&mut self, enabled: bool, channel: &str) {
+        self.updates.enabled = enabled;
+        self.updates.channel = channel.to_string();
+    }
+
+    pub fn record_update_check(&mut self, staged: Option<String>, now: u64) {
+        self.updates.last_check_at = Some(now);
+        self.updates.last_check_at_utc = Some(format_unix_utc(now));
+        if let Some(version) = staged {
+            self.updates.staged_version = Some(version);
+            self.updates.staged_at_utc = Some(format_unix_utc(now));
+        }
+        self.updates.last_error = None;
+        self.touch(now);
+    }
+
+    pub fn record_update_applied(&mut self, version: &str, now: u64) {
+        self.updates.applied_version = Some(version.to_string());
+        self.updates.applied_at_utc = Some(format_unix_utc(now));
+        self.updates.staged_version = None;
+        self.updates.staged_at_utc = None;
+        self.updates.last_error = None;
+        self.touch(now);
+    }
+
+    pub fn record_update_failure(&mut self, error: &anyhow::Error, now: u64) {
+        self.updates.last_check_at = Some(now);
+        self.updates.last_check_at_utc = Some(format_unix_utc(now));
+        self.updates.last_error = Some(FailureRecord::from_error(error, now));
+        self.touch(now);
     }
 
     pub fn touch(&mut self, now: u64) {
