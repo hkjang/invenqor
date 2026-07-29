@@ -40,6 +40,10 @@ type Store struct {
 }
 
 func Open(root string) (*Store, error) {
+	return OpenWithKey(root, "")
+}
+
+func OpenWithKey(root string, externalKeyPath string) (*Store, error) {
 	if err := secureDirectory(root); err != nil {
 		return nil, err
 	}
@@ -48,9 +52,19 @@ func Open(root string) (*Store, error) {
 		keyPath:       filepath.Join(root, keyFileName),
 		bootstrapPath: filepath.Join(root, bootstrapFileName),
 	}
-	key, err := loadOrCreateKey(store.keyPath)
+	var key []byte
+	var err error
+	if externalKeyPath != "" {
+		store.keyPath = externalKeyPath
+		key, err = os.ReadFile(externalKeyPath)
+		if err == nil && len(key) != keySize {
+			err = fmt.Errorf("external master key must be %d bytes", keySize)
+		}
+	} else {
+		key, err = loadOrCreateKey(store.keyPath)
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load master key: %w", err)
 	}
 	store.key = key
 	return store, nil

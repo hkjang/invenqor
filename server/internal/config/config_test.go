@@ -10,7 +10,7 @@ func TestValidateAcceptsSafeBootstrapConfig(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	config := Config{
-		ListenAddress:   "127.0.0.1:8080",
+		ListenAddress:   "127.0.0.1:7070",
 		BaseURL:         "https://invenqor.example.test",
 		StateDir:        root,
 		SQLitePath:      filepath.Join(root, "invenqor.db"),
@@ -26,7 +26,7 @@ func TestValidateAcceptsSafeBootstrapConfig(t *testing.T) {
 func TestValidateRejectsRelativeStateDirectory(t *testing.T) {
 	t.Parallel()
 	config := Config{
-		ListenAddress:   "127.0.0.1:8080",
+		ListenAddress:   "127.0.0.1:7070",
 		StateDir:        "data",
 		SQLitePath:      "/tmp/invenqor.db",
 		DatabaseSchema:  "public",
@@ -42,7 +42,7 @@ func TestValidateRejectsUnsafeSchemaName(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	config := Config{
-		ListenAddress:   "127.0.0.1:8080",
+		ListenAddress:   "127.0.0.1:7070",
 		StateDir:        root,
 		SQLitePath:      filepath.Join(root, "invenqor.db"),
 		DatabaseSchema:  `public"; DROP TABLE users; --`,

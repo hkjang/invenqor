@@ -11,11 +11,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/apikeys"
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
 	"github.com/hkjang/invenqor/server/internal/ingest"
 	"github.com/hkjang/invenqor/server/internal/spool"
 	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/updates"
 	"github.com/hkjang/invenqor/server/internal/version"
 	"github.com/hkjang/invenqor/server/internal/webui"
 )
@@ -32,6 +34,9 @@ type Server struct {
 	agentRateLimit   *agentRateLimiter
 	spool            *spool.Manager
 	bootstrapStore   *bootstrap.Store
+	updateStore      *updates.Store
+	apiKeyService    *apikeys.Service
+	apiRateLimit     *agentRateLimiter
 	logger           *slog.Logger
 }
 
@@ -45,6 +50,8 @@ type Options struct {
 	IngestService    *ingest.Service
 	Spool            *spool.Manager
 	BootstrapStore   *bootstrap.Store
+	UpdateStore      *updates.Store
+	APIKeyService    *apikeys.Service
 	Logger           *slog.Logger
 }
 
@@ -54,6 +61,9 @@ func New(options Options) *Server {
 	}
 	if options.IngestService == nil {
 		options.IngestService = ingest.NewService(options.Database.DB())
+	}
+	if options.APIKeyService == nil {
+		options.APIKeyService = apikeys.NewService(options.Database.DB())
 	}
 	server := &Server{
 		router:           chi.NewRouter(),
@@ -67,6 +77,9 @@ func New(options Options) *Server {
 		agentRateLimit:   newAgentRateLimiter(120, time.Minute),
 		spool:            options.Spool,
 		bootstrapStore:   options.BootstrapStore,
+		updateStore:      options.UpdateStore,
+		apiKeyService:    options.APIKeyService,
+		apiRateLimit:     newAgentRateLimiter(600, time.Minute),
 		logger:           options.Logger,
 	}
 	server.routes()
@@ -96,6 +109,46 @@ func (s *Server) routes() {
 	s.router.Get("/api/v1/auth/keycloak/start", s.keycloakStart)
 	s.router.Get("/api/v1/auth/keycloak/callback", s.keycloakCallback)
 	s.router.Post("/v1/agent/events", s.receiveAgentEvent)
+	s.router.Get("/v1/agent/updates", s.agentUpdateManifest)
+	s.router.Get("/v1/agent/updates/{artifact}/artifact", s.agentUpdateArtifact)
+	s.router.Group(func(external chi.Router) {
+		external.Use(s.authenticateAPIKey)
+		external.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/external/assets", s.listAssets,
+		)
+		external.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/external/assets/{assetID}", s.getAsset,
+		)
+		external.With(s.requirePermission("assets.write")).Post(
+			"/api/v1/external/assets", s.createAsset,
+		)
+		external.With(s.requirePermission("assets.write")).Patch(
+			"/api/v1/external/assets/{assetID}", s.updateAsset,
+		)
+		external.With(s.requirePermission("assets.delete")).Delete(
+			"/api/v1/external/assets/{assetID}", s.deleteAsset,
+		)
+		external.With(s.requirePermission("assets.delete")).Post(
+			"/api/v1/external/assets/{assetID}/restore", s.restoreAsset,
+		)
+		external.With(s.requirePermission("relations.read")).Get(
+			"/api/v1/external/assets/{assetID}/relations", s.assetRelations,
+		)
+		external.With(s.requirePermission("relations.write")).Post(
+			"/api/v1/external/assets/{assetID}/relations", s.createAssetRelation,
+		)
+		external.With(s.requirePermission("relations.write")).Delete(
+			"/api/v1/external/assets/{assetID}/relations/{relationID}", s.deleteAssetRelation,
+		)
+		external.With(s.requirePermission("queries.execute")).Post(
+			"/api/v1/external/query/validate", s.validateQuery,
+		)
+		external.With(s.requirePermission("queries.execute")).Post(
+			"/api/v1/external/query/execute", s.executeQuery,
+		)
+		external.With(s.requirePermission("mcp.access")).Get("/mcp", s.mcpGet)
+		external.With(s.requirePermission("mcp.access")).Post("/mcp", s.mcpPost)
+	})
 	s.router.Group(func(protected chi.Router) {
 		protected.Use(s.authenticate)
 		protected.Get("/api/v1/auth/me", s.me)
@@ -209,6 +262,36 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/audit", s.listAudit,
 		)
+		protected.With(s.requireCSRF, s.requirePermission("agents.manage")).Post(
+			"/api/v1/admin/agent-updates", s.publishAgentUpdate,
+		)
+		protected.With(s.requirePermission("api_keys.manage")).Get(
+			"/api/v1/admin/api-key-scopes", s.apiKeyScopes,
+		)
+		protected.With(s.requirePermission("api_keys.manage")).Get(
+			"/api/v1/admin/api-keys", s.listAPIKeys,
+		)
+		protected.With(s.requirePermission("api_keys.manage")).Get(
+			"/api/v1/admin/api-keys/{keyID}", s.getAPIKey,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Post(
+			"/api/v1/admin/api-keys", s.createAPIKey,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Patch(
+			"/api/v1/admin/api-keys/{keyID}", s.updateAPIKey,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Post(
+			"/api/v1/admin/api-keys/{keyID}/scopes", s.addAPIKeyScopes,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Delete(
+			"/api/v1/admin/api-keys/{keyID}/scopes/{scope}", s.removeAPIKeyScope,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Post(
+			"/api/v1/admin/api-keys/{keyID}/rotate", s.rotateAPIKey,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("api_keys.manage")).Delete(
+			"/api/v1/admin/api-keys/{keyID}", s.revokeAPIKey,
+		)
 	})
 	s.router.NotFound(webui.Handler().ServeHTTP)
 }
@@ -270,6 +353,7 @@ func (s *Server) systemInfo(response http.ResponseWriter, _ *http.Request) {
 		"commit":         version.Commit,
 		"build_time":     version.BuildTime,
 		"database_mode":  s.database.Mode(),
+		"port":           7070,
 	}
 	if failure := s.database.PostgresFailure(); failure != nil {
 		payload["postgres_startup_failure"] = failure

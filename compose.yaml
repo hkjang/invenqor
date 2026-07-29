@@ -15,13 +15,13 @@ services:
   server:
     build: .
     environment:
-      INVENQOR_LISTEN_ADDRESS: 0.0.0.0:8080
+      INVENQOR_LISTEN_ADDRESS: 0.0.0.0:7070
       INVENQOR_STATE_DIR: /var/lib/invenqor-server
       INVENQOR_POSTGRES_DSN: postgres://invenqor:${POSTGRES_PASSWORD}@postgres:5432/invenqor?sslmode=disable
     volumes:
       - server-state:/var/lib/invenqor-server
     ports:
-      - "${INVENQOR_PORT:-8080}:8080"
+      - "${INVENQOR_WEB_PORT:-7070}:7070"
     depends_on:
       postgres:
         condition: service_healthy

@@ -23,6 +23,24 @@ func applyMigrations(ctx context.Context, db *sql.DB, dialect string) error {
 		)`); err != nil {
 		return fmt.Errorf("create migration tracking table: %w", err)
 	}
+	var target migrationTarget = db
+	if dialect == "postgres" {
+		connection, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("reserve migration connection: %w", err)
+		}
+		defer connection.Close()
+		const lockID int64 = 528_022_026_072_900_001
+		if _, err := connection.ExecContext(
+			ctx, "SELECT pg_advisory_lock($1)", lockID,
+		); err != nil {
+			return fmt.Errorf("acquire PostgreSQL migration lock: %w", err)
+		}
+		defer connection.ExecContext(
+			context.Background(), "SELECT pg_advisory_unlock($1)", lockID,
+		)
+		target = connection
+	}
 	entries, err := fs.ReadDir(migrations.Files, dialect)
 	if err != nil {
 		return fmt.Errorf("list %s migrations: %w", dialect, err)
@@ -42,7 +60,7 @@ func applyMigrations(ctx context.Context, db *sql.DB, dialect string) error {
 		if err != nil {
 			return fmt.Errorf("migration %q has invalid version: %w", entry.Name(), err)
 		}
-		applied, err := migrationApplied(ctx, db, version)
+		applied, err := migrationApplied(ctx, target, version)
 		if err != nil {
 			return err
 		}
@@ -53,14 +71,20 @@ func applyMigrations(ctx context.Context, db *sql.DB, dialect string) error {
 		if err != nil {
 			return fmt.Errorf("read migration %q: %w", entry.Name(), err)
 		}
-		if err := runMigration(ctx, db, version, string(body)); err != nil {
+		if err := runMigration(ctx, target, version, string(body)); err != nil {
 			return fmt.Errorf("apply migration %q: %w", entry.Name(), err)
 		}
 	}
 	return nil
 }
 
-func migrationApplied(ctx context.Context, db *sql.DB, version int64) (bool, error) {
+type migrationTarget interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
+func migrationApplied(ctx context.Context, db migrationTarget, version int64) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(
 		ctx,
@@ -72,7 +96,7 @@ func migrationApplied(ctx context.Context, db *sql.DB, version int64) (bool, err
 	return count > 0, nil
 }
 
-func runMigration(ctx context.Context, db *sql.DB, version int64, body string) error {
+func runMigration(ctx context.Context, db migrationTarget, version int64, body string) error {
 	transaction, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)

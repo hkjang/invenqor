@@ -3,9 +3,9 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> v0.1.0</p>
+    <p><strong>대상 버전</strong> v0.2.1</p>
     <p><strong>문서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-07-28</p>
+    <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor v0.2.0은 Linux Agent와 중앙 Server·관리 콘솔을 함께 제공합니다.
+> Invenqor v0.2.1은 Linux Agent와 중앙 Server·관리 콘솔을 함께 제공합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -57,11 +57,12 @@ Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`에 있는 운영체제 정보
 
 - CPU: `x86_64` 또는 `aarch64`
 - 운영체제: Linux
-- 권장 기준: Kernel 3.10 이상, RHEL 계열 7 이상, Ubuntu 18.04 이상,
+- 검증 기준: CentOS 7, Red Hat UBI 8/9, Ubuntu 22.04/24.04 LTS, Alpine
+- 권장 기준: Kernel 3.10 이상, RHEL 계열 7 이상, Ubuntu 22.04 이상,
   Debian 10 이상
 - 호환 목표: Alpine, Amazon Linux, SUSE
 - 서비스 관리자: systemd, OpenRC 또는 SysV init
-- 네트워크: 게이트웨이를 사용할 경우 해당 HTTPS 주소의 TCP 443 outbound
+- 네트워크: Server의 단일 HTTPS TCP 7070 outbound
 
 오래된 커널과 배포판은 핵심 `/proc` 수집만 가능할 수 있습니다. 정적 바이너리는
 외부 언어 런타임을 요구하지 않지만, 실제 사용하는 시스템 호출보다 오래된 커널의
@@ -99,8 +100,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor/releases/download/v0.1.0/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor/releases/download/v0.1.0/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -184,7 +185,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.1.0`입니다.
+예상 출력은 `invenqor-agent 0.2.1`입니다.
 
 ## 5. 최초 설정
 
@@ -437,8 +438,12 @@ sudo ./scripts/uninstall.sh
 
 ### 자동 업데이트나 원격 명령을 지원합니까?
 
-v0.1.0은 지원하지 않습니다. 이 기능은 서명 검증, allowlist, 감사 로그,
-롤백 같은 별도 보안 통제를 갖춘 뒤 도입해야 합니다.
+서명된 Agent 자동 업데이트는 선택적으로 지원합니다. 관리자가 승인·서명한
+새 버전만 다운로드하고 SHA-256, 크기, OS/Architecture와 고정 Ed25519 공개키를
+검증한 뒤 스테이징합니다. systemd 환경에서는 전용 root helper가 원자 교체하고
+이전 바이너리를 `.previous`로 보존합니다. 설정 방법은
+[Server 설치 및 운영 가이드](SERVER_INSTALLATION.md#8-서명된-agent-자동-업데이트)를
+참조하십시오. 원격 셸이나 임의 명령 실행은 지원하지 않습니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

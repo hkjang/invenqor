@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/apikeys"
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
 	"github.com/hkjang/invenqor/server/internal/config"
@@ -18,6 +19,7 @@ import (
 	"github.com/hkjang/invenqor/server/internal/ingest"
 	"github.com/hkjang/invenqor/server/internal/spool"
 	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/updates"
 	"github.com/hkjang/invenqor/server/internal/version"
 )
 
@@ -36,7 +38,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	bootstrapStore, err := bootstrap.Open(processConfig.StateDir)
+	bootstrapStore, err := bootstrap.OpenWithKey(
+		processConfig.StateDir,
+		processConfig.MasterKeyPath,
+	)
 	if err != nil {
 		return err
 	}
@@ -93,6 +98,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	updateStore, err := updates.Open(processConfig.UpdateDir)
+	if err != nil {
+		return err
+	}
+	apiKeyService := apikeys.NewService(database.DB())
 	bootstrapStatus, err := bootstrapManager.Ensure(rootContext)
 	if err != nil {
 		return err
@@ -114,6 +124,8 @@ func run(logger *slog.Logger) error {
 		IngestService:    ingestService,
 		Spool:            eventSpool,
 		BootstrapStore:   bootstrapStore,
+		UpdateStore:      updateStore,
+		APIKeyService:    apiKeyService,
 		Logger:           logger,
 	})
 	go api.RunSpoolReplay(rootContext, 5*time.Second)

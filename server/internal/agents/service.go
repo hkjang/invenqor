@@ -209,6 +209,7 @@ func (s *Service) RotateBearer(
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
+	s.invalidateCache(internalID)
 	return token, nil
 }
 
@@ -370,17 +371,21 @@ func (s *Service) SetBlocked(
 	if count, _ := result.RowsAffected(); count == 0 {
 		return sql.ErrNoRows
 	}
+	s.invalidateCache(internalID)
+	return s.audit.Record(ctx, s.database, audit.Entry{
+		ActorType: "user", ActorID: actorID, Action: action,
+		ResourceType: "agent", ResourceID: internalID, Result: "success",
+	})
+}
+
+func (s *Service) invalidateCache(internalID string) {
 	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
 	for key, cached := range s.cache {
 		if cached.agent.ID == internalID {
 			delete(s.cache, key)
 		}
 	}
-	s.cacheMu.Unlock()
-	return s.audit.Record(ctx, s.database, audit.Entry{
-		ActorType: "user", ActorID: actorID, Action: action,
-		ResourceType: "agent", ResourceID: internalID, Result: "success",
-	})
 }
 
 func (s *Service) GetByExternalID(

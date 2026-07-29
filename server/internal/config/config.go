@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultListenAddress = "127.0.0.1:8080"
+	defaultListenAddress = "127.0.0.1:7070"
 	defaultStateDir      = "/var/lib/invenqor-server"
 )
 
@@ -28,6 +28,8 @@ type Config struct {
 	DatabaseSchema  string
 	DatabaseTimeout time.Duration
 	ShutdownTimeout time.Duration
+	MasterKeyPath   string
+	UpdateDir       string
 }
 
 func Load() (Config, error) {
@@ -41,6 +43,8 @@ func Load() (Config, error) {
 		DatabaseSchema:  envOrDefault("INVENQOR_POSTGRES_SCHEMA", "public"),
 		DatabaseTimeout: durationEnv("INVENQOR_DATABASE_TIMEOUT", 5*time.Second),
 		ShutdownTimeout: durationEnv("INVENQOR_SHUTDOWN_TIMEOUT", 15*time.Second),
+		MasterKeyPath:   strings.TrimSpace(os.Getenv("INVENQOR_MASTER_KEY_FILE")),
+		UpdateDir:       envOrDefault("INVENQOR_UPDATE_DIR", filepath.Join(stateDir, "updates")),
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -66,6 +70,12 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("shutdown timeout must be positive")
+	}
+	if c.MasterKeyPath != "" && !filepath.IsAbs(c.MasterKeyPath) {
+		return errors.New("master key file path must be absolute")
+	}
+	if c.UpdateDir != "" && !filepath.IsAbs(c.UpdateDir) {
+		return errors.New("update directory must be absolute")
 	}
 	if c.BaseURL != "" {
 		parsed, err := url.Parse(c.BaseURL)

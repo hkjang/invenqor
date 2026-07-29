@@ -41,8 +41,12 @@ fi
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     install -m 0644 "$PACKAGE_DIR/service/invenqor-agent.service" \
         /etc/systemd/system/invenqor-agent.service
+    install -m 0644 "$PACKAGE_DIR/service/invenqor-agent-update.service" \
+        /etc/systemd/system/invenqor-agent-update.service
+    install -m 0644 "$PACKAGE_DIR/service/invenqor-agent-update.path" \
+        /etc/systemd/system/invenqor-agent-update.path
     systemctl daemon-reload
-    systemctl enable --now invenqor-agent.service
+    systemctl enable --now invenqor-agent.service invenqor-agent-update.path
 elif command -v rc-service >/dev/null 2>&1; then
     install -m 0755 "$PACKAGE_DIR/service/invenqor-agent.openrc" \
         /etc/init.d/invenqor-agent

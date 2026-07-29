@@ -25,7 +25,7 @@ impl Transport {
             return Ok(None);
         };
         let mut builder = Client::builder()
-            .https_only(!cfg!(debug_assertions))
+            .https_only(!config.allow_insecure_http)
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent(concat!("invenqor-agent/", env!("CARGO_PKG_VERSION")));
 
@@ -132,6 +132,7 @@ mod tests {
             bearer_token: Some("device-token".into()),
             ca_file: None,
             client_identity_pem: None,
+            allow_insecure_http: true,
             timeout_seconds: 2,
         };
         let transport = Transport::new(&config).unwrap().unwrap();

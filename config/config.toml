@@ -6,6 +6,8 @@
 # ca_file = "/etc/invenqor-agent/ca.pem"
 # A single PEM containing the client certificate chain and private key.
 # client_identity_pem = "/etc/invenqor-agent/device.pem"
+# Set only inside an isolated test network. Production transport must use TLS.
+allow_insecure_http = false
 timeout_seconds = 30
 
 [agent]
@@ -14,6 +16,14 @@ interval_seconds = 900
 heartbeat_seconds = 300
 max_backoff_seconds = 3600
 max_queue_bytes = 104857600
+
+[updates]
+# Signed updates are opt-in. The pinned Ed25519 public key is base64 encoded.
+enabled = false
+channel = "stable"
+check_interval_seconds = 21600
+# public_key = "base64-ed25519-public-key"
+install_path = "/opt/invenqor-agent/bin/invenqor-agent"
 
 [collectors]
 os = true
@@ -31,4 +41,3 @@ containers = true
 # classification and gateway access policy explicitly permit collection.
 include_process_cmdline = false
 max_processes = 10000
-

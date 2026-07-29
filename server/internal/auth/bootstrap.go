@@ -64,6 +64,9 @@ func (manager *BootstrapManager) Ensure(ctx context.Context) (BootstrapStatus, e
 		if _, statErr := os.Stat(manager.TokenPath()); statErr == nil {
 			return BootstrapStatus{Required: true, TokenFile: manager.TokenPath()}, nil
 		}
+		// Another server pod owns the one-time token file. The hash is shared
+		// through the database, so this pod can still accept that token.
+		return BootstrapStatus{Required: true}, nil
 	case errors.Is(err, sql.ErrNoRows):
 	default:
 		return BootstrapStatus{}, fmt.Errorf("read bootstrap token state: %w", err)
@@ -75,15 +78,20 @@ func (manager *BootstrapManager) Ensure(ctx context.Context) (BootstrapStatus, e
 	if err := writeSecretFile(manager.TokenPath(), []byte(token+"\n")); err != nil {
 		return BootstrapStatus{}, fmt.Errorf("write initial administrator token: %w", err)
 	}
-	if _, err := manager.db.ExecContext(
+	result, err := manager.db.ExecContext(
 		ctx,
 		`INSERT INTO server_metadata(key, value, updated_at)
 		 VALUES ('bootstrap_token_hash', $1, CURRENT_TIMESTAMP)
-		 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+		 ON CONFLICT (key) DO NOTHING`,
 		hash,
-	); err != nil {
+	)
+	if err != nil {
 		_ = os.Remove(manager.TokenPath())
 		return BootstrapStatus{}, fmt.Errorf("store initial administrator token hash: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows == 0 {
+		_ = os.Remove(manager.TokenPath())
+		return BootstrapStatus{Required: true}, err
 	}
 	return BootstrapStatus{Required: true, TokenFile: manager.TokenPath()}, nil
 }

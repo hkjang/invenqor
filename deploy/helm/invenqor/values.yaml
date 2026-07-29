@@ -1,17 +1,24 @@
-replicaCount: 1
+replicaCount: 2
 image:
   repository: ghcr.io/hkjang/invenqor-server
-  tag: "0.2.0"
+  tag: "0.2.1"
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP
-  port: 8080
+  port: 7070
 persistence:
   enabled: true
   size: 5Gi
+updates:
+  size: 2Gi
+  accessMode: ReadWriteMany
+  storageClassName: ""
 postgresDsnSecret:
   name: invenqor-database
   key: dsn
+masterKeySecret:
+  name: invenqor-master-key
+  key: master.key
 resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {cpu: "1", memory: 512Mi}

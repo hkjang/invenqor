@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> v0.1.0</p>
+    <p><strong>대상 버전</strong> v0.2.1</p>
     <p><strong>문서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-07-28</p>
+    <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> v0.2.0 중앙 Server 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> v0.2.1 중앙 Server 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -25,10 +25,13 @@
   Authorization Code+PKCE, State, Nonce와 Role/Group Mapping을 검증합니다.
 - Event ID는 Agent별 멱등 키입니다. Collector 오류로 삭제를 추론하지 않고
   `removed` 변경만 논리 삭제합니다.
+- CMDB 자동화와 AI Agent는 사람 Session을 공유하지 않고 scope 기반 API key와
+  stateless `/mcp`를 사용합니다. 자세한 수명주기는
+  [자산 API·MCP·키 관리 가이드](API_MCP_GUIDE.md)를 따릅니다.
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.1.0을 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.1을 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -37,8 +40,8 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.1.0에는 중앙 게이트웨이 구현, CMDB, 대시보드, CVE 매핑, 정책 엔진,
-원격 명령, 자동 업데이트가 포함되지 않습니다.
+v0.2.1에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
 
@@ -50,7 +53,7 @@ Linux 호스트
  │   └─ queue/*.jsonl (0600, 승인 전 삭제 금지)
  └─ outbound HTTPS
        └─ POST {server.url}/v1/agent/events
-             └─ 조직의 Inventory Gateway / CMDB 연계 계층
+             └─ Invenqor Server :7070 / PostgreSQL / CMDB·AI 연계
 ```
 
 핵심 설계 원칙:
@@ -86,7 +89,7 @@ Linux 호스트
 - [ ] 대상 호스트의 `uname -m`과 패키지 아키텍처 일치
 - [ ] 릴리즈 아카이브의 SHA-256 검증
 - [ ] 조직 승인 게이트웨이 URL과 DNS 준비
-- [ ] TCP 443 outbound 및 프록시/방화벽 정책 확인
+- [ ] 단일 TCP 7070 outbound 및 프록시/방화벽 정책 확인
 - [ ] 장비별 bearer token 또는 mTLS 인증서 발급
 - [ ] 사설 CA 사용 시 CA PEM 배포
 - [ ] 자산 데이터의 등급, 보존 기간, 접근 권한 확정
@@ -101,13 +104,13 @@ Linux 호스트
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.1.0/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.1.0/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.1.0은 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.1은 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -187,10 +190,11 @@ sudo service invenqor-agent status
 
 ```toml
 [server]
-url = "https://inventory.example.internal"
+url = "https://inventory.example.internal:7070"
 bearer_token = "장비별-토큰"
 # ca_file = "/etc/invenqor-agent/ca.pem"
 # client_identity_pem = "/etc/invenqor-agent/device.pem"
+allow_insecure_http = false
 timeout_seconds = 30
 
 [agent]
@@ -199,6 +203,13 @@ interval_seconds = 900
 heartbeat_seconds = 300
 max_backoff_seconds = 3600
 max_queue_bytes = 104857600
+
+[updates]
+enabled = true
+channel = "stable"
+check_interval_seconds = 21600
+public_key = "base64-ed25519-public-key"
+install_path = "/opt/invenqor-agent/bin/invenqor-agent"
 
 [collectors]
 os = true
@@ -229,7 +240,8 @@ sudo -u invenqor-agent \
 
 | 키 | 기본값 | 제약·의미 |
 |---|---:|---|
-| `server.url` | 없음 | 게이트웨이 기본 URL. release 빌드는 `https://`만 허용 |
+| `server.url` | 없음 | Server 기본 URL. 운영은 단일 HTTPS `:7070` 사용 |
+| `server.allow_insecure_http` | `false` | 격리 E2E망에서만 HTTP 명시 허용 |
 | `server.bearer_token` | 없음 | HTTP Authorization bearer token |
 | `server.ca_file` | 없음 | 사설 루트 CA PEM 경로 |
 | `server.client_identity_pem` | 없음 | 클라이언트 인증서 체인+개인키 PEM |
@@ -239,6 +251,11 @@ sudo -u invenqor-agent \
 | `agent.heartbeat_seconds` | `300` | 변경이 없을 때 생존 이벤트 주기, 0 금지 |
 | `agent.max_backoff_seconds` | `3600` | 전송 재시도 상한. 0이면 내부적으로 최소 1초 |
 | `agent.max_queue_bytes` | `104857600` | 큐 전체 바이트 한도 |
+| `updates.enabled` | `false` | 서명 업데이트 주기 확인 활성화 |
+| `updates.channel` | `stable` | `stable` 또는 `beta` |
+| `updates.check_interval_seconds` | `21600` | 확인 주기, 최소 300초 |
+| `updates.public_key` | 없음 | base64 Ed25519 공개키, 활성화 시 필수 |
+| `updates.install_path` | `/opt/...` | root helper가 교체할 절대 경로 |
 | `collectors.<name>` | `true` | 개별 수집기 활성화 |
 | `collectors.include_process_cmdline` | `false` | 프로세스 argv 포함 여부 |
 | `collectors.max_processes` | `10000` | PID 정렬 후 수집 상한, 0 금지 |
@@ -348,7 +365,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.1.0 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.1 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -414,7 +431,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.1.0에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.1에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -428,7 +445,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.1.0의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.1의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -569,7 +586,7 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.1.0
+User-Agent: invenqor-agent/0.2.1
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -594,12 +611,12 @@ Authorization: Bearer <token>   # 구성한 경우
 ```json
 {
   "accepted": true,
-  "policy_version": "2026-07-28.1"
+  "policy_version": "2026-07-29.1"
 }
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.1.0은 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.1은 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -643,12 +660,12 @@ HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_ver
 최종 등급은 조직 정책에 따릅니다. 중앙 게이트웨이는 전송 암호화뿐 아니라 저장
 암호화, 역할 기반 접근, 조회 감사, 보존/파기 정책을 구현해야 합니다.
 
-### 10.3 v0.1.0 보안 한계
+### 10.3 v0.2.1 보안 한계
 
 - 아카이브 SHA-256은 제공하지만 서명, SBOM, provenance는 없음
 - 자동 인증서/토큰 회전 기능 없음
 - 로컬 큐 자체 암호화 없음(파일시스템 접근 통제에 의존)
-- 중앙 게이트웨이와 권한 모델은 릴리즈 범위 밖
+- 중앙 Server의 RBAC·감사 로그를 적용하고 정기 접근권한 검토 필요
 - 자동 업데이트와 안전한 rollback 프로토콜 없음
 - 원격 명령 기능 없음
 
@@ -711,17 +728,18 @@ sudo find /var/lib/invenqor-agent/queue -maxdepth 1 \
 
 ### 12.2 업그레이드
 
-v0.1.0에는 자체 업데이트가 없습니다. 조직 배포 도구를 사용합니다.
+v0.2.1은 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
+root helper 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에
+배포하지 않고 오프라인 환경에서 보관합니다. Agent는 더 높은 버전, 일치하는
+OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이 모두 맞을 때만
+`pending.json`을 생성합니다. 기존 바이너리는 `.previous`로 보존됩니다.
 
-1. 새 아카이브와 체크섬 검증
-2. 변경 내역, 설정 호환성, 상태 스키마 검토
-3. canary 호스트에서 설치·수집·전송·재시작 검증
-4. 기존 바이너리와 설정 백업
-5. 서비스 중지
-6. 바이너리 원자 교체
-7. 설정 검증 후 서비스 시작
-8. 버전, 로그, 큐 감소, 중앙 수신 확인
-9. 단계적으로 확산
+1. 새 바이너리와 SHA-256, 변경 내역, 설정 호환성을 승인합니다.
+2. 오프라인 Ed25519 키로 바이너리 원문을 서명합니다.
+3. `agents.manage` 관리자 API로 stable/beta, 아키텍처와 rollout 비율을 게시합니다.
+4. 1~10% canary에서 설치·수집·전송·재시작을 확인합니다.
+5. 중앙 오류율과 `.previous` 생성 상태를 확인한 뒤 단계적으로 100% 확산합니다.
+6. 실패하면 서비스를 중지하고 `.previous`를 원래 경로로 복원합니다.
 
 상태 디렉터리와 `agent-id`를 유지해야 중앙에서 같은 장비로 연속 인식합니다.
 

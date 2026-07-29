@@ -1,0 +1,17 @@
+[Unit]
+Description=Apply a staged Invenqor Agent update
+ConditionPathExists=/var/lib/invenqor-agent/updates/pending.json
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/invenqor-agent/bin/invenqor-agent --config /etc/invenqor-agent/config.toml --apply-pending-update
+ExecStartPost=/bin/systemctl try-restart invenqor-agent.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/invenqor-agent/bin /var/lib/invenqor-agent
+UMask=0077

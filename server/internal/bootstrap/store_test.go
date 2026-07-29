@@ -116,3 +116,27 @@ func TestRuntimeSecretUsesPurposeBoundEncryption(t *testing.T) {
 		t.Fatal("OpenString() accepted a different encryption purpose")
 	}
 }
+
+func TestExternalMasterKeySupportsMultiplePodStores(t *testing.T) {
+	root := t.TempDir()
+	keyPath := filepath.Join(root, "master.key")
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{7}, 32), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	first, err := OpenWithKey(filepath.Join(root, "pod-a"), keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenWithKey(filepath.Join(root, "pod-b"), keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := first.SealString("cluster-secret", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := second.OpenString("cluster-secret", sealed)
+	if err != nil || plain != "shared" {
+		t.Fatalf("second pod OpenString() = %q, %v", plain, err)
+	}
+}

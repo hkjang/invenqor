@@ -29,6 +29,7 @@ fn default_queue_size() -> u64 {
 pub struct Config {
     pub server: ServerConfig,
     pub agent: AgentConfig,
+    pub updates: UpdateConfig,
     pub collectors: CollectorConfig,
 }
 
@@ -39,6 +40,7 @@ pub struct ServerConfig {
     pub bearer_token: Option<String>,
     pub ca_file: Option<PathBuf>,
     pub client_identity_pem: Option<PathBuf>,
+    pub allow_insecure_http: bool,
     pub timeout_seconds: u64,
 }
 
@@ -50,6 +52,16 @@ pub struct AgentConfig {
     pub heartbeat_seconds: u64,
     pub max_backoff_seconds: u64,
     pub max_queue_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    pub enabled: bool,
+    pub channel: String,
+    pub check_interval_seconds: u64,
+    pub public_key: Option<String>,
+    pub install_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +88,7 @@ impl Default for ServerConfig {
             bearer_token: None,
             ca_file: None,
             client_identity_pem: None,
+            allow_insecure_http: false,
             timeout_seconds: default_timeout(),
         }
     }
@@ -89,6 +102,18 @@ impl Default for AgentConfig {
             heartbeat_seconds: default_heartbeat(),
             max_backoff_seconds: 3600,
             max_queue_bytes: default_queue_size(),
+        }
+    }
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel: "stable".to_string(),
+            check_interval_seconds: 21_600,
+            public_key: None,
+            install_path: PathBuf::from("/opt/invenqor-agent/bin/invenqor-agent"),
         }
     }
 }
@@ -139,10 +164,25 @@ impl Config {
             self.collectors.max_processes > 0,
             "max_processes must be > 0"
         );
+        anyhow::ensure!(
+            self.updates.check_interval_seconds >= 300,
+            "updates.check_interval_seconds must be at least 300"
+        );
+        if self.updates.enabled {
+            anyhow::ensure!(self.server.url.is_some(), "updates require server.url");
+            anyhow::ensure!(
+                self.updates
+                    .public_key
+                    .as_deref()
+                    .is_some_and(|v| !v.is_empty()),
+                "updates require an Ed25519 public_key"
+            );
+        }
         if let Some(url) = &self.server.url {
             anyhow::ensure!(
-                url.starts_with("https://") || cfg!(debug_assertions) && url.starts_with("http://"),
-                "server.url must use HTTPS (HTTP is accepted only in debug builds)"
+                url.starts_with("https://")
+                    || self.server.allow_insecure_http && url.starts_with("http://"),
+                "server.url must use HTTPS unless allow_insecure_http is explicitly enabled"
             );
         }
         Ok(())

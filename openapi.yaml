@@ -1,15 +1,19 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.0
+  version: 0.2.1
+  license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
   /health/ready:
     get:
+      operationId: getReadiness
       summary: Readiness and database mode
-      responses: {"200": {description: Ready}, "503": {description: Not ready}}
+      security: []
+      responses: {"200": {description: Ready}, "503": {description: Not ready}, "4XX": {description: Invalid request}}
   /v1/agent/events:
     post:
+      operationId: ingestAgentEvent
       summary: Receive the unchanged Invenqor Agent envelope
       security: [{agentBearer: []}, {agentMTLS: []}]
       parameters:
@@ -25,17 +29,196 @@ paths:
         "202": {description: Durably spooled during PostgreSQL degradation}
         "400": {description: Invalid event}
         "401": {description: Invalid credential}
+  /v1/agent/updates:
+    get:
+      operationId: getAgentUpdateManifest
+      summary: Select a newer signed update for this agent and rollout bucket
+      security: [{agentBearer: []}, {agentMTLS: []}]
+      parameters:
+        - {in: query, name: agent_id, required: true, schema: {type: string, format: uuid}}
+        - {in: query, name: current_version, required: true, schema: {type: string}}
+        - {in: query, name: channel, required: true, schema: {type: string, enum: [stable, beta]}}
+        - {in: query, name: os, required: true, schema: {type: string, const: linux}}
+        - {in: query, name: arch, required: true, schema: {type: string, enum: [x86_64, aarch64]}}
+      responses:
+        "200":
+          description: Signed update manifest
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UpdateManifest"}
+        "204": {description: No newer update assigned}
+        "401": {description: Invalid agent credential}
+  /v1/agent/updates/{artifact}/artifact:
+    get:
+      operationId: downloadAgentUpdate
+      summary: Download an authenticated update artifact
+      security: [{agentBearer: []}, {agentMTLS: []}]
+      parameters:
+        - {in: path, name: artifact, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Agent binary}
+        "401": {description: Invalid agent credential}
+        "404": {description: Artifact not found}
+  /api/v1/admin/agent-updates:
+    post:
+      operationId: publishAgentUpdate
+      summary: Publish an administrator-approved signed agent update
+      description: Requires agents.manage and the X-CSRF-Token header.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [artifact, version, channel, os, architecture, signature, rollout_percent]
+              properties:
+                artifact: {type: string, format: binary}
+                version: {type: string, example: 0.2.2}
+                channel: {type: string, enum: [stable, beta]}
+                os: {type: string, const: linux}
+                architecture: {type: string, enum: [x86_64, aarch64]}
+                signature: {type: string, description: Base64 Ed25519 signature over the artifact bytes}
+                rollout_percent: {type: integer, minimum: 0, maximum: 100}
+      responses:
+        "201":
+          description: Published manifest
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UpdateManifest"}
+        "400": {description: "Invalid metadata, signature encoding, or artifact"}
+  /api/v1/admin/api-keys:
+    get:
+      operationId: listApiKeys
+      summary: List API key metadata without secret material
+      security: [{session: []}]
+      responses:
+        "200": {description: API key list}
+        "401": {description: Authentication required}
+    post:
+      operationId: createApiKey
+      summary: Create a scoped API key; secret is returned once
+      description: Requires api_keys.manage and X-CSRF-Token.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: {type: string, maxLength: 120}
+                scopes: {type: array, items: {$ref: "#/components/schemas/ApiKeyScope"}}
+                expires_at: {type: string, format: date-time}
+      responses:
+        "201": {description: API key and one-time secret}
+        "400": {description: "Invalid name, scope, or expiry"}
+        "403": {description: Scope escalation rejected}
+  /api/v1/admin/api-keys/{keyId}:
+    get:
+      operationId: getApiKey
+      summary: Get API key metadata
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/KeyId"}]
+      responses:
+        "200": {description: API key metadata}
+        "404": {description: API key not found}
+    patch:
+      operationId: updateApiKey
+      summary: Rename an API key or replace all scopes
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/KeyId"}]
+      responses:
+        "200": {description: Updated}
+        "400": {description: Invalid input}
+    delete:
+      operationId: revokeApiKey
+      summary: Immediately revoke current and grace API key secrets
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/KeyId"}]
+      responses:
+        "204": {description: Revoked}
+        "404": {description: API key not found}
+  /api/v1/admin/api-keys/{keyId}/rotate:
+    post:
+      operationId: rotateApiKey
+      summary: Rotate a key and optionally keep the old secret during grace
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/KeyId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grace_seconds]
+              properties:
+                grace_seconds: {type: integer, minimum: 0, maximum: 604800}
+      responses:
+        "200": {description: Updated key and one-time new secret}
+        "400": {description: Invalid grace period}
+  /api/v1/admin/api-keys/{keyId}/scopes:
+    post:
+      operationId: addApiKeyScopes
+      summary: Add scopes to an API key
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/KeyId"}]
+      responses:
+        "200": {description: Scopes added}
+        "400": {description: Invalid scopes}
+  /api/v1/admin/api-keys/{keyId}/scopes/{scope}:
+    delete:
+      operationId: removeApiKeyScope
+      summary: Remove one scope from an API key
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/KeyId"}
+        - {in: path, name: scope, required: true, schema: {$ref: "#/components/schemas/ApiKeyScope"}}
+      responses:
+        "200": {description: Scope removed}
+        "404": {description: Key or scope not found}
+  /api/v1/external/assets:
+    get:
+      operationId: externalListAssets
+      summary: Search assets using a scoped machine credential
+      security: [{externalBearer: []}]
+      responses:
+        "200": {description: Asset page}
+        "401": {description: Invalid API key}
+        "403": {description: Missing assets.read scope}
+    post:
+      operationId: externalCreateAsset
+      summary: Create a manual asset using a scoped machine credential
+      security: [{externalBearer: []}]
+      responses:
+        "201": {description: Created}
+        "403": {description: Missing assets.write scope}
+  /mcp:
+    post:
+      operationId: mcpStreamableHttp
+      summary: Stateless MCP Streamable HTTP JSON-RPC endpoint
+      description: MCP protocol version 2025-11-25. Requires mcp.access; tool visibility is scope-filtered.
+      security: [{externalBearer: []}]
+      responses:
+        "200": {description: JSON-RPC response}
+        "202": {description: Notification accepted}
+        "401": {description: Invalid API key}
+        "403": {description: Missing scope or rejected Origin}
   /api/v1/assets:
     get:
+      operationId: listAssets
       summary: Search representative assets
       security: [{session: []}]
-      responses: {"200": {description: Asset page}}
+      responses: {"200": {description: Asset page}, "401": {description: Authentication required}}
     post:
+      operationId: createAsset
       summary: Create manual asset
       security: [{session: []}]
-      responses: {"201": {description: Created}}
+      responses: {"201": {description: Created}, "400": {description: Invalid asset}}
   /api/v1/query/execute:
     post:
+      operationId: executeQuery
       summary: Execute a validated, parameter-bound Query DSL expression
       security: [{session: []}]
       responses: {"200": {description: Query results}, "400": {description: Unsafe or invalid query}}
@@ -44,6 +227,9 @@ components:
     agentBearer: {type: http, scheme: bearer}
     agentMTLS: {type: mutualTLS}
     session: {type: apiKey, in: cookie, name: invenqor_session}
+    externalBearer: {type: http, scheme: bearer, bearerFormat: Invenqor scoped API key}
+  parameters:
+    KeyId: {in: path, name: keyId, required: true, schema: {type: string, format: uuid}}
   schemas:
     Envelope:
       type: object
@@ -58,3 +244,27 @@ components:
         snapshot: {type: object}
         changes: {type: array, items: {type: object}}
         collection_errors: {type: array, items: {type: object}}
+    UpdateManifest:
+      type: object
+      required: [version, channel, os, architecture, sha256, signature, download_url, size, rollout_percent]
+      properties:
+        version: {type: string}
+        channel: {type: string, enum: [stable, beta]}
+        os: {type: string, const: linux}
+        architecture: {type: string, enum: [x86_64, aarch64]}
+        sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        signature: {type: string}
+        download_url: {type: string}
+        size: {type: integer, minimum: 1, maximum: 134217728}
+        rollout_percent: {type: integer, minimum: 0, maximum: 100}
+    ApiKeyScope:
+      type: string
+      enum:
+        - agents.read
+        - assets.delete
+        - assets.read
+        - assets.write
+        - mcp.access
+        - queries.execute
+        - relations.read
+        - relations.write

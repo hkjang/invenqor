@@ -2,6 +2,7 @@ use anyhow::Result;
 use invenqor_agent::config::Config;
 use invenqor_agent::identity;
 use invenqor_agent::scheduler::Agent;
+use invenqor_agent::updater;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +33,8 @@ async fn run() -> Result<()> {
 
     let once = args.iter().any(|v| v == "--once");
     let validate = args.iter().any(|v| v == "--validate-config");
+    let apply_update = args.iter().any(|v| v == "--apply-pending-update");
+    let check_update = args.iter().any(|v| v == "--check-update");
     let config_path = argument_value(&args, "--config")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
@@ -49,6 +52,13 @@ async fn run() -> Result<()> {
         println!("configuration is valid");
         return Ok(());
     }
+    if apply_update {
+        match updater::apply_pending(&config)? {
+            Some(version) => println!("applied invenqor-agent update {version}"),
+            None => println!("no pending update"),
+        }
+        return Ok(());
+    }
 
     init_logging();
     let identity = identity::load_or_create(&config.agent.state_dir)?;
@@ -58,6 +68,13 @@ async fn run() -> Result<()> {
         dmi_product_uuid = ?identity.dmi_product_uuid,
         "agent identity loaded"
     );
+    if check_update {
+        match updater::check_and_stage(&config, &identity.agent_id).await? {
+            Some(version) => println!("staged invenqor-agent update {version}"),
+            None => println!("no update available"),
+        }
+        return Ok(());
+    }
     let agent = Agent::new(config, identity)?;
     if once {
         let snapshot = agent.collect_once().await?;
@@ -89,7 +106,7 @@ fn reject_unknown_arguments(args: &[String]) -> Result<()> {
             continue;
         }
         match arg.as_str() {
-            "--once" | "--validate-config" => {}
+            "--once" | "--validate-config" | "--apply-pending-update" | "--check-update" => {}
             "--config" => skip = true,
             value if value.starts_with("--config=") => {}
             value => anyhow::bail!("unknown argument: {value}"),
@@ -118,6 +135,8 @@ Options:
   --config PATH           Configuration file (default: {DEFAULT_CONFIG})
   --once                  Collect once, attempt delivery, and print JSON
   --validate-config       Validate configuration and exit
+  --apply-pending-update  Root helper: verify and atomically apply staged update
+  --check-update          Check, verify, and stage an available signed update
   --print-default-config  Print a complete default configuration
   -V, --version           Print version
   -h, --help              Print help"

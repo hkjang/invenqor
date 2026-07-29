@@ -16,7 +16,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=server /out/invenqor-server /usr/local/bin/invenqor-server
 COPY --chown=65532:65532 --from=server /out/state /var/lib/invenqor-server
 VOLUME ["/var/lib/invenqor-server"]
-EXPOSE 8080
-ENV INVENQOR_LISTEN_ADDRESS=0.0.0.0:8080
+EXPOSE 7070
+ENV INVENQOR_LISTEN_ADDRESS=0.0.0.0:7070
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/invenqor-server"]

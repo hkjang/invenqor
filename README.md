@@ -10,12 +10,13 @@ spool을 포함합니다.
 ```bash
 export POSTGRES_PASSWORD='change-me-with-a-long-random-value'
 docker compose up -d --build
-open http://127.0.0.1:8080
+open http://127.0.0.1:7070
 ```
 
 상세 절차는 [Server 설치 및 운영 가이드](docs/SERVER_INSTALLATION.md),
 [사용자 가이드](docs/USER_GUIDE.md), [관리자 가이드](docs/ADMIN_GUIDE.md),
-[임원 보고서](docs/EXECUTIVE_REPORT.md)를 참조하십시오.
+[임원 보고서](docs/EXECUTIVE_REPORT.md),
+[자산 API·MCP·키 관리 가이드](docs/API_MCP_GUIDE.md)를 참조하십시오.
 
 Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 실행되는 자산 수집
 에이전트입니다. Linux의 `/proc`, `/sys`, `/etc`를 우선 사용하고, 사용할 수 없는
@@ -31,7 +32,11 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - 안정적인 스냅샷 해시를 이용한 변경 감지
 - 전송 완료 전까지 삭제하지 않는 크기 제한 JSONL 큐
 - 지수 백오프가 적용된 outbound-only HTTPS 전송
+- 웹·관리 API·Agent 통신을 통합한 단일 기본 포트 TCP 7070
 - rustls, 사설 CA, 장비별 mTLS PEM 또는 장비별 bearer token
+- Ed25519 서명·SHA-256·단계적 rollout 기반 Agent 자동 업데이트
+- PostgreSQL advisory migration lock과 공용 Secret을 사용하는 K8s 멀티 파드
+- scoped API key 수명주기와 stateless Streamable HTTP MCP 자산 도구
 - systemd, SysV init, OpenRC 서비스 정의
 - x86_64와 aarch64용 musl 정적 빌드 구성
 
@@ -109,7 +114,7 @@ X-Invenqor-Event-Id: <uuid>
 ```json
 {
   "accepted": true,
-  "policy_version": "2026-07-28.1"
+  "policy_version": "2026-07-29.1"
 }
 ```
 
@@ -165,8 +170,8 @@ aarch64 빌드는 `target-cpu=generic`으로 빌드하여 AVX2 같은 최신 명
 
 - 일반 사용자로 실행하고 capability 및 ambient capability를 부여하지 않습니다.
 - systemd에서는 쓰기 경로, 주소 패밀리, privilege escalation을 제한합니다.
-- HTTP는 debug 빌드의 로컬 개발에서만 허용하고 release 빌드는 HTTPS만
-  허용합니다.
+- HTTP는 `allow_insecure_http=true`를 명시한 격리 테스트에서만 허용하고
+  운영 기본값은 HTTPS입니다.
 - 사설 CA와 mTLS를 함께 사용하려면 `ca_file`과
   `client_identity_pem`을 설정합니다. 개인키가 든 PEM은 `0600`으로
   관리하십시오. 패키지 기본 설정은 실행 계정이 읽을 수 있도록
@@ -176,11 +181,9 @@ aarch64 빌드는 `target-cpu=generic`으로 빌드하여 AVX2 같은 최신 명
 - 큐가 설정 용량에 도달하면 기존 미전송 데이터를 삭제하지 않고 새 이벤트 생성을
   실패시켜 데이터 손실을 명시적으로 드러냅니다.
 
-원격 작업, 자동 업데이트, privileged helper는 별도 보안 경계를 설계한 후
-추가해야 합니다. 원격 작업은 서명된 구조화 명령 allowlist, nonce 및 만료 검증,
-감사 로그 없이는 추가하지 않아야 합니다. 자동 업데이트는 오프라인 Ed25519
-서명 키, SHA-256, 원자적 교체, 재시작 후 health check와 rollback을 모두
-갖추기 전에는 활성화하지 않아야 합니다.
+원격 작업 기능은 제공하지 않습니다. 자동 업데이트의 privileged helper는
+서명 검증을 통과해 스테이징된 파일만 원자 교체하고 이전 바이너리를 보존합니다.
+서명 개인키는 반드시 오프라인으로 관리하고 canary rollout 후 확대하십시오.
 
 ## 프로젝트 구조
 

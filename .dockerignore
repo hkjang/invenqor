@@ -1,6 +1,16 @@
 .git
-target
 target-*
+target/*
+!target/release
+target/release/*
+!target/release/invenqor-agent
+!target-x86_64
+target-x86_64/*
+!target-x86_64/x86_64-unknown-linux-musl
+target-x86_64/x86_64-unknown-linux-musl/*
+!target-x86_64/x86_64-unknown-linux-musl/release
+target-x86_64/x86_64-unknown-linux-musl/release/*
+!target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent
 web/node_modules
 web/dist
 server/invenqor-server

@@ -1,34 +1,11 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Service
 metadata:
-  name: {{ .Release.Name }}-invenqor
+  name: {{ .Release.Name }}-invenqor-headless
 spec:
-  replicas: {{ .Values.replicaCount }}
-  selector:
-    matchLabels: {app: invenqor}
-  template:
-    metadata:
-      labels: {app: invenqor}
-    spec:
-      securityContext: {runAsNonRoot: true, fsGroup: 65532}
-      containers:
-        - name: server
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          ports: [{name: http, containerPort: 8080}]
-          env:
-            - {name: INVENQOR_LISTEN_ADDRESS, value: "0.0.0.0:8080"}
-            - {name: INVENQOR_STATE_DIR, value: /var/lib/invenqor-server}
-            - name: INVENQOR_POSTGRES_DSN
-              valueFrom:
-                secretKeyRef: {name: {{ .Values.postgresDsnSecret.name }}, key: {{ .Values.postgresDsnSecret.key }}}
-          readinessProbe: {httpGet: {path: /health/ready, port: http}}
-          livenessProbe: {httpGet: {path: /health/live, port: http}}
-          resources: {{- toYaml .Values.resources | nindent 12 }}
-          volumeMounts: [{name: state, mountPath: /var/lib/invenqor-server}]
-      volumes:
-        - name: state
-          persistentVolumeClaim: {claimName: {{ .Release.Name }}-invenqor}
+  clusterIP: None
+  selector: {app: invenqor}
+  ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
 ---
 apiVersion: v1
 kind: Service
@@ -39,11 +16,96 @@ spec:
   ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
   type: {{ .Values.service.type }}
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-invenqor
 spec:
-  accessModes: [ReadWriteOnce]
+  serviceName: {{ .Release.Name }}-invenqor-headless
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy: {type: RollingUpdate}
+  selector:
+    matchLabels: {app: invenqor}
+  template:
+    metadata:
+      labels: {app: invenqor}
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsNonRoot: true, fsGroup: 65532}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: invenqor}
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports: [{name: http, containerPort: 7070}]
+          env:
+            - {name: INVENQOR_LISTEN_ADDRESS, value: "0.0.0.0:7070"}
+            - {name: INVENQOR_STATE_DIR, value: /var/lib/invenqor-server}
+            - {name: INVENQOR_UPDATE_DIR, value: /var/lib/invenqor-updates}
+            - {name: INVENQOR_MASTER_KEY_FILE, value: /run/secrets/invenqor/master.key}
+            - name: INVENQOR_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.postgresDsnSecret.name }}, key: {{ .Values.postgresDsnSecret.key }}}
+          startupProbe:
+            httpGet: {path: /health/live, port: http}
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: {path: /health/ready, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health/live, port: http}
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/invenqor-server}
+            - {name: updates, mountPath: /var/lib/invenqor-updates}
+            - {name: master-key, mountPath: /run/secrets/invenqor, readOnly: true}
+      volumes:
+        - name: updates
+          persistentVolumeClaim: {claimName: {{ .Release.Name }}-invenqor-updates}
+        - name: master-key
+          secret:
+            secretName: {{ .Values.masterKeySecret.name }}
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: {{ .Values.persistence.size }}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-invenqor-updates
+spec:
+  accessModes: [{{ .Values.updates.accessMode }}]
+  {{- if .Values.updates.storageClassName }}
+  storageClassName: {{ .Values.updates.storageClassName }}
+  {{- end }}
   resources:
-    requests: {storage: {{ .Values.persistence.size }}}
+    requests: {storage: {{ .Values.updates.size }}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-invenqor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: invenqor}

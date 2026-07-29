@@ -1,0 +1,10 @@
+FROM alpine:3.22
+RUN addgroup -S invenqor-agent \
+    && adduser -S -D -H -G invenqor-agent -h /var/lib/invenqor-agent \
+       -s /sbin/nologin invenqor-agent \
+    && install -d -m 0700 -o invenqor-agent -g invenqor-agent /var/lib/invenqor-agent \
+    && install -d -m 0750 -o root -g invenqor-agent /etc/invenqor-agent
+COPY target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent /opt/invenqor-agent/bin/invenqor-agent
+RUN chmod 0755 /opt/invenqor-agent/bin/invenqor-agent
+USER invenqor-agent:invenqor-agent
+ENTRYPOINT ["/opt/invenqor-agent/bin/invenqor-agent", "--config", "/etc/invenqor-agent/config.toml"]

@@ -127,6 +127,12 @@ impl Agent {
     }
 
     pub async fn run(self) -> Result<()> {
+        if self.config.updates.enabled {
+            tokio::spawn(crate::updater::run_checker(
+                self.config.clone(),
+                self.identity.agent_id.clone(),
+            ));
+        }
         if let Err(error) = self.collect_once().await {
             warn!(error = %error, "initial collection cycle failed");
         }

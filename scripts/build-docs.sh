@@ -27,7 +27,7 @@ fi
 BUILD_DIR=$(mktemp -d "$DOCS/.pdf-build.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT HUP INT TERM
 
-for name in USER_GUIDE ADMIN_GUIDE EXECUTIVE_REPORT SERVER_INSTALLATION; do
+for name in USER_GUIDE ADMIN_GUIDE EXECUTIVE_REPORT SERVER_INSTALLATION API_MCP_GUIDE; do
     markdown="$DOCS/$name.md"
     html="$BUILD_DIR/$name.html"
     pdf="$DOCS/$name.pdf"
@@ -36,6 +36,7 @@ for name in USER_GUIDE ADMIN_GUIDE EXECUTIVE_REPORT SERVER_INSTALLATION; do
         ADMIN_GUIDE) title="Invenqor Agent 관리자 가이드" ;;
         EXECUTIVE_REPORT) title="Invenqor Agent 임원 보고서" ;;
         SERVER_INSTALLATION) title="Invenqor Server 설치 및 운영 가이드" ;;
+        API_MCP_GUIDE) title="Invenqor 자산 API·MCP·키 관리 가이드" ;;
     esac
 
     npx --yes "marked@$MARKED_VERSION" "$markdown" --output "$html"

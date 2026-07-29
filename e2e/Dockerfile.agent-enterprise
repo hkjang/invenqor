@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN mkdir -p /opt/invenqor-agent/bin /etc/invenqor-agent /var/lib/invenqor-agent \
+    && chown 65532:65532 /var/lib/invenqor-agent \
+    && chmod 0700 /var/lib/invenqor-agent
+COPY target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent /opt/invenqor-agent/bin/invenqor-agent
+RUN chmod 0755 /opt/invenqor-agent/bin/invenqor-agent
+USER 65532:65532
+ENTRYPOINT ["/opt/invenqor-agent/bin/invenqor-agent", "--config", "/etc/invenqor-agent/config.toml"]
