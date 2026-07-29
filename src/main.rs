@@ -67,12 +67,31 @@ async fn run() -> Result<i32> {
 
     let availability = ConfigAvailability::inspect(&config_path);
     let config_present = availability.is_readable();
+    // Only set for --diagnose and --status: what stopped the file from being
+    // used, so the report can name it instead of the process exiting on the very
+    // fault it was run to explain.
+    let mut config_fault: Option<String> = None;
     let config = match availability {
+        ConfigAvailability::Readable if diagnose_flag || status_flag => {
+            match Config::load(&config_path) {
+                Ok(config) => config,
+                Err(error) => {
+                    config_fault = Some(format!("{error:#}"));
+                    Config::default()
+                }
+            }
+        }
         ConfigAvailability::Readable => Config::load(&config_path)?,
         // --diagnose and --status exist to explain a broken installation, so they
         // must produce their report rather than exit on the very fault they are
         // there to name. They run on defaults and the report says why.
-        ConfigAvailability::Unreadable if diagnose_flag || status_flag => Config::default(),
+        ConfigAvailability::Unreadable if diagnose_flag || status_flag => {
+            config_fault = Some(format!(
+                "{} exists but this account cannot read it",
+                config_path.display()
+            ));
+            Config::default()
+        }
         // Running on built-in defaults because the file could not be *read* is
         // the failure that hides itself: the Agent collects into its queue,
         // never registers, and the only clue is a warning that says the file
@@ -117,7 +136,13 @@ async fn run() -> Result<i32> {
         return print_status(&config, json);
     }
     if diagnose_flag {
-        let report = diagnose::run(&config, &config_path, config_present).await;
+        let report = diagnose::run(
+            &config,
+            &config_path,
+            config_present,
+            config_fault.as_deref(),
+        )
+        .await;
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {

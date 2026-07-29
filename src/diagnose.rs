@@ -172,12 +172,17 @@ impl Report {
 /// Runs every check that can be performed without changing state. It never
 /// enrolls, never sends an event and never rewrites a credential, so it is safe
 /// on a production host at any time.
-pub async fn run(config: &Config, config_path: &Path, config_present: bool) -> Report {
+pub async fn run(
+    config: &Config,
+    config_path: &Path,
+    config_present: bool,
+    config_fault: Option<&str>,
+) -> Report {
     let now = unix_time();
     let mut checks = Vec::new();
     let mut agent_id = None;
 
-    checks.push(config_file_check(config_path, config_present));
+    checks.push(config_file_check(config_path, config_present, config_fault));
 
     match identity::load_or_create(&config.agent.state_dir) {
         Ok(identity) => {
@@ -533,7 +538,22 @@ fn resolve_check(url: &Url) -> Check {
 /// service can - and that difference is exactly the failure being diagnosed.
 const SERVICE_ACCOUNT: &str = "invenqor-agent";
 
-fn config_file_check(config_path: &Path, config_present: bool) -> Check {
+fn config_file_check(
+    config_path: &Path,
+    config_present: bool,
+    config_fault: Option<&str>,
+) -> Check {
+    // A file that is present and readable but cannot be parsed is its own
+    // failure, and the report has to carry it: exiting on the parse error alone
+    // tells the operator nothing about the rest of the installation.
+    if let Some(fault) = config_fault.filter(|_| config_present) {
+        return Check::fail(
+            "configuration file",
+            format!("{} could not be used: {fault}", config_path.display()),
+            "Correct the configuration file, then run \
+             --validate-config as the service account.",
+        );
+    }
     if !config_present {
         return match ConfigAvailability::inspect(config_path) {
             ConfigAvailability::Unreadable => Check::fail(
@@ -737,7 +757,13 @@ mod tests {
     async fn missing_server_url_fails_the_report_before_any_network_call() {
         let mut config = Config::default();
         config.agent.state_dir = temp_dir();
-        let report = run(&config, Path::new("/etc/invenqor-agent/config.toml"), false).await;
+        let report = run(
+            &config,
+            Path::new("/etc/invenqor-agent/config.toml"),
+            false,
+            None,
+        )
+        .await;
         assert!(report.failed());
         let rendered = report.render();
         assert!(rendered.contains("[FAIL] server.url"));
@@ -758,7 +784,13 @@ mod tests {
         config.server.url = Some(format!("http://{address}"));
         config.server.allow_insecure_http = true;
         config.server.timeout_seconds = 2;
-        let report = run(&config, Path::new("/etc/invenqor-agent/config.toml"), true).await;
+        let report = run(
+            &config,
+            Path::new("/etc/invenqor-agent/config.toml"),
+            true,
+            None,
+        )
+        .await;
         assert!(report.failed());
         let rendered = report.render();
         assert!(rendered.contains("[PASS] name resolution"));
@@ -806,7 +838,7 @@ mod tests {
         // Readable by everyone: nothing to report.
         set_mode(&directory, 0o755);
         set_mode(&path, 0o644);
-        let check = config_file_check(&path, true);
+        let check = config_file_check(&path, true, None);
         assert_eq!(check.outcome, Outcome::Pass, "{}", check.detail);
 
         // A service account that is neither the owner nor in the owning group -
@@ -874,7 +906,7 @@ mod tests {
 
         // config_present is false because opening it failed, which is exactly
         // what the running Agent sees.
-        let check = config_file_check(&path, false);
+        let check = config_file_check(&path, false, None);
         set_mode(&directory, 0o755);
         if own_uid() != 0 {
             assert_eq!(check.outcome, Outcome::Fail, "{}", check.detail);
@@ -885,10 +917,16 @@ mod tests {
             );
         }
 
+        // A readable file the parser rejects belongs in the report too, so the
+        // rest of the diagnosis still runs.
+        let check = config_file_check(&path, true, Some("duplicate key `server`"));
+        assert_eq!(check.outcome, Outcome::Fail, "{}", check.detail);
+        assert!(check.detail.contains("duplicate key"), "{}", check.detail);
+
         // Genuinely absent stays a warning: built-in defaults are a legitimate
         // first-run state.
         let missing = directory.join("absent.toml");
-        let check = config_file_check(&missing, false);
+        let check = config_file_check(&missing, false, None);
         assert_eq!(check.outcome, Outcome::Warn, "{}", check.detail);
         assert!(check.detail.contains("does not exist"));
         let _ = std::fs::remove_dir_all(&directory);
