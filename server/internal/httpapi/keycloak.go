@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/invenqor/server/internal/auth"
@@ -64,16 +63,6 @@ func (s *Server) keycloakCallback(response http.ResponseWriter, request *http.Re
 		return
 	}
 	setSessionCookie(response, session)
-	http.SetCookie(response, &http.Cookie{
-		Name:     auth.CSRFCookie,
-		Value:    session.CSRFToken,
-		Path:     "/",
-		Secure:   true,
-		HttpOnly: false,
-		SameSite: http.SameSiteStrictMode,
-		Expires:  session.AbsoluteExpiresAt,
-		MaxAge:   int(time.Until(session.AbsoluteExpiresAt).Seconds()),
-	})
 	http.Redirect(response, request, returnTo, http.StatusFound)
 }
 

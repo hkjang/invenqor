@@ -56,6 +56,8 @@ spec:
             - {name: INVENQOR_STATE_DIR, value: /var/lib/invenqor-server}
             - {name: INVENQOR_UPDATE_DIR, value: /var/lib/invenqor-updates}
             - {name: INVENQOR_MASTER_KEY_FILE, value: /run/secrets/invenqor/master.key}
+            - name: INVENQOR_AGENT_AUTO_ENROLLMENT
+              value: {{ .Values.agentAutoEnrollment | quote }}
             {{- if .Values.bootstrapAdmin.username }}
             - name: INVENQOR_BOOTSTRAP_ADMIN
               value: {{ .Values.bootstrapAdmin.username | quote }}
@@ -65,6 +67,10 @@ spec:
             - name: INVENQOR_POSTGRES_DSN
               valueFrom:
                 secretKeyRef: {name: {{ .Values.postgresDsnSecret.name }}, key: {{ .Values.postgresDsnSecret.key }}}
+            {{- if .Values.agentEnrollmentTokenSecret.name }}
+            - name: INVENQOR_AGENT_ENROLLMENT_TOKEN_FILE
+              value: /run/secrets/invenqor-enrollment/enrollment.token
+            {{- end }}
           startupProbe:
             httpGet: {path: /health/live, port: http}
             failureThreshold: 30
@@ -83,6 +89,9 @@ spec:
             {{- if .Values.bootstrapAdmin.username }}
             - {name: bootstrap-admin-password, mountPath: /run/secrets/invenqor-bootstrap, readOnly: true}
             {{- end }}
+            {{- if .Values.agentEnrollmentTokenSecret.name }}
+            - {name: agent-enrollment-token, mountPath: /run/secrets/invenqor-enrollment, readOnly: true}
+            {{- end }}
       volumes:
         - name: updates
           persistentVolumeClaim: {claimName: {{ .Release.Name }}-invenqor-updates}
@@ -98,6 +107,15 @@ spec:
             items:
               - key: {{ .Values.bootstrapAdmin.passwordSecret.key }}
                 path: password
+        {{- end }}
+        {{- if .Values.agentEnrollmentTokenSecret.name }}
+        - name: agent-enrollment-token
+          secret:
+            secretName: {{ .Values.agentEnrollmentTokenSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.agentEnrollmentTokenSecret.key }}
+                path: enrollment.token
         {{- end }}
   volumeClaimTemplates:
     - metadata:

@@ -93,10 +93,13 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 		t.Fatalf("initial administrator permissions = %#v", loginPayload.User)
 	}
 	var sessionCookie *http.Cookie
+	var csrfCookie *http.Cookie
 	for _, cookie := range loginResponse.Result().Cookies() {
 		if cookie.Name == auth.SessionCookie {
 			sessionCookie = cookie
-			break
+		}
+		if cookie.Name == auth.CSRFCookie {
+			csrfCookie = cookie
 		}
 	}
 	if sessionCookie == nil {
@@ -105,6 +108,13 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 	if !sessionCookie.HttpOnly || !sessionCookie.Secure ||
 		sessionCookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("session cookie flags = %#v", sessionCookie)
+	}
+	if csrfCookie == nil || csrfCookie.Value != loginPayload.CSRFToken {
+		t.Fatal("login response omitted the browser CSRF cookie")
+	}
+	if csrfCookie.HttpOnly || !csrfCookie.Secure ||
+		csrfCookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("CSRF cookie flags = %#v", csrfCookie)
 	}
 
 	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
@@ -133,6 +143,22 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 			"logout status = %d body = %s",
 			logoutResponse.Code,
 			logoutResponse.Body.String(),
+		)
+	}
+	var clearedSession, clearedCSRF bool
+	for _, cookie := range logoutResponse.Result().Cookies() {
+		if cookie.Name == auth.SessionCookie && cookie.MaxAge < 0 {
+			clearedSession = true
+		}
+		if cookie.Name == auth.CSRFCookie && cookie.MaxAge < 0 {
+			clearedCSRF = true
+		}
+	}
+	if !clearedSession || !clearedCSRF {
+		t.Fatalf(
+			"logout cookies were not cleared: session=%t csrf=%t",
+			clearedSession,
+			clearedCSRF,
 		)
 	}
 

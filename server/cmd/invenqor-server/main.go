@@ -162,7 +162,30 @@ func run(logger *slog.Logger) error {
 		PostgresEnvironmentOverride: processConfig.PostgresDSNFromEnv,
 		DatabaseSchema:              processConfig.DatabaseSchema,
 		DatabaseTimeout:             processConfig.DatabaseTimeout,
+		AgentAutoEnrollment:         processConfig.AgentAutoEnrollment,
+		AgentEnrollmentToken:        processConfig.AgentEnrollmentToken,
 	})
+	// The API keeps only a SHA-256 comparison value.
+	processConfig.AgentEnrollmentToken = ""
+	enrollmentMode, enrollmentErr := api.AgentEnrollmentMode(rootContext)
+	if enrollmentErr != nil {
+		return fmt.Errorf(
+			"initialize agent enrollment policy: %w",
+			enrollmentErr,
+		)
+	}
+	switch enrollmentMode {
+	case "open":
+		logger.Warn(
+			"agent_auto_enrollment_open",
+			"mode", enrollmentMode,
+			"guidance", "configure an enrollment token when port 7070 is reachable from untrusted networks",
+		)
+	case "token":
+		logger.Info("agent_auto_enrollment_enabled", "mode", enrollmentMode)
+	default:
+		logger.Info("agent_auto_enrollment_disabled")
+	}
 	go api.RunSpoolReplay(rootContext, 5*time.Second)
 	httpServer := &http.Server{
 		Addr:              processConfig.ListenAddress,

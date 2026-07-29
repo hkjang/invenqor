@@ -3,10 +3,17 @@
 # durable local queue and `--once` still prints the snapshot.
 # url = "https://inventory.example.internal"
 # bearer_token = "replace-with-provisioned-device-token"
+# URL-only zero-touch registration is the default. The Agent exchanges its
+# locally generated device claim for a device token and stores both under
+# state_dir. If the Server requires a fleet enrollment token, configure the
+# same optional token below; bearer_token is unnecessary in either mode.
+# enrollment_token_file = "/etc/invenqor-agent/enrollment.token"
+# enrollment_token = "replace-with-at-least-32-random-characters"
 # ca_file = "/etc/invenqor-agent/ca.pem"
 # A single PEM containing the client certificate chain and private key.
 # client_identity_pem = "/etc/invenqor-agent/device.pem"
-# Set only inside an isolated test network. Production transport must use TLS.
+# Private/internal HTTP works without this flag. Set it only to permit public
+# HTTP in an isolated test network. Production transport must use TLS.
 allow_insecure_http = false
 timeout_seconds = 30
 

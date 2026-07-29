@@ -61,6 +61,16 @@ async fn run() -> Result<()> {
     }
 
     init_logging();
+    if config
+        .server
+        .url
+        .as_deref()
+        .is_some_and(|value| value.starts_with("http://"))
+    {
+        tracing::warn!(
+            "Agent transport is using unencrypted HTTP; use HTTPS when traffic crosses a trusted network boundary"
+        );
+    }
     let identity = identity::load_or_create(&config.agent.state_dir)?;
     tracing::info!(
         agent_id = %identity.agent_id,
@@ -75,7 +85,7 @@ async fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let agent = Agent::new(config, identity)?;
+    let mut agent = Agent::new(config, identity)?;
     if once {
         let snapshot = agent.collect_once().await?;
         if let Err(error) = agent.drain_queue().await {

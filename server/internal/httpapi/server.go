@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -23,25 +24,29 @@ import (
 )
 
 type Server struct {
-	router                      chi.Router
-	database                    *storage.Runtime
-	authService                 *auth.Service
-	oidcService                 *auth.OIDCService
-	totpService                 *auth.TOTPService
-	bootstrapManager            *auth.BootstrapManager
-	agentService                *agents.Service
-	ingestService               *ingest.Service
-	agentRateLimit              *agentRateLimiter
-	spool                       *spool.Manager
-	bootstrapStore              *bootstrap.Store
-	updateStore                 *updates.Store
-	apiKeyService               *apikeys.Service
-	apiRateLimit                *agentRateLimiter
-	logger                      *slog.Logger
-	currentPostgresDSN          string
-	postgresEnvironmentOverride bool
-	databaseSchema              string
-	databaseTimeout             time.Duration
+	router                       chi.Router
+	database                     *storage.Runtime
+	authService                  *auth.Service
+	oidcService                  *auth.OIDCService
+	totpService                  *auth.TOTPService
+	bootstrapManager             *auth.BootstrapManager
+	agentService                 *agents.Service
+	ingestService                *ingest.Service
+	agentRateLimit               *agentRateLimiter
+	agentEnrollmentRateLimit     *agentRateLimiter
+	agentEnrollmentTokenHash     [sha256.Size]byte
+	agentEnrollmentEnabled       bool
+	agentEnrollmentTokenRequired bool
+	spool                        *spool.Manager
+	bootstrapStore               *bootstrap.Store
+	updateStore                  *updates.Store
+	apiKeyService                *apikeys.Service
+	apiRateLimit                 *agentRateLimiter
+	logger                       *slog.Logger
+	currentPostgresDSN           string
+	postgresEnvironmentOverride  bool
+	databaseSchema               string
+	databaseTimeout              time.Duration
 }
 
 type Options struct {
@@ -61,6 +66,8 @@ type Options struct {
 	PostgresEnvironmentOverride bool
 	DatabaseSchema              string
 	DatabaseTimeout             time.Duration
+	AgentAutoEnrollment         bool
+	AgentEnrollmentToken        string
 }
 
 func New(options Options) *Server {
@@ -83,6 +90,8 @@ func New(options Options) *Server {
 		agentService:                options.AgentService,
 		ingestService:               options.IngestService,
 		agentRateLimit:              newAgentRateLimiter(120, time.Minute),
+		agentEnrollmentRateLimit:    newAgentRateLimiter(30, time.Minute),
+		agentEnrollmentEnabled:      options.AgentAutoEnrollment,
 		spool:                       options.Spool,
 		bootstrapStore:              options.BootstrapStore,
 		updateStore:                 options.UpdateStore,
@@ -94,6 +103,12 @@ func New(options Options) *Server {
 		databaseSchema:              options.DatabaseSchema,
 		databaseTimeout:             options.DatabaseTimeout,
 	}
+	if options.AgentEnrollmentToken != "" {
+		server.agentEnrollmentTokenHash = sha256.Sum256(
+			[]byte(options.AgentEnrollmentToken),
+		)
+		server.agentEnrollmentTokenRequired = true
+	}
 	if server.databaseSchema == "" {
 		server.databaseSchema = "public"
 	}
@@ -102,6 +117,14 @@ func New(options Options) *Server {
 	}
 	server.routes()
 	return server
+}
+
+func (s *Server) AgentEnrollmentMode(ctx context.Context) (string, error) {
+	policy, _, err := s.loadAgentEnrollmentPolicy(ctx)
+	if err != nil {
+		return "", err
+	}
+	return policy.mode(), nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -126,6 +149,7 @@ func (s *Server) routes() {
 	s.router.Get("/api/v1/auth/methods", s.authMethods)
 	s.router.Get("/api/v1/auth/keycloak/start", s.keycloakStart)
 	s.router.Get("/api/v1/auth/keycloak/callback", s.keycloakCallback)
+	s.router.Post("/v1/agent/enroll", s.autoEnrollAgent)
 	s.router.Post("/v1/agent/events", s.receiveAgentEvent)
 	s.router.Get("/v1/agent/updates", s.agentUpdateManifest)
 	s.router.Get("/v1/agent/updates/{artifact}/artifact", s.agentUpdateArtifact)
@@ -199,6 +223,22 @@ func (s *Server) routes() {
 			"/api/v1/admin/settings/keycloak/test",
 			s.testKeycloakSettings,
 		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/agent-enrollment",
+			s.getAgentEnrollmentSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/agent-enrollment",
+			s.updateAgentEnrollmentSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/agent-enrollment/token",
+			s.issueAgentEnrollmentToken,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Delete(
+			"/api/v1/admin/settings/agent-enrollment/token",
+			s.deleteAgentEnrollmentToken,
+		)
 		protected.With(s.requirePermission("agents.read")).Get(
 			"/api/v1/admin/agents",
 			s.listAgents,
@@ -225,6 +265,9 @@ func (s *Server) routes() {
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/assets", s.listAssets,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/dashboard/statistics", s.dashboardStatistics,
 		)
 		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
 			"/api/v1/assets", s.createAsset,
@@ -394,19 +437,44 @@ func (s *Server) databaseHealth(response http.ResponseWriter, request *http.Requ
 	writeJSON(response, status, payload)
 }
 
-func (s *Server) systemInfo(response http.ResponseWriter, _ *http.Request) {
+func (s *Server) systemInfo(response http.ResponseWriter, request *http.Request) {
+	policy, _, policyErr := s.loadAgentEnrollmentPolicy(request.Context())
+	enrollmentEnabled := s.agentEnrollmentEnabled
+	enrollmentMode := s.agentEnrollmentMode()
+	enrollmentSource := "startup-environment"
+	if policyErr == nil {
+		enrollmentEnabled = policy.Enabled
+		enrollmentMode = policy.mode()
+		enrollmentSource = "database"
+	}
 	payload := map[string]any{
-		"product":        "Invenqor",
-		"server_version": version.Version,
-		"commit":         version.Commit,
-		"build_time":     version.BuildTime,
-		"database_mode":  s.database.Mode(),
-		"port":           7070,
+		"product":                 "Invenqor",
+		"server_version":          version.Version,
+		"commit":                  version.Commit,
+		"build_time":              version.BuildTime,
+		"database_mode":           s.database.Mode(),
+		"port":                    7070,
+		"agent_auto_enrollment":   enrollmentEnabled,
+		"agent_enrollment_mode":   enrollmentMode,
+		"agent_enrollment_source": enrollmentSource,
+	}
+	if policyErr != nil {
+		payload["agent_enrollment_policy_available"] = false
 	}
 	if failure := s.database.PostgresFailure(); failure != nil {
 		payload["postgres_startup_failure"] = failure
 	}
 	writeJSON(response, http.StatusOK, payload)
+}
+
+func (s *Server) agentEnrollmentMode() string {
+	if !s.agentEnrollmentEnabled {
+		return "disabled"
+	}
+	if s.agentEnrollmentTokenRequired {
+		return "token"
+	}
+	return "open"
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

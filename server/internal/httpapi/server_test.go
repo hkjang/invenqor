@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,11 +12,181 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
+
+func TestAutomaticAgentEnrollmentSupportsOpenAndProtectedModes(t *testing.T) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	openBody := map[string]string{
+		"agent_id":    uuid.NewString(),
+		"hostname":    "zero-touch-host",
+		"claim_token": "ivq_ec_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	open := performJSON(
+		t, server, http.MethodPost, "/v1/agent/enroll", openBody, nil,
+	)
+	if open.Code != http.StatusCreated {
+		t.Fatalf(
+			"open enrollment status = %d body = %s",
+			open.Code,
+			open.Body.String(),
+		)
+	}
+
+	fleetToken := "ivq_et_0123456789abcdef0123456789abcdef0123456789abcdef"
+	fleetHash := sha256.Sum256([]byte(fleetToken))
+	if _, _, err := server.updateAgentEnrollmentPolicy(
+		context.Background(),
+		"test",
+		func(policy *agentEnrollmentPolicy) error {
+			policy.Enabled = true
+			policy.RequireToken = true
+			policy.TokenHash = hex.EncodeToString(fleetHash[:])
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	protectedBody := map[string]string{
+		"agent_id":    uuid.NewString(),
+		"hostname":    "protected-host",
+		"claim_token": "ivq_ec_abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+	}
+	unauthorized := performJSON(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/agent/enroll",
+		protectedBody,
+		map[string]string{"X-Invenqor-Enrollment-Token": "wrong"},
+	)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized enrollment status = %d", unauthorized.Code)
+	}
+	enrolled := performJSON(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/agent/enroll",
+		protectedBody,
+		map[string]string{"X-Invenqor-Enrollment-Token": fleetToken},
+	)
+	if enrolled.Code != http.StatusCreated {
+		t.Fatalf(
+			"enrollment status = %d body = %s",
+			enrolled.Code,
+			enrolled.Body.String(),
+		)
+	}
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(enrolled.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.Token, "ivq_at_") {
+		t.Fatal("enrollment response omitted a device bearer token")
+	}
+
+	if _, _, err := server.updateAgentEnrollmentPolicy(
+		context.Background(),
+		"test",
+		func(policy *agentEnrollmentPolicy) error {
+			policy.Enabled = false
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	disabledBody := map[string]string{
+		"agent_id":    uuid.NewString(),
+		"hostname":    "disabled-host",
+		"claim_token": "ivq_ec_1111111111111111111111111111111111111111111111111111111111111111",
+	}
+	disabled := performJSON(
+		t, server, http.MethodPost, "/v1/agent/enroll", disabledBody, nil,
+	)
+	if disabled.Code != http.StatusForbidden {
+		t.Fatalf("disabled enrollment status = %d", disabled.Code)
+	}
+}
+
+func TestDashboardStatisticsUseAuthoritativeTotals(t *testing.T) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	now := time.Now().UTC()
+	agentInternalID := uuid.NewString()
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO agents(
+		 id,agent_id,hostname,status,last_seen_at
+		 ) VALUES($1,$2,'stats-host','active',$3)`,
+		agentInternalID, uuid.NewString(), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO assets(
+		 id,asset_key,name,type,status,criticality,environment,source,
+		 first_seen_at,last_seen_at
+		 ) VALUES($1,$2,'stats-host','host','active','critical',
+		 'production','agent',$3,$3)`,
+		uuid.NewString(), uuid.NewString(), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO agent_events(
+		 id,agent_id,event_id,schema_version,kind,raw_event,
+		 received_at,processing_status
+		 ) VALUES($1,$2,$3,1,'heartbeat','{}',$4,'processed')`,
+		uuid.NewString(), agentInternalID, uuid.NewString(), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server := testServer(t, runtime)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/statistics", nil)
+	response := httptest.NewRecorder()
+	server.dashboardStatistics(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("statistics status = %d body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Assets struct {
+			Total int64 `json:"total"`
+		} `json:"assets"`
+		Agents struct {
+			Healthy int64 `json:"healthy"`
+		} `json:"agents"`
+		Collection struct {
+			Events24h int64 `json:"events_24h"`
+			Daily     []any `json:"daily"`
+		} `json:"collection"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Assets.Total != 1 || payload.Agents.Healthy != 1 ||
+		payload.Collection.Events24h != 1 || len(payload.Collection.Daily) != 7 {
+		t.Fatalf("unexpected statistics: %+v", payload)
+	}
+}
 
 func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
 	runtime, err := storage.Open(context.Background(), storage.Options{
@@ -112,12 +284,13 @@ func testServer(t *testing.T, runtime *storage.Runtime) *Server {
 	}
 	oidcService := auth.NewOIDCService(runtime.DB(), bootstrapStore, authService)
 	return New(Options{
-		Database:         runtime,
-		AuthService:      authService,
-		OIDCService:      oidcService,
-		TOTPService:      totpService,
-		BootstrapManager: bootstrapManager,
-		BootstrapStore:   bootstrapStore,
-		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Database:            runtime,
+		AuthService:         authService,
+		OIDCService:         oidcService,
+		TOTPService:         totpService,
+		BootstrapManager:    bootstrapManager,
+		BootstrapStore:      bootstrapStore,
+		AgentAutoEnrollment: true,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 }

@@ -69,20 +69,6 @@ login=$(curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' \
 csrf=$(printf '%s' "$login" | jq -r .csrf_token)
 docker volume create "$agent_volume" >/dev/null
 mkdir -p "$work/config"
-cp "$root/config/config.toml" "$work/config/config.toml"
-chmod 0644 "$work/config/config.toml"
-docker run --name "$bootstrap_client" --network "$network" \
-  -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
-  -v "$agent_volume:/var/lib/invenqor-agent" \
-  invenqor-agent:e2e --once > "$work/bootstrap-snapshot.json"
-docker cp "$bootstrap_client:/var/lib/invenqor-agent/agent-id" "$work/agent-id"
-docker rm "$bootstrap_client" >/dev/null
-agent_id=$(tr -d '\r\n' < "$work/agent-id")
-provision=$(curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
-  -H 'Content-Type: application/json' \
-  -d '{"agent_id":"'"$agent_id"'","hostname":"e2e-client"}' \
-  "http://127.0.0.1:$port/api/v1/admin/agents")
-agent_token=$(printf '%s' "$provision" | jq -r .token)
 
 openssl genpkey -algorithm ED25519 -out "$work/update-private.pem" >/dev/null 2>&1
 update_public_key=$(
@@ -95,17 +81,16 @@ openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
 update_signature=$(base64 < "$work/update.sig" | tr -d '\r\n')
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -F version=0.2.2 -F channel=stable -F os=linux -F architecture=x86_64 \
+  -F version=0.2.3 -F channel=stable -F os=linux -F architecture=x86_64 \
   -F "signature=$update_signature" -F rollout_percent=100 \
   "http://127.0.0.1:$port/api/v1/admin/agent-updates" \
   > "$work/update-manifest.json"
-jq -e '.version == "0.2.2" and .size > 0' "$work/update-manifest.json" >/dev/null
+jq -e '.version == "0.2.3" and .size > 0' "$work/update-manifest.json" >/dev/null
 
 sed \
   -e 's|# url = .*|url = "http://'"$server"':7070"|' \
-  -e 's|# bearer_token = .*|bearer_token = "'"$agent_token"'"|' \
-  -e 's|allow_insecure_http = false|allow_insecure_http = true|' \
   -e 's|enabled = false|enabled = true|' \
+  -e 's|heartbeat_seconds = 300|heartbeat_seconds = 1|' \
   -e 's|# public_key = .*|public_key = "'"$update_public_key"'"|' \
   -e 's|state_dir = .*|state_dir = "/var/lib/invenqor-agent"|' \
   "$root/config/config.toml" > "$work/config/config.toml"
@@ -117,13 +102,15 @@ docker run --rm --network "$network" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
   invenqor-agent:e2e --once > "$work/snapshot.json"
 jq -e '.records | length > 0' "$work/snapshot.json" >/dev/null
+docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
+  sh -c 'test -s /state/device-credential.json && test -s /state/enrollment-claim.json'
 docker run --name "$update_client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
   invenqor-agent:e2e --check-update > "$work/update-check.txt"
 grep -q 'staged invenqor-agent update 0.2.2' "$work/update-check.txt"
 docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
-  cat /state/updates/pending.json | jq -e '.manifest.version == "0.2.2"' >/dev/null
+  cat /state/updates/pending.json | jq -e '.manifest.version == "0.2.3"' >/dev/null
 docker rm "$update_client" >/dev/null
 docker run -d --name "$client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
@@ -194,6 +181,27 @@ test "$(curl -sS -o /dev/null -w '%{http_code}' \
 agents=$(curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/admin/agents")
 printf '%s' "$agents" | jq -e '.agents[0].status == "active"' >/dev/null
+agent_internal_id=$(printf '%s' "$agents" | jq -r '.agents[0].id')
+device_credential_before=$(docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
+  sha256sum /state/device-credential.json | awk '{print $1}')
+curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
+  -H 'Content-Type: application/json' -d '{"grace_seconds":0}' \
+  "http://127.0.0.1:$port/api/v1/admin/agents/$agent_internal_id/tokens/rotate" \
+  >/dev/null
+sleep 2
+docker run --rm --network "$network" \
+  -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
+  -v "$agent_volume:/var/lib/invenqor-agent" \
+  invenqor-agent:e2e --once > "$work/recovery-snapshot.json"
+jq -e '.records | length > 0' "$work/recovery-snapshot.json" >/dev/null
+device_credential_after=$(docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
+  sha256sum /state/device-credential.json | awk '{print $1}')
+test "$device_credential_before" != "$device_credential_after"
+curl -fsS "http://127.0.0.1:$port/api/v1/system/info" |
+  jq -e '.agent_auto_enrollment == true and .agent_enrollment_mode == "open" and .port == 7070' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/dashboard/statistics" |
+  jq -e '.assets.total > 0 and .agents.healthy > 0 and (.collection.daily | length == 7)' >/dev/null
 events=$(docker exec "$postgres" psql -U invenqor -d invenqor -Atc \
   'SELECT COUNT(*) FROM agent_events WHERE processing_status='\''processed'\''')
 test "$events" -ge 1
@@ -206,31 +214,18 @@ run_enterprise_client() {
   config_dir="$work/$label"
   docker volume create "$volume" >/dev/null
   mkdir -p "$config_dir"
-  cp "$root/config/config.toml" "$config_dir/config.toml"
+  sed \
+    -e 's|# url = .*|url = "http://'"$server"':7070"|' \
+    "$root/config/config.toml" > "$config_dir/config.toml"
   chmod 0644 "$config_dir/config.toml"
   docker run --name "$bootstrap_name" --network "$network" \
     -v "$config_dir/config.toml:/etc/invenqor-agent/config.toml:ro" \
     -v "$volume:/var/lib/invenqor-agent" "$image" --once \
-    > "$config_dir/bootstrap.json"
-  docker cp "$bootstrap_name:/var/lib/invenqor-agent/agent-id" "$config_dir/agent-id"
-  docker rm "$bootstrap_name" >/dev/null
-  enterprise_id=$(tr -d '\r\n' < "$config_dir/agent-id")
-  enterprise_provision=$(curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
-    -H 'Content-Type: application/json' \
-    -d '{"agent_id":"'"$enterprise_id"'","hostname":"'"$label"'"}' \
-    "http://127.0.0.1:$port/api/v1/admin/agents")
-  enterprise_token=$(printf '%s' "$enterprise_provision" | jq -r .token)
-  sed \
-    -e 's|# url = .*|url = "http://'"$server"':7070"|' \
-    -e 's|# bearer_token = .*|bearer_token = "'"$enterprise_token"'"|' \
-    -e 's|allow_insecure_http = false|allow_insecure_http = true|' \
-    "$root/config/config.toml" > "$config_dir/config.toml"
-  chmod 0644 "$config_dir/config.toml"
-  docker run --rm --network "$network" \
-    -v "$config_dir/config.toml:/etc/invenqor-agent/config.toml:ro" \
-    -v "$volume:/var/lib/invenqor-agent" "$image" --once \
     > "$config_dir/snapshot.json"
+  docker rm "$bootstrap_name" >/dev/null
   jq -e '.records | length > 0' "$config_dir/snapshot.json" >/dev/null
+  docker run --rm -v "$volume:/state:ro" alpine:3.22 \
+    sh -c 'test -s /state/device-credential.json && test -s /state/enrollment-claim.json'
   docker volume rm "$volume" >/dev/null
   echo "E2E PASS: $label"
 }

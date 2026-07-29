@@ -166,5 +166,6 @@ index=$(curl -fsS "http://127.0.0.1:$port/")
 printf '%s' "$index" | grep -q '<div id="root"></div>'
 asset_path=$(printf '%s' "$index" | sed -n 's/.*src="\([^"]*\.js\)".*/\1/p')
 curl -fsS "http://127.0.0.1:$port$asset_path" | grep -q 'Keycloak OIDC'
+curl -fsS "http://127.0.0.1:$port$asset_path" | grep -q 'Agent 자동 등록'
 
-echo "E2E PASS: PostgreSQL, bootstrap admin, user RBAC, Keycloak settings, and web console"
+echo "E2E PASS: PostgreSQL, bootstrap admin, user RBAC, Agent enrollment, Keycloak, and web console"

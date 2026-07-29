@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.3</p>
+    <p><strong>대상 버전</strong> Agent v0.2.2 · Server v0.2.4</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.1은 Server v0.2.3와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.2는 Server v0.2.4와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -64,6 +64,10 @@ Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`에 있는 운영체제 정보
 - 서비스 관리자: systemd, OpenRC 또는 SysV init
 - 네트워크: Server의 단일 HTTPS TCP 7070 outbound
 
+초기 폐쇄망 설치에서 `http://사설IP:7070`, localhost 또는 내부 DNS/Kubernetes
+서비스명을 사용하면 별도 옵션 없이 URL만으로 연결할 수 있습니다. 신뢰 경계를
+넘는 트래픽은 반드시 HTTPS를 사용하십시오.
+
 오래된 커널과 배포판은 핵심 `/proc` 수집만 가능할 수 있습니다. 정적 바이너리는
 외부 언어 런타임을 요구하지 않지만, 실제 사용하는 시스템 호출보다 오래된 커널의
 실행을 보장하지는 않습니다.
@@ -86,7 +90,8 @@ uname -m
 설치 전에 관리자에게 다음 정보를 받습니다.
 
 - 게이트웨이 기본 URL(예: `https://inventory.example.internal`)
-- 인증 방식: 장비별 bearer token 또는 mTLS PEM
+- 인증 방식: URL-only 자동 등록(기본), 보호망용 enrollment token 또는 예외
+  장비별 bearer token/mTLS PEM
 - 사설 인증기관을 사용한다면 CA 인증서 파일
 - 조직에서 정한 수집 주기와 프로세스 명령행 수집 정책
 
@@ -100,8 +105,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -185,7 +190,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.1`입니다.
+예상 출력은 `invenqor-agent 0.2.2`입니다.
 
 ## 5. 최초 설정
 
@@ -198,16 +203,32 @@ sudo cp -a /etc/invenqor-agent/config.toml \
 sudoedit /etc/invenqor-agent/config.toml
 ```
 
-### 5.1 bearer token 예시
+### 5.1 자동 등록 예시
 
 ```toml
 [server]
 url = "https://inventory.example.internal"
-bearer_token = "장비별로-발급된-토큰"
 timeout_seconds = 30
 ```
 
-하나의 토큰을 여러 서버에서 공유하지 않는 것을 권장합니다.
+기본 Server에서는 URL만 설정하면 Agent가 최초 전송 전에 자동 등록하고 장비
+전용 Token을 상태 디렉터리에 `0600`으로 저장합니다. 이후 설정 파일에 장비별
+`bearer_token`을 복사할 필요가 없습니다.
+
+인터넷 또는 신뢰하지 않는 망에서 Server 7070에 접근할 수 있다면 관리자가
+enrollment token 보호 모드를 사용할 수 있습니다. 이 경우에만 다음 항목을
+추가하고 Token 파일을 `root:invenqor-agent`, `0640`으로 설치합니다.
+
+```bash
+sudo install -m 0640 -o root -g invenqor-agent \
+  enrollment.token /etc/invenqor-agent/enrollment.token
+```
+
+```toml
+enrollment_token_file = "/etc/invenqor-agent/enrollment.token"
+```
+
+수동 등록이 필요한 예외 장비만 `bearer_token = "ivq_at_..."`을 사용합니다.
 
 ### 5.2 mTLS와 사설 CA 예시
 
@@ -461,6 +482,35 @@ Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO �
 - 계정이 비활성화되면 기존 브라우저 Session과 API key도 사용할 수 없습니다.
 - 화면 메뉴는 부여된 역할의 권한에 따라 자동으로 숨겨집니다.
 - SSO 장애 시 로컬 비상 관리자 계정 사용 여부는 조직 운영 절차를 따릅니다.
+
+## 12. 관리 콘솔 사용
+
+**운영 현황**은 Server가 PostgreSQL에서 실시간 집계한 값만 사용합니다. 관리
+자산 수, 최근 24시간 내 확인된 자산, 30분 내 연결된 Agent, 최근 24시간 수집
+이벤트와 실패 건수를 KPI로 표시합니다. 7일 수집 추이, 중요도·환경·유형·수집
+원천 분포와 점검 필요 자산/Agent를 함께 보고 수집 공백을 우선 처리하십시오.
+
+주요 화면과 실제 동작은 다음과 같습니다.
+
+| 화면 | 사용할 수 있는 기능 |
+|---|---|
+| 자산 | 검색·필터·페이징, 등록·수정·삭제·복원, 상세·원천·이력·관계 조회 |
+| 자산 고급 작업 | 선택 자산 병합, 선택 수집 원천을 새 자산으로 분리, 관계 생성·삭제 |
+| Agent | 상태·최근 수집 시각 확인, 예외 장비 수동 등록, Token 회전, 차단·해제, mTLS 인증서 등록 |
+| 설정 → Agent 등록 | 신규 Agent의 URL-only 자동 등록, 등록 Token 보호 또는 등록 차단을 즉시 전환 |
+| Query DSL | 실행 전 구문과 AST 검증, 제한 건수 내 결과 조회 |
+| API · MCP 키 | 최소권한 scope 선택, 이름 변경, scope 추가·삭제, 무중단 회전과 폐기 |
+| 감사 로그 | 행위자·대상·요청 ID·IP·사유와 변경 전후 데이터 확인 |
+| 내 보안 | 로컬 비밀번호 변경, TOTP 설정·활성화·비활성화 |
+| 우측 상단 프로필 | 내 보안, 개인화, 로그아웃으로 이동 |
+| 개인화 | 테마, 화면 밀도, 시작 화면, 통계 갱신 주기, 모션 축소 |
+
+화면의 생성·수정·삭제 버튼은 해당 권한이 있을 때만 나타납니다. 작업 실패 시
+표시되는 서버 오류를 확인하고, 권한 오류는 관리자에게 역할을 요청하십시오.
+페이지를 새로 열거나 Keycloak에서 돌아온 경우에도 브라우저는 현재 Session에
+연결된 CSRF 보호 값을 자동 사용하므로 사용자가 Token을 복사할 필요가 없습니다.
+개인화 설정은 사용자 ID별로 현재 브라우저에 저장되며 다른 사용자나 Server
+운영 설정에는 영향을 주지 않습니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

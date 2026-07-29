@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use url::{Host, Url};
 
 fn default_interval() -> u64 {
     900
@@ -38,6 +39,8 @@ pub struct Config {
 pub struct ServerConfig {
     pub url: Option<String>,
     pub bearer_token: Option<String>,
+    pub enrollment_token: Option<String>,
+    pub enrollment_token_file: Option<PathBuf>,
     pub ca_file: Option<PathBuf>,
     pub client_identity_pem: Option<PathBuf>,
     pub allow_insecure_http: bool,
@@ -86,6 +89,8 @@ impl Default for ServerConfig {
         Self {
             url: None,
             bearer_token: None,
+            enrollment_token: None,
+            enrollment_token_file: None,
             ca_file: None,
             client_identity_pem: None,
             allow_insecure_http: false,
@@ -179,13 +184,83 @@ impl Config {
             );
         }
         if let Some(url) = &self.server.url {
+            let parsed = Url::parse(url).context("server.url must be a valid URL")?;
             anyhow::ensure!(
-                url.starts_with("https://")
-                    || self.server.allow_insecure_http && url.starts_with("http://"),
-                "server.url must use HTTPS unless allow_insecure_http is explicitly enabled"
+                parsed.scheme() == "https"
+                    || parsed.scheme() == "http" && self.server.allows_http(),
+                "server.url must use HTTPS; private/internal HTTP is accepted automatically, while public HTTP requires allow_insecure_http"
+            );
+        }
+        anyhow::ensure!(
+            !(self.server.enrollment_token.is_some()
+                && self.server.enrollment_token_file.is_some()),
+            "server.enrollment_token and server.enrollment_token_file cannot both be configured"
+        );
+        if let Some(token) = &self.server.enrollment_token {
+            anyhow::ensure!(
+                token.trim().len() >= 32,
+                "server.enrollment_token must contain at least 32 characters"
+            );
+        }
+        if let Some(path) = &self.server.enrollment_token_file {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "server.enrollment_token_file must be an absolute path"
             );
         }
         Ok(())
+    }
+}
+
+impl ServerConfig {
+    pub fn allows_http(&self) -> bool {
+        if self.allow_insecure_http {
+            return true;
+        }
+        let Some(value) = &self.url else {
+            return false;
+        };
+        let Ok(parsed) = Url::parse(value) else {
+            return false;
+        };
+        if parsed.scheme() != "http" {
+            return false;
+        }
+        match parsed.host() {
+            Some(Host::Ipv4(address)) => {
+                address.is_private() || address.is_loopback() || address.is_link_local()
+            }
+            Some(Host::Ipv6(address)) => {
+                address.is_loopback()
+                    || address.is_unique_local()
+                    || address.is_unicast_link_local()
+            }
+            Some(Host::Domain(host)) => {
+                host.eq_ignore_ascii_case("localhost")
+                    || !host.contains('.')
+                    || host.ends_with(".internal")
+                    || host.ends_with(".local")
+            }
+            None => false,
+        }
+    }
+
+    pub fn resolved_enrollment_token(&self) -> Result<Option<String>> {
+        if let Some(token) = &self.enrollment_token {
+            return Ok(Some(token.trim().to_string()));
+        }
+        let Some(path) = &self.enrollment_token_file else {
+            return Ok(None);
+        };
+        let token = std::fs::read_to_string(path)
+            .with_context(|| format!("read enrollment token {}", path.display()))?
+            .trim()
+            .to_string();
+        anyhow::ensure!(
+            token.len() >= 32,
+            "server enrollment token file must contain at least 32 characters"
+        );
+        Ok(Some(token))
     }
 }
 
@@ -201,5 +276,16 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         assert!(toml::from_str::<Config>("[agent]\nunknown = true").is_err());
+    }
+
+    #[test]
+    fn url_only_allows_private_http_but_rejects_public_http() {
+        let mut config = Config::default();
+        config.server.url = Some("http://192.168.10.20:7070".into());
+        config.validate().unwrap();
+        config.server.url = Some("http://invenqor-server:7070".into());
+        config.validate().unwrap();
+        config.server.url = Some("http://inventory.example.com:7070".into());
+        assert!(config.validate().is_err());
     }
 }

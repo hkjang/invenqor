@@ -28,6 +28,7 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 현재 버전은 운영 가능한 1~3단계 기반을 제공합니다.
 
 - 설치 시 생성하고 `0600`으로 보존하는 Agent UUID
+- Server URL만으로 장비별 Token을 자동 발급하는 zero-touch 등록
 - OS, CPU, 메모리, 파일시스템, 네트워크, 프로세스, 패키지, 서비스, 계정,
   컨테이너 환경 수집
 - 수집기별 장애 격리와 공통 JSON 스키마
@@ -39,7 +40,11 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - Ed25519 서명·SHA-256·단계적 rollout 기반 Agent 자동 업데이트
 - PostgreSQL advisory migration lock과 공용 Secret을 사용하는 K8s 멀티 파드
 - 연결 테스트·암호화 저장을 제공하는 PostgreSQL 및 Keycloak OIDC 설정 화면
+- 재기동 없이 URL-only/Token 보호/차단을 전환하고 등록 Token을 발급·회전·
+  폐기하는 DB 기반 Agent 등록 설정 화면
 - 로컬/SSO 역할 원천 분리, 계정 잠금·세션 폐기와 안전장치를 갖춘 사용자 관리
+- 자산 최신성·Agent 건전성·수집 실패·7일 추이를 제공하는 운영 통계 화면
+- 자산·관계·병합/분리·Query·감사·키·설정 API를 실제로 연결한 관리 콘솔
 - 로그인 화면과 콘솔 상단의 실행 Server 버전 표시
 - scoped API key 수명주기와 stateless Streamable HTTP MCP 자산 도구
 - systemd, SysV init, OpenRC 서비스 정의
@@ -105,7 +110,7 @@ cargo run -- --print-default-config
 ```text
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-Authorization: Bearer ...             # bearer_token을 설정한 경우
+Authorization: Bearer ...             # 자동 저장된 장비 Token 또는 수동 bearer_token
 X-Invenqor-Agent-Id: <uuid>
 X-Invenqor-Event-Id: <uuid>
 ```

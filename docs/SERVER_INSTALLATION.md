@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.3 · Agent 버전: v0.2.1 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.4 · Agent 버전: v0.2.2 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -64,17 +64,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.3.tar.gz`
-- `invenqor-0.2.3.tar.gz.sha256`
+- `invenqor-0.2.4.tar.gz`
+- `invenqor-0.2.4.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.3.tar.gz.sha256
-gzip -t invenqor-0.2.3.tar.gz
-docker load < invenqor-0.2.3.tar.gz
-docker image inspect invenqor-server:0.2.3 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.4.tar.gz.sha256
+gzip -t invenqor-0.2.4.tar.gz
+docker load < invenqor-0.2.4.tar.gz
+docker image inspect invenqor-server:0.2.4 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -94,7 +94,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.3
+./scripts/build-offline-images.sh 0.2.4
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -109,7 +109,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.3
+  invenqor-server:0.2.4
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -153,20 +153,51 @@ curl -X POST http://127.0.0.1:7070/api/v1/bootstrap/admin \
 
 성공 즉시 토큰은 DB에서 폐기되어 재사용할 수 없습니다.
 
-관리 콘솔에서 Agent UUID를 등록하고 한 번만 노출되는 장비별 Bearer Token을
-Agent 설정에 넣습니다. 서버 DB에는 Token 원문이 아닌 SHA-256 해시만 저장됩니다.
+개별 Agent UUID 등록과 장비별 Token 복사는 기본 절차가 아닙니다. 기본값은
+URL-only 자동 등록입니다. Agent `config.toml`에 Server URL만 입력하면 최초
+연결에서 로컬 device claim을 만들고 장비별 Bearer Token을 발급받습니다.
 
 ```toml
 [server]
 url = "https://invenqor.example.com:7070"
-bearer_token = "ivq_at_..."
 ca_file = "/etc/invenqor-agent/ca.pem"
 allow_insecure_http = false
 timeout_seconds = 30
 ```
 
-`allow_insecure_http=true`는 격리된 E2E망 전용입니다. 운영 설정에서는 HTTPS를
-유지하십시오.
+Agent는 로컬 claim과 서버가 발급한 `ivq_at_...` 장비 토큰을
+`/var/lib/invenqor-agent/{enrollment-claim,device-credential}.json`에 `0600`으로
+보존합니다. 응답 유실 또는 장비 토큰 무효화 시 같은 claim으로 자동 복구하며,
+다른 서버 URL에는 기존 장비 토큰을 보내지 않습니다.
+
+URL-only 모드는 Server 7070에 도달할 수 있는 장비의 최초 등록을 허용합니다.
+인터넷 또는 신뢰하지 않는 네트워크에 노출하는 경우 32자 이상의 공용 Token을
+설정하면 같은 자동화 흐름을 유지하면서 등록 요청을 보호할 수 있습니다.
+
+```bash
+export AGENT_ENROLLMENT_TOKEN="ivq_et_$(openssl rand -hex 32)"
+docker compose up -d
+```
+
+Kubernetes에서는 모든 Server Pod가 같은 Secret을 읽어야 합니다.
+`INVENQOR_AGENT_ENROLLMENT_TOKEN_FILE` 또는 Helm
+`agentEnrollmentTokenSecret.name/key`를 사용하고 Agent에도 같은 Token 파일을
+배포합니다. 자동 등록 자체를 금지하려면
+`INVENQOR_AGENT_AUTO_ENROLLMENT=false` 또는 Helm
+`agentAutoEnrollment: false`를 사용합니다.
+
+위 환경변수는 공용 DB에 등록 정책이 아직 없을 때의 **최초 기동 기본값**입니다.
+최초 정책 생성 뒤에는 **설정 → Agent 등록** 화면의 DB 정책이 모든 Server
+Pod에 우선하며, 정책 변경에 재기동이나 sticky session이 필요하지 않습니다.
+
+자동 등록을 사용하지 않는 예외 장비는 관리 화면에서 UUID를 수동 등록하고
+한 번 표시되는 `bearer_token`을 구성할 수 있습니다. 서버 DB에는 어느 방식이든
+장비 Token 원문이 아닌 SHA-256 해시만 저장됩니다.
+
+localhost, RFC1918/사설 IP, 단일-label 내부 DNS와 `.internal`/`.local` 주소의
+HTTP는 URL-only 설치를 위해 자동 허용합니다. 공인 DNS의 HTTP는
+`allow_insecure_http=true`를 명시해야 하지만 격리된 E2E망 외에는 사용하지
+마십시오. 신뢰 경계를 넘는 운영 연결은 HTTPS를 유지하십시오.
 
 ## 6. Agent 설치와 실제 기동
 
@@ -174,8 +205,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -196,13 +227,14 @@ SysV와 OpenRC 정의도 패키지에 포함됩니다. 상태 디렉터리와 `a
   DB 복구 뒤 자동 재처리합니다.
 - Agent는 변경분만 보내고, 전송 실패 시 내구성 큐와 지수 backoff로 자동
   재시도합니다.
-- 장비별 Token은 관리 API에서 유예기간을 둔 회전이 가능하며 차단은 즉시
-  모든 Pod에 적용됩니다.
+- Agent는 최초 연결에서 자동 등록하며, 장비 Token 무효화 시 로컬 claim으로
+  자동 재등록합니다. 관리 API의 차단은 즉시 모든 Pod에 적용됩니다.
 - 서명된 업데이트는 Agent가 주기적으로 확인·검증·스테이징하고 systemd path
   unit이 root helper를 한 번만 호출해 원자 교체합니다.
 
-사람이 반드시 수행할 작업은 초기 관리자 자격 증명의 안전한 전달·회수, Agent
-최초 등록, TLS/서명 개인키 보관, 백업 복구 훈련과 업데이트 승인입니다.
+사람이 반드시 수행할 작업은 초기 관리자, TLS/서명 개인키 보관, 백업 복구
+훈련과 업데이트 승인입니다. 외부 노출 환경에서는 enrollment token의 안전한
+배포·회전도 포함합니다. 개별 Agent 등록과 장비별 Token 복사는 필요하지 않습니다.
 
 ## 8. 서명된 Agent 자동 업데이트
 
@@ -280,7 +312,7 @@ Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.3`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.4`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -289,7 +321,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.3 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.4 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -319,7 +351,47 @@ v0.2.3 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하
 - 멀티 파드 일부 실패: 공통 Master Key, RWX 권한, PostgreSQL advisory lock,
   해당 Pod의 state/spool PVC를 확인합니다.
 
-## 13. PostgreSQL 설정 화면과 환경변수
+## 13. Agent 자동 등록 설정
+
+`settings.read` 권한은 현재 정책을 조회하고, `settings.write` 권한은
+**설정 → Agent 등록**에서 다음 세 모드를 즉시 전환할 수 있습니다.
+
+| 모드 | 신규 Agent 동작 | 권장 용도 |
+|---|---|---|
+| **토큰 없이 자동 등록** (`open`) | `config.toml`의 `server.url`만으로 최초 통신 시 등록 | 접근이 통제된 사내망의 Zero-touch 배포 |
+| **등록 토큰 필요** (`token`) | URL과 공용 등록 Token이 모두 맞아야 최초 등록 | 외부 또는 신뢰 경계가 넓은 네트워크 |
+| **자동 등록 비활성** (`disabled`) | 신규 등록만 HTTP 403으로 거부 | 동결 기간·침해 대응·폐쇄 운영 |
+
+Open 모드의 최소 Agent 설정은 아래와 같습니다. 사전 자산 생성, 장비별 Token
+복사나 Agent 재시작 전의 별도 승인 절차는 필요하지 않습니다.
+
+```toml
+[server]
+url = "https://invenqor.example.com:7070"
+```
+
+**토큰 발급**은 256-bit 등록 Token을 만들고 즉시 Token 보호 모드로 전환합니다.
+같은 버튼을 다시 누르면 회전되며 구 Token은 즉시 무효화됩니다. 원문은 발급
+응답과 화면에 한 번만 표시되고 DB·감사 로그에는 저장되지 않습니다. **토큰
+폐기** 후 자동 등록이 활성 상태라면 Open 모드가 됩니다. 이 동작은 기존 Agent가
+보유한 장비별 `ivq_at_...` Token이나 정상 수집에는 영향을 주지 않습니다.
+
+정책은 공용 PostgreSQL의 `server_metadata`에 버전과 함께 저장됩니다. 각 등록
+요청이 DB의 현재 값을 검증하므로 여러 Server Pod가 동시에 실행되어도 변경 직후
+동일한 결과를 냅니다. 모든 활성화·비활성화·발급·회전·폐기는 변경 사유와
+전후 상태를 감사 로그에 남기며 Token 원문과 해시는 노출하지 않습니다.
+
+동일 기능의 관리 API는 다음과 같습니다. 상태 변경에는 관리자 Session,
+`X-CSRF-Token`, `settings.write`가 필요합니다.
+
+| Method | 경로 | 기능 |
+|---|---|---|
+| `GET` | `/api/v1/admin/settings/agent-enrollment` | 현재 정책과 Token 설정 여부 |
+| `PATCH` | `/api/v1/admin/settings/agent-enrollment` | `disabled/open/token` 모드 적용 |
+| `POST` | `/api/v1/admin/settings/agent-enrollment/token` | Token 발급 또는 즉시 회전 |
+| `DELETE` | `/api/v1/admin/settings/agent-enrollment/token` | Token 폐기 |
+
+## 14. PostgreSQL 설정 화면과 환경변수
 
 Super Admin은 **설정 → PostgreSQL**에서 현재 DB 모드, 대상 host/port/database,
 schema, 설정 원천과 최근 기동 실패를 비밀정보 없이 확인할 수 있습니다. 새 DSN은
@@ -349,14 +421,14 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.3
+  invenqor-server:0.2.4
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
 다른 DSN을 저장해도 실행 중인 값은 바뀌지 않으며, 해당 환경변수를 제거하고
 재기동해야 암호화 저장값이 적용됩니다.
 
-## 14. Keycloak SSO/OIDC 구성
+## 15. Keycloak SSO/OIDC 구성
 
 Keycloak에서는 Invenqor용 **confidential OpenID Connect client**를 만들고
 Standard Flow를 활성화합니다. Direct Access Grant와 Implicit Flow는 끕니다.
@@ -409,7 +481,7 @@ Keycloak에서 회수된 역할도 제거됩니다. 관리 콘솔에서 비활�
 Logout Redirect URI가 설정된 SSO 사용자는 로컬 Session 폐기 후 Keycloak
 end-session endpoint로 이동해 IdP Session 종료도 이어서 수행합니다.
 
-## 15. 사용자 관리
+## 16. 사용자 관리
 
 **사용자** 화면은 계정 생성, 검색, 프로필 수정, 활성/비활성, 잠금 해제,
 로컬 비밀번호 초기화, 역할 부여와 삭제를 제공합니다.

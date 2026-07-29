@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.3
+  version: 0.2.4
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
@@ -29,6 +29,32 @@ paths:
         "202": {description: Durably spooled during PostgreSQL degradation}
         "400": {description: Invalid event}
         "401": {description: Invalid credential}
+  /v1/agent/enroll:
+    post:
+      operationId: autoEnrollAgent
+      summary: Automatically issue a device bearer token
+      description: URL-only enrollment is enabled by default. A deployment can require the optional fleet enrollment credential or disable enrollment. The Agent persists a device-local claim and can safely retry or recover a lost device token. The plaintext device token is returned only in this response.
+      security: [{}, {agentEnrollment: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, hostname, claim_token]
+              properties:
+                agent_id: {type: string, format: uuid}
+                hostname: {type: string, maxLength: 255}
+                claim_token: {type: string, pattern: "^ivq_ec_"}
+      responses:
+        "201":
+          description: Automatically enrolled Agent and one-time device bearer token
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+        "401": {description: Invalid fleet enrollment credential when token protection is enabled}
+        "403": {description: Automatic enrollment disabled or Agent blocked}
+        "409": {description: Agent UUID is bound to another device claim}
+        "429": {description: Enrollment rate limit exceeded}
   /v1/agent/updates:
     get:
       operationId: getAgentUpdateManifest
@@ -223,6 +249,92 @@ paths:
         "200": {description: Connection succeeded}
         "400": {description: Invalid DSN}
         "502": {description: Connection failed without credential disclosure}
+  /api/v1/admin/settings/agent-enrollment:
+    get:
+      operationId: getAgentEnrollmentSettings
+      summary: Read the database-backed Agent auto-enrollment policy
+      description: Requires settings.read. The registration token or its digest is never returned.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current policy shared by all Server pods
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentEnrollmentPolicy"}
+        "401": {description: Authentication required}
+    patch:
+      operationId: updateAgentEnrollmentSettings
+      summary: Enable URL-only or token-protected enrollment, or disable enrollment
+      description: Requires settings.write and X-CSRF-Token. Changes are persisted in the common database and take effect on every Server pod without restart.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: {type: string, enum: [disabled, open, token]}
+                reason: {type: string}
+      responses:
+        "200":
+          description: Policy applied immediately
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentEnrollmentPolicy"}
+        "400": {description: Invalid mode}
+        "409": {description: "Protected mode selected before a token was issued, or concurrent update conflict"}
+  /api/v1/admin/settings/agent-enrollment/token:
+    post:
+      operationId: issueAgentEnrollmentToken
+      summary: Issue or rotate the registration token and enable protected enrollment
+      description: Requires settings.write and X-CSRF-Token. The plaintext is returned once, is never stored, and replaces any previous registration token immediately.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        "201":
+          description: Token issued and protected mode applied
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/AgentEnrollmentPolicy"}
+                  - type: object
+                    required: [registration_token, shown_once]
+                    properties:
+                      registration_token: {type: string, writeOnly: true, pattern: "^ivq_et_"}
+                      shown_once: {type: boolean, const: true}
+        "4XX": {description: "Invalid request, authentication failure, or permission denied"}
+    delete:
+      operationId: deleteAgentEnrollmentToken
+      summary: Delete the registration token
+      description: Requires settings.write and X-CSRF-Token. If automatic enrollment is active, it becomes URL-only open enrollment.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        "200":
+          description: Token deleted
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AgentEnrollmentPolicy"}
+        "4XX": {description: "Invalid request, authentication failure, or permission denied"}
   /api/v1/admin/settings/keycloak:
     get:
       operationId: getKeycloakSettings
@@ -371,6 +483,15 @@ paths:
       summary: Create manual asset
       security: [{session: []}]
       responses: {"201": {description: Created}, "400": {description: Invalid asset}}
+  /api/v1/dashboard/statistics:
+    get:
+      operationId: getDashboardStatistics
+      summary: Get authoritative asset, Agent, and collection aggregates
+      security: [{session: []}]
+      responses:
+        "200": {description: Current aggregates and seven-day collection trend}
+        "401": {description: Authentication required}
+        "403": {description: Missing assets.read permission}
   /api/v1/query/execute:
     post:
       operationId: executeQuery
@@ -380,6 +501,7 @@ paths:
 components:
   securitySchemes:
     agentBearer: {type: http, scheme: bearer}
+    agentEnrollment: {type: apiKey, in: header, name: X-Invenqor-Enrollment-Token}
     agentMTLS: {type: mutualTLS}
     session: {type: apiKey, in: cookie, name: invenqor_session}
     externalBearer: {type: http, scheme: bearer, bearerFormat: Invenqor scoped API key}
@@ -387,6 +509,17 @@ components:
     KeyId: {in: path, name: keyId, required: true, schema: {type: string, format: uuid}}
     UserId: {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
   schemas:
+    AgentEnrollmentPolicy:
+      type: object
+      required: [enabled, mode, token_configured, version, updated_at, updated_by, source]
+      properties:
+        enabled: {type: boolean}
+        mode: {type: string, enum: [disabled, open, token]}
+        token_configured: {type: boolean}
+        version: {type: integer, minimum: 1}
+        updated_at: {type: string, format: date-time}
+        updated_by: {type: string}
+        source: {type: string, const: database}
     OIDCSettings:
       type: object
       required:

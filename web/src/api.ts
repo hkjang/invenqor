@@ -14,7 +14,21 @@ export const api = async <T,>(
   path: string,
   init?: RequestInit,
 ): Promise<T> => {
-  const response = await fetch(path, { credentials: "include", ...init });
+  const headers = new Headers(init?.headers);
+  const method = (init?.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && !headers.get("X-CSRF-Token")) {
+    const csrf = document.cookie
+      .split(";")
+      .map(value => value.trim())
+      .find(value => value.startsWith("invenqor_csrf="))
+      ?.slice("invenqor_csrf=".length);
+    if (csrf) headers.set("X-CSRF-Token", decodeURIComponent(csrf));
+  }
+  const response = await fetch(path, {
+    credentials: "include",
+    ...init,
+    headers,
+  });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {

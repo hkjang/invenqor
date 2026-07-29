@@ -3,12 +3,14 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,6 +24,107 @@ import (
 )
 
 const maxAgentEventBytes = 16 * 1024 * 1024
+
+func (s *Server) autoEnrollAgent(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	clientKey := request.RemoteAddr
+	if host, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
+		clientKey = host
+	}
+	if !s.agentEnrollmentRateLimit.Allow(clientKey) {
+		response.Header().Set("Retry-After", "60")
+		writeAPIError(
+			response, request, http.StatusTooManyRequests,
+			"AGENT_ENROLLMENT_RATE_LIMITED",
+			"Too many agent enrollment attempts.",
+		)
+		return
+	}
+	policy, _, err := s.loadAgentEnrollmentPolicy(request.Context())
+	if err != nil {
+		writeAPIError(
+			response, request, http.StatusServiceUnavailable,
+			"AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
+			"The automatic enrollment policy is temporarily unavailable.",
+		)
+		return
+	}
+	if !policy.Enabled {
+		writeAPIError(
+			response, request, http.StatusForbidden,
+			"AGENT_AUTO_ENROLLMENT_DISABLED",
+			"Automatic agent enrollment is not configured.",
+		)
+		return
+	}
+	if policy.RequireToken {
+		provided := sha256.Sum256([]byte(strings.TrimSpace(
+			request.Header.Get("X-Invenqor-Enrollment-Token"),
+		)))
+		expected, _ := hex.DecodeString(policy.TokenHash)
+		if subtle.ConstantTimeCompare(
+			provided[:],
+			expected,
+		) != 1 {
+			writeAPIError(
+				response, request, http.StatusUnauthorized,
+				"AGENT_ENROLLMENT_UNAUTHORIZED",
+				"The fleet enrollment credential is invalid.",
+			)
+			return
+		}
+	}
+	var input struct {
+		AgentID    string `json:"agent_id"`
+		Hostname   string `json:"hostname"`
+		ClaimToken string `json:"claim_token"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeAPIError(
+			response, request, http.StatusBadRequest,
+			"INVALID_REQUEST", "The request body is invalid.",
+		)
+		return
+	}
+	if len(strings.TrimSpace(input.Hostname)) > 255 {
+		writeAPIError(
+			response, request, http.StatusBadRequest,
+			"INVALID_AGENT", "hostname must not exceed 255 characters.",
+		)
+		return
+	}
+	result, err := s.agentService.AutoEnroll(
+		request.Context(),
+		input.AgentID,
+		input.Hostname,
+		input.ClaimToken,
+	)
+	switch {
+	case err == nil:
+		response.Header().Set("Cache-Control", "no-store")
+		writeJSON(response, http.StatusCreated, result)
+	case errors.Is(err, agents.ErrEnrollmentClaimMismatch):
+		writeAPIError(
+			response, request, http.StatusConflict,
+			"AGENT_ALREADY_CLAIMED",
+			"The agent identifier is already bound to another device claim.",
+		)
+	case errors.Is(err, agents.ErrBlocked):
+		writeAPIError(
+			response, request, http.StatusForbidden,
+			"AGENT_BLOCKED", "The agent is blocked.",
+		)
+	case errors.Is(err, agents.ErrInvalidEnrollment):
+		writeAPIError(
+			response, request, http.StatusBadRequest,
+			"INVALID_AGENT", "The agent enrollment identity is invalid.",
+		)
+	default:
+		s.internalError(response, request, err)
+	}
+}
 
 func (s *Server) receiveAgentEvent(
 	response http.ResponseWriter,
@@ -338,7 +441,8 @@ func (s *Server) listAgents(
 	rows, err := s.database.DB().QueryContext(
 		request.Context(),
 		`SELECT id, agent_id, hostname, status, version, os_name,
-		 architecture, auth_method, policy_version
+		 architecture, auth_method, policy_version, last_seen_at,
+		 last_inventory_at
 		 FROM agents ORDER BY hostname, agent_id`,
 	)
 	if err != nil {
@@ -352,7 +456,8 @@ func (s *Server) listAgents(
 		if err := rows.Scan(
 			&agent.ID, &agent.AgentID, &agent.Hostname, &agent.Status,
 			&agent.Version, &agent.OSName, &agent.Architecture,
-			&agent.AuthMethod, &agent.PolicyVersion,
+			&agent.AuthMethod, &agent.PolicyVersion, &agent.LastSeenAt,
+			&agent.LastInventoryAt,
 		); err != nil {
 			s.internalError(response, request, err)
 			return

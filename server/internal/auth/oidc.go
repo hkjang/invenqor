@@ -62,16 +62,17 @@ type OIDCSettings struct {
 
 func DefaultOIDCSettings() OIDCSettings {
 	return OIDCSettings{
-		Scopes:          []string{oidc.ScopeOpenID, "profile", "email"},
-		UsernameClaim:   "preferred_username",
-		EmailClaim:      "email",
-		NameClaim:       "name",
-		GroupClaim:      "groups",
-		RoleClaim:       "roles",
-		RoleMappings:    map[string]string{},
-		GroupMappings:   map[string]string{},
-		AutoCreateUsers: true,
-		DefaultRole:     "viewer",
+		Scopes:              []string{oidc.ScopeOpenID, "profile", "email"},
+		UsernameClaim:       "preferred_username",
+		EmailClaim:          "email",
+		NameClaim:           "name",
+		GroupClaim:          "groups",
+		RoleClaim:           "roles",
+		RoleMappings:        map[string]string{},
+		GroupMappings:       map[string]string{},
+		AllowedEmailDomains: []string{},
+		AutoCreateUsers:     true,
+		DefaultRole:         "viewer",
 	}
 }
 
@@ -195,6 +196,12 @@ func (service *OIDCService) Settings(ctx context.Context) (OIDCSettings, error) 
 	}
 	if settings.GroupMappings == nil {
 		settings.GroupMappings = map[string]string{}
+	}
+	if settings.Scopes == nil {
+		settings.Scopes = []string{oidc.ScopeOpenID, "profile", "email"}
+	}
+	if settings.AllowedEmailDomains == nil {
+		settings.AllowedEmailDomains = []string{}
 	}
 	return settings, nil
 }

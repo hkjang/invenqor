@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::storage::StateStore;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -54,6 +55,12 @@ pub async fn check_and_stage(config: &Config, agent_id: &str) -> Result<Option<S
         .url
         .as_deref()
         .context("server.url is required")?;
+    let store = StateStore::open(&config.agent.state_dir, config.agent.max_queue_bytes)?;
+    let bearer_token = config
+        .server
+        .bearer_token
+        .clone()
+        .or_else(|| store.device_token(base));
     let url = format!(
         "{}/v1/agent/updates?agent_id={}&current_version={}&channel={}&os=linux&arch={}",
         base.trim_end_matches('/'),
@@ -63,7 +70,7 @@ pub async fn check_and_stage(config: &Config, agent_id: &str) -> Result<Option<S
         std::env::consts::ARCH,
     );
     let mut request = client.get(url);
-    if let Some(token) = &config.server.bearer_token {
+    if let Some(token) = &bearer_token {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.context("request update manifest")?;
@@ -96,7 +103,7 @@ pub async fn check_and_stage(config: &Config, agent_id: &str) -> Result<Option<S
     );
     let download = format!("{}{}", base.trim_end_matches('/'), manifest.download_url);
     let mut request = client.get(download);
-    if let Some(token) = &config.server.bearer_token {
+    if let Some(token) = &bearer_token {
         request = request.bearer_auth(token);
     }
     let response = request.send().await.context("download update artifact")?;
@@ -228,7 +235,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 
 fn update_client(config: &Config) -> Result<Client> {
     let mut builder = Client::builder()
-        .https_only(!config.server.allow_insecure_http)
+        .https_only(!config.server.allows_http())
         .timeout(Duration::from_secs(config.server.timeout_seconds))
         .user_agent(concat!("invenqor-agent/", env!("CARGO_PKG_VERSION")));
     if let Some(path) = &config.server.ca_file {

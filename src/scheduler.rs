@@ -22,7 +22,14 @@ impl Agent {
     pub fn new(config: Config, identity: HostIdentity) -> Result<Self> {
         let collectors = configured(&config.collectors);
         let store = StateStore::open(&config.agent.state_dir, config.agent.max_queue_bytes)?;
-        let transport = Transport::new(&config.server)?;
+        let mut transport = Transport::new(&config.server)?;
+        if let (Some(transport), Some(server_url)) =
+            (transport.as_mut(), config.server.url.as_deref())
+        {
+            if transport.bearer_token().is_none() {
+                transport.set_bearer_token(store.device_token(server_url));
+            }
+        }
         Ok(Self {
             config,
             identity,
@@ -90,14 +97,45 @@ impl Agent {
         Ok(snapshot)
     }
 
-    pub async fn drain_queue(&self) -> Result<usize> {
-        let Some(transport) = &self.transport else {
+    pub async fn drain_queue(&mut self) -> Result<usize> {
+        self.ensure_enrolled().await?;
+        if self.transport.is_none() {
             return Ok(0);
-        };
+        }
         let mut sent = 0;
         for path in self.store.pending()? {
             let envelope = self.store.read_envelope(&path)?;
-            let acknowledgement = transport.send(&envelope).await?;
+            let first_attempt = self
+                .transport
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("server transport is unavailable"))?
+                .send(&envelope)
+                .await;
+            let acknowledgement = match first_attempt {
+                Ok(value) => value,
+                Err(error)
+                    if crate::transport::is_unauthorized(&error)
+                        && self.config.server.bearer_token.is_none() =>
+                {
+                    let server_url = self
+                        .config
+                        .server
+                        .url
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("server.url is required"))?;
+                    self.store.clear_device_token(server_url)?;
+                    if let Some(transport) = self.transport.as_mut() {
+                        transport.set_bearer_token(None);
+                    }
+                    self.ensure_enrolled().await?;
+                    self.transport
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("server transport is unavailable"))?
+                        .send(&envelope)
+                        .await?
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(version) = acknowledgement.policy_version {
                 info!(policy_version = version, "server policy advertised");
             }
@@ -105,6 +143,33 @@ impl Agent {
             sent += 1;
         }
         Ok(sent)
+    }
+
+    async fn ensure_enrolled(&mut self) -> Result<()> {
+        let Some(transport) = self.transport.as_mut() else {
+            return Ok(());
+        };
+        if transport.bearer_token().is_some() {
+            return Ok(());
+        }
+        let server_url = self
+            .config
+            .server
+            .url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("server.url is required"))?;
+        let claim = self.store.enrollment_claim(server_url)?;
+        let hostname = host_name();
+        let token = transport
+            .enroll(&self.identity.agent_id, &hostname, &claim)
+            .await?;
+        self.store.set_device_token(server_url, &token)?;
+        transport.set_bearer_token(Some(token));
+        info!(
+            agent_id = %self.identity.agent_id,
+            "agent automatically enrolled and device credential stored"
+        );
+        Ok(())
     }
 
     fn queue_heartbeat(&self) -> Result<()> {
@@ -126,7 +191,7 @@ impl Agent {
         Ok(())
     }
 
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         if self.config.updates.enabled {
             tokio::spawn(crate::updater::run_checker(
                 self.config.clone(),
@@ -209,6 +274,15 @@ impl Agent {
             }
         }
     }
+}
+
+fn host_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn wait_or_shutdown(duration: Duration) -> bool {

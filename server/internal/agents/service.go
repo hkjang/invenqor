@@ -18,20 +18,24 @@ import (
 )
 
 var (
-	ErrUnauthorized = errors.New("agent credential is not valid")
-	ErrBlocked      = errors.New("agent is blocked")
+	ErrUnauthorized            = errors.New("agent credential is not valid")
+	ErrBlocked                 = errors.New("agent is blocked")
+	ErrEnrollmentClaimMismatch = errors.New("agent enrollment claim does not match")
+	ErrInvalidEnrollment       = errors.New("agent enrollment request is invalid")
 )
 
 type Agent struct {
-	ID            string `json:"id"`
-	AgentID       string `json:"agent_id"`
-	Hostname      string `json:"hostname"`
-	Status        string `json:"status"`
-	Version       string `json:"version"`
-	OSName        string `json:"os_name"`
-	Architecture  string `json:"architecture"`
-	AuthMethod    string `json:"auth_method"`
-	PolicyVersion string `json:"policy_version"`
+	ID              string `json:"id"`
+	AgentID         string `json:"agent_id"`
+	Hostname        string `json:"hostname"`
+	Status          string `json:"status"`
+	Version         string `json:"version"`
+	OSName          string `json:"os_name"`
+	Architecture    string `json:"architecture"`
+	AuthMethod      string `json:"auth_method"`
+	PolicyVersion   string `json:"policy_version"`
+	LastSeenAt      any    `json:"last_seen_at,omitempty"`
+	LastInventoryAt any    `json:"last_inventory_at,omitempty"`
 }
 
 type ProvisionResult struct {
@@ -150,6 +154,146 @@ func (s *Service) ProvisionBearer(
 		return ProvisionResult{}, err
 	}
 	return ProvisionResult{Agent: agent, Token: token}, nil
+}
+
+// AutoEnroll exchanges a fleet enrollment authorization and a device-local
+// claim for a device-specific bearer credential. The claim makes retries safe:
+// if the first response is lost, only the same device can replace the bearer.
+func (s *Service) AutoEnroll(
+	ctx context.Context,
+	agentID string,
+	hostname string,
+	claimToken string,
+) (ProvisionResult, error) {
+	if _, err := uuid.Parse(agentID); err != nil {
+		return ProvisionResult{}, fmt.Errorf("%w: agent_id must be a UUID", ErrInvalidEnrollment)
+	}
+	if !strings.HasPrefix(claimToken, "ivq_ec_") || len(claimToken) < 39 {
+		return ProvisionResult{}, fmt.Errorf("%w: enrollment claim is invalid", ErrInvalidEnrollment)
+	}
+	bearer, err := randomToken("ivq_at_", 32)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	now := s.now()
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return ProvisionResult{}, fmt.Errorf("begin automatic enrollment: %w", err)
+	}
+	defer tx.Rollback()
+
+	var internalID string
+	var blocked any
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT id, blocked_at FROM agents WHERE agent_id = $1`,
+		agentID,
+	).Scan(&internalID, &blocked)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		internalID = uuid.NewString()
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO agents(
+				id, agent_id, hostname, status, auth_method, updated_at
+			) VALUES ($1, $2, $3, 'provisioned', 'auto_bearer', $4)`,
+			internalID,
+			agentID,
+			strings.TrimSpace(hostname),
+			now,
+		); err != nil {
+			return ProvisionResult{}, fmt.Errorf("create automatically enrolled agent: %w", err)
+		}
+		if _, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO agent_credentials(
+				id, agent_id, credential_type, secret_hash, not_before
+			) VALUES ($1, $2, 'enrollment_claim', $3, CURRENT_TIMESTAMP)`,
+			uuid.NewString(),
+			internalID,
+			digest(claimToken),
+		); err != nil {
+			return ProvisionResult{}, fmt.Errorf("store enrollment claim: %w", err)
+		}
+	case err != nil:
+		return ProvisionResult{}, fmt.Errorf("find enrollment target: %w", err)
+	default:
+		if blocked != nil {
+			return ProvisionResult{}, ErrBlocked
+		}
+		var credentialID string
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT id FROM agent_credentials
+			 WHERE agent_id = $1
+			   AND credential_type = 'enrollment_claim'
+			   AND secret_hash = $2
+			   AND revoked_at IS NULL
+			 ORDER BY created_at DESC LIMIT 1`,
+			internalID,
+			digest(claimToken),
+		).Scan(&credentialID); errors.Is(err, sql.ErrNoRows) {
+			return ProvisionResult{}, ErrEnrollmentClaimMismatch
+		} else if err != nil {
+			return ProvisionResult{}, fmt.Errorf("verify enrollment claim: %w", err)
+		}
+		if _, err = tx.ExecContext(
+			ctx,
+			`UPDATE agent_credentials
+			 SET revoked_at = $1
+			 WHERE agent_id = $2
+			   AND credential_type = 'bearer'
+			   AND revoked_at IS NULL`,
+			now,
+			internalID,
+		); err != nil {
+			return ProvisionResult{}, fmt.Errorf("replace lost bearer credential: %w", err)
+		}
+		if _, err = tx.ExecContext(
+			ctx,
+			`UPDATE agents SET
+				hostname = CASE WHEN $1 = '' THEN hostname ELSE $1 END,
+				status = 'provisioned', auth_method = 'auto_bearer',
+				updated_at = $2
+			 WHERE id = $3`,
+			strings.TrimSpace(hostname),
+			now,
+			internalID,
+		); err != nil {
+			return ProvisionResult{}, fmt.Errorf("refresh automatically enrolled agent: %w", err)
+		}
+	}
+	if _, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO agent_credentials(
+			id, agent_id, credential_type, secret_hash, not_before
+		) VALUES ($1, $2, 'bearer', $3, CURRENT_TIMESTAMP)`,
+		uuid.NewString(),
+		internalID,
+		digest(bearer),
+	); err != nil {
+		return ProvisionResult{}, fmt.Errorf("store device bearer credential: %w", err)
+	}
+	if err := s.audit.Record(ctx, tx, audit.Entry{
+		ActorType: "agent", ActorID: internalID, Action: "agent.auto_enroll",
+		ResourceType: "agent", ResourceID: internalID, Result: "success",
+		After: map[string]any{
+			"agent_id": agentID,
+			"hostname": strings.TrimSpace(hostname),
+			"auth":     "auto_bearer",
+		},
+	}); err != nil {
+		return ProvisionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ProvisionResult{}, fmt.Errorf("commit automatic enrollment: %w", err)
+	}
+	s.invalidateCache(internalID)
+	agent, err := s.Get(ctx, internalID)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
+	return ProvisionResult{Agent: agent, Token: bearer}, nil
 }
 
 // RotateBearer issues a replacement and leaves previous credentials valid only

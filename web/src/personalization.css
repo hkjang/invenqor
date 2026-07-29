@@ -1,0 +1,74 @@
+.profile-context{position:relative}
+.profile-trigger{display:flex;align-items:center;gap:9px;border:0;background:transparent;padding:6px 3px 6px 7px;color:#344353}
+.profile-trigger .avatar{width:30px;height:30px;font-size:11px}
+.profile-trigger-copy{min-width:0;text-align:left}
+.profile-trigger-copy strong,.profile-trigger-copy small{display:block;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.profile-trigger-copy strong{font-size:11px}
+.profile-trigger-copy small{font-size:8px;color:var(--muted);margin-top:2px}
+.profile-menu{position:absolute;z-index:25;right:0;top:calc(100% + 10px);width:260px;background:#fff;border:1px solid var(--line);box-shadow:0 18px 45px #10223526;padding:7px}
+.profile-menu:before{content:"";position:absolute;right:18px;top:-6px;width:10px;height:10px;background:#fff;border-left:1px solid var(--line);border-top:1px solid var(--line);transform:rotate(45deg)}
+.profile-menu-identity{padding:12px 13px;border-bottom:1px solid #edf0f2;margin-bottom:4px}
+.profile-menu-identity strong,.profile-menu-identity span{display:block}
+.profile-menu-identity strong{font-size:13px}
+.profile-menu-identity span{font-size:9px;color:var(--muted);margin-top:3px}
+.profile-menu>button{width:100%;display:flex;align-items:center;gap:11px;border:0;background:transparent;padding:10px;color:#344353;text-align:left}
+.profile-menu>button:hover{background:#eef7f6;color:#176a64}
+.profile-menu>button>span{flex:1}
+.profile-menu>button strong,.profile-menu>button small{display:block}
+.profile-menu>button strong{font-size:11px}
+.profile-menu>button small{font-size:9px;color:var(--muted);margin-top:3px}
+.profile-menu>button.logout{color:#a7352f}
+.profile-menu-separator{height:1px;background:#edf0f2;margin:4px 0}
+.preference-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.preference-panel{background:#fff;border:1px solid var(--line);padding:20px}
+.preference-panel>header{display:flex;align-items:flex-start;gap:12px}
+.preference-panel>header>svg{width:35px;height:35px;padding:8px;background:#e8f5f2;color:#26756e}
+.preference-panel h3{font-size:14px;margin:1px 0 5px}
+.preference-panel p{font-size:10px;line-height:1.45;color:var(--muted);margin:0}
+.preference-control{margin-top:18px}
+.preference-control select{width:100%;border:1px solid var(--line);background:#fafbfc;padding:11px;color:inherit}
+.choice-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.choice-grid.two{grid-template-columns:repeat(2,1fr)}
+.choice-grid button{position:relative;min-height:72px;border:1px solid var(--line);background:#fafbfc;color:#617080;display:grid;place-items:center;gap:4px;padding:10px}
+.choice-grid button svg{width:17px}
+.choice-grid button span{font-size:10px;font-weight:700}
+.choice-grid button.selected{border-color:#57a99f;background:#eef8f6;color:#176a64;box-shadow:inset 0 -3px #23877c}
+.choice-grid .choice-check{position:absolute;right:6px;top:6px;width:12px}
+.motion-preference{display:flex;align-items:flex-start;gap:11px;background:#fff;border:1px solid var(--line);padding:17px 20px;margin-top:16px}
+.motion-preference strong,.motion-preference small{display:block}
+.motion-preference strong{font-size:12px}
+.motion-preference small{font-size:10px;color:var(--muted);margin-top:4px}
+.preference-note{font-size:10px;color:var(--muted);margin:12px 2px}
+.page-failure{margin:50px auto;max-width:520px;text-align:center;background:#fff;border:1px solid var(--line);padding:42px}
+.page-failure>svg{color:#b05e28;width:40px;height:40px}
+.page-failure h2{font-size:19px}
+.page-failure p{font-size:11px;color:var(--muted);margin-bottom:20px}
+html[data-density=compact] .content{padding-inline:25px}
+html[data-density=compact] .page-title{padding-block:25px 18px}
+html[data-density=compact] td{padding-block:9px}
+html[data-density=compact] .metric{min-height:108px;padding:15px}
+html[data-density=compact] .panel-head{height:48px}
+html[data-density=compact] .managed-users article,html[data-density=compact] .agent-card{padding:13px 15px}
+html[data-reduce-motion=true] *,html[data-reduce-motion=true] *:before,html[data-reduce-motion=true] *:after{scroll-behavior:auto!important;transition:none!important;animation:none!important}
+html[data-theme=dark]{color-scheme:dark;--line:#334354;--muted:#9aa9b8;background:#0d1722;color:#e2eaf1}
+html[data-theme=dark] body,html[data-theme=dark] .content{background:#0d1722}
+html[data-theme=dark] .content>header{border-color:#2b3a49}
+html[data-theme=dark] .panel,html[data-theme=dark] .metric,html[data-theme=dark] .agent-card,html[data-theme=dark] .drawer-form,html[data-theme=dark] .drawer-section,html[data-theme=dark] .profile-menu,html[data-theme=dark] .profile-menu:before,html[data-theme=dark] .preference-panel,html[data-theme=dark] .motion-preference,html[data-theme=dark] .page-failure{background:#142231}
+html[data-theme=dark] .profile-trigger,html[data-theme=dark] .profile-menu>button{color:#dbe5ee}
+html[data-theme=dark] th,html[data-theme=dark] .status-grid>div,html[data-theme=dark] .admin-form input,html[data-theme=dark] .admin-form textarea,html[data-theme=dark] .user-create-form input,html[data-theme=dark] .search,html[data-theme=dark] .search input,html[data-theme=dark] .filter-bar>input,html[data-theme=dark] .filter-bar>select,html[data-theme=dark] .filter-bar>label,html[data-theme=dark] .compact-form input,html[data-theme=dark] .compact-form select,html[data-theme=dark] .compact-form textarea,html[data-theme=dark] .choice-grid button,html[data-theme=dark] .preference-control select,html[data-theme=dark] .role-options .role-check,html[data-theme=dark] .setting-catalog>button{background:#182838;color:#dbe5ee}
+html[data-theme=dark] .profile-menu>button:hover,html[data-theme=dark] .setting-catalog>button:hover,html[data-theme=dark] .role-options .role-check:hover{background:#1d3a3a}
+html[data-theme=dark] .role-options .role-check.selected,html[data-theme=dark] .choice-grid button.selected{background:#173a37}
+html[data-theme=dark] .role-copy strong{color:#e2eaf1}
+html[data-theme=dark] td,html[data-theme=dark] .managed-users article,html[data-theme=dark] .agent-list>div,html[data-theme=dark] .audit-table details,html[data-theme=dark] .history-list details,html[data-theme=dark] .profile-menu-identity{border-color:#273849}
+html[data-theme=dark] .version-chip,html[data-theme=dark] .secondary,html[data-theme=dark] .user-actions button,html[data-theme=dark] .card-actions button{background:#182838;color:#dbe5ee}
+html[data-theme=dark] .drawer{background:#0d1722}
+html[data-theme=dark] .drawer>header{background:#142231}
+html[data-theme=dark] .admin-notice.info{background:#173535}
+html[data-theme=dark] .admin-notice.warning{background:#3a301d}
+html[data-theme=dark] .admin-notice.error,html[data-theme=dark] .error{background:#3a2020}
+html[data-theme=dark] .success{background:#173a31}
+@media(max-width:760px){
+  .profile-trigger-copy,.profile-trigger>svg{display:none}
+  .profile-menu{position:fixed;right:12px;top:62px;width:min(280px,calc(100vw - 24px))}
+  .preference-grid{grid-template-columns:1fr}
+}

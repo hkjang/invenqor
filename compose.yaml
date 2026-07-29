@@ -20,6 +20,8 @@ services:
       INVENQOR_POSTGRES_DSN: ${POSTGRES_DSN:-postgres://invenqor:${POSTGRES_PASSWORD}@postgres:5432/invenqor?sslmode=disable}
       INVENQOR_BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-}
       INVENQOR_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      INVENQOR_AGENT_AUTO_ENROLLMENT: ${AGENT_AUTO_ENROLLMENT:-true}
+      INVENQOR_AGENT_ENROLLMENT_TOKEN: ${AGENT_ENROLLMENT_TOKEN:-}
     volumes:
       - server-state:/var/lib/invenqor-server
     ports:

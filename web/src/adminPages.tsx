@@ -1,6 +1,7 @@
 import React from "react";
 import {
   CheckCircle2,
+  Copy,
   Database,
   Eye,
   EyeOff,
@@ -8,10 +9,13 @@ import {
   LockKeyholeOpen,
   Pencil,
   Power,
+  RadioTower,
   RefreshCw,
+  RotateCcw,
   Save,
   ServerCog,
   Shield,
+  SlidersHorizontal,
   Trash2,
   UserPlus,
   Users,
@@ -19,7 +23,7 @@ import {
 import { api } from "./api";
 import type { SystemInfo } from "./productVersion";
 
-type SettingsTab = "postgresql" | "keycloak" | "system";
+type SettingsTab = "postgresql" | "agents" | "keycloak" | "general" | "system";
 type PostgresTarget = {
   valid: boolean;
   host?: string;
@@ -44,6 +48,15 @@ type PostgresStatus = {
     checked_at: string;
   };
 };
+type AgentEnrollmentSettings = {
+  enabled: boolean;
+  mode: "disabled"|"open"|"token";
+  token_configured: boolean;
+  version: number;
+  updated_at: string;
+  updated_by: string;
+  source: "database";
+};
 type KeycloakSettings = {
   enabled: boolean;
   issuer_url: string;
@@ -66,6 +79,43 @@ type KeycloakSettings = {
   last_connection_test_at?: string;
   last_connection_ok: boolean;
 };
+const defaultKeycloakSettings: KeycloakSettings = {
+  enabled: false,
+  issuer_url: "",
+  realm: "",
+  client_id: "",
+  redirect_uri: "",
+  logout_redirect_uri: "",
+  scopes: ["openid", "profile", "email"],
+  username_claim: "preferred_username",
+  email_claim: "email",
+  name_claim: "name",
+  group_claim: "groups",
+  role_claim: "roles",
+  role_mappings: {},
+  group_mappings: {},
+  auto_create_users: true,
+  default_role: "viewer",
+  allowed_email_domains: [],
+  private_ca_pem: "",
+  last_connection_ok: false,
+};
+export const normalizeKeycloakSettings = (
+  value: Partial<KeycloakSettings> | null | undefined,
+): KeycloakSettings => ({
+  ...defaultKeycloakSettings,
+  ...(value || {}),
+  scopes: Array.isArray(value?.scopes) ? value.scopes : defaultKeycloakSettings.scopes,
+  allowed_email_domains: Array.isArray(value?.allowed_email_domains)
+    ? value.allowed_email_domains
+    : [],
+  role_mappings: value?.role_mappings && typeof value.role_mappings === "object"
+    ? value.role_mappings
+    : {},
+  group_mappings: value?.group_mappings && typeof value.group_mappings === "object"
+    ? value.group_mappings
+    : {},
+});
 type ManagedUser = {
   id: string;
   username: string;
@@ -110,21 +160,189 @@ export function SettingsPage({
     <AdminPageTitle
       kicker="CONTROL CENTER"
       title="운영 설정"
-      subtitle="실제로 적용되는 데이터베이스와 인증 설정을 검증하고 관리합니다."
+      subtitle="데이터베이스, Agent 등록과 조직 인증 정책을 한곳에서 검증하고 관리합니다."
     />
     <div className="settings-layout">
       <div className="settings-nav">
         <button className={tab === "postgresql" ? "active" : ""} onClick={() => setTab("postgresql")}><Database size={17}/>PostgreSQL</button>
+        <button className={tab === "agents" ? "active" : ""} onClick={() => setTab("agents")}><RadioTower size={17}/>Agent 등록</button>
         <button className={tab === "keycloak" ? "active" : ""} onClick={() => setTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
+        <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
         <button className={tab === "system" ? "active" : ""} onClick={() => setTab("system")}><ServerCog size={17}/>시스템 정보</button>
       </div>
       <div className="settings-content">
         {tab === "postgresql" && <PostgresSettings csrf={csrf}/>}
+        {tab === "agents" && <AgentEnrollmentSettingsPanel csrf={csrf}/>}
         {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf}/>}
+        {tab === "general" && <GeneralSettingsPanel csrf={csrf}/>}
         {tab === "system" && <SystemSettingsInfo info={systemInfo}/>}
       </div>
     </div>
   </section>;
+}
+
+function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
+  const [policy, setPolicy] = React.useState<AgentEnrollmentSettings|null>(null);
+  const [mode, setMode] = React.useState<AgentEnrollmentSettings["mode"]>("open");
+  const [reason, setReason] = React.useState("");
+  const [registrationToken, setRegistrationToken] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(() =>
+    api<AgentEnrollmentSettings>("/api/v1/admin/settings/agent-enrollment")
+      .then(value => {
+        setPolicy(value);
+        setMode(value.mode);
+      }),
+  []);
+  React.useEffect(() => {
+    load().catch(reason => setError((reason as Error).message));
+  }, [load]);
+  const save = async () => {
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = await api<AgentEnrollmentSettings>(
+        "/api/v1/admin/settings/agent-enrollment",
+        jsonRequest(csrf, {mode, reason}, "PATCH"),
+      );
+      setPolicy(value); setMode(value.mode); setReason("");
+      setMessage(value.mode === "open"
+        ? "토큰 없는 자동 등록을 활성화했습니다. Agent는 URL만으로 바로 등록됩니다."
+        : value.mode === "token"
+          ? "등록 토큰 보호 모드를 활성화했습니다."
+          : "Agent 자동 등록을 비활성화했습니다.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const issueToken = async () => {
+    if (policy?.token_configured &&
+      !window.confirm("현재 등록 토큰을 즉시 교체합니까? 기존 등록 토큰은 더 이상 사용할 수 없습니다.")) return;
+    setBusy(true); setError(""); setMessage(""); setRegistrationToken("");
+    try {
+      const value = await api<AgentEnrollmentSettings & {registration_token: string}>(
+        "/api/v1/admin/settings/agent-enrollment/token",
+        jsonRequest(csrf, {reason}),
+      );
+      setPolicy(value); setMode(value.mode); setRegistrationToken(value.registration_token);
+      setReason("");
+      setMessage("등록 토큰을 발급하고 토큰 보호 모드를 활성화했습니다.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const deleteToken = async () => {
+    if (!window.confirm("등록 토큰을 폐기합니까? 자동 등록이 활성 상태라면 URL-only Open 모드로 전환됩니다.")) return;
+    setBusy(true); setError(""); setMessage(""); setRegistrationToken("");
+    try {
+      const value = await api<AgentEnrollmentSettings>(
+        "/api/v1/admin/settings/agent-enrollment/token",
+        jsonRequest(csrf, {reason}, "DELETE"),
+      );
+      setPolicy(value); setMode(value.mode); setReason("");
+      setMessage(value.mode === "open"
+        ? "등록 토큰을 폐기하고 URL-only 자동 등록으로 전환했습니다."
+        : "등록 토큰을 폐기했습니다.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!policy) {
+    return <AdminPanel title="Agent 자동 등록" action="실시간 정책">
+      <div className="settings-body">{error || "등록 정책을 불러오는 중입니다."}</div>
+    </AdminPanel>;
+  }
+  const options: {value: AgentEnrollmentSettings["mode"]; title: string; description: string; badge?: string}[] = [
+    {
+      value: "open",
+      title: "토큰 없이 자동 등록",
+      description: "Agent config.toml에 Server URL만 입력하면 최초 통신 때 즉시 자산으로 등록됩니다.",
+      badge: "URL-ONLY",
+    },
+    {
+      value: "token",
+      title: "등록 토큰 필요",
+      description: "최초 등록에 공용 등록 토큰을 요구합니다. 이미 등록된 Agent의 장치 토큰에는 영향이 없습니다.",
+      badge: "PROTECTED",
+    },
+    {
+      value: "disabled",
+      title: "자동 등록 비활성",
+      description: "새 Agent 등록을 차단합니다. 기존 등록 Agent의 수집과 전송은 계속 허용됩니다.",
+    },
+  ];
+  return <AdminPanel
+    title="Agent 자동 등록"
+    action={`DB 정책 v${policy.version} · ${policy.mode.toUpperCase()}`}
+  >
+    <div className="settings-body agent-enrollment-settings">
+      <div className="enrollment-status status-grid">
+        <StatusItem label="현재 상태" value={policy.enabled ? "활성" : "비활성"} good={policy.enabled}/>
+        <StatusItem label="등록 방식" value={policy.mode === "open" ? "URL-only" : policy.mode === "token" ? "Token 보호" : "차단"}/>
+        <StatusItem label="등록 토큰" value={policy.token_configured ? "발급됨" : "없음"} good={policy.token_configured}/>
+        <StatusItem label="정책 공유" value="DB · 모든 Pod" good/>
+      </div>
+      <div className="enrollment-mode-grid" role="radiogroup" aria-label="Agent 자동 등록 방식">
+        {options.map(option => <label
+          key={option.value}
+          className={mode === option.value ? "enrollment-mode selected" : "enrollment-mode"}
+        >
+          <input
+            type="radio"
+            name="agent-enrollment-mode"
+            value={option.value}
+            checked={mode === option.value}
+            disabled={option.value === "token" && !policy.token_configured}
+            onChange={() => setMode(option.value)}
+          />
+          <span>
+            <strong>{option.title}{option.badge && <b>{option.badge}</b>}</strong>
+            <small>{option.description}</small>
+          </span>
+          {mode === option.value && <CheckCircle2 size={19}/>}
+        </label>)}
+      </div>
+      {mode === "open" && <Notice tone="warning" title="URL-only Zero-touch 등록이 허용됩니다.">
+        7070 포트에 접근할 수 있는 장치는 토큰 없이 등록할 수 있습니다. 신뢰된 내부망에서 사용하고 외부 노출 시 토큰 보호 모드를 사용하십시오.
+      </Notice>}
+      {!policy.token_configured && <Notice tone="info" title="Protected 모드를 사용하려면 먼저 토큰을 발급하십시오.">
+        발급 버튼은 새 토큰을 한 번만 표시하고 즉시 토큰 보호 모드로 전환합니다.
+      </Notice>}
+      {registrationToken && <div className="secret-reveal enrollment-token-reveal">
+        <div>
+          <strong>등록 토큰 — 지금 한 번만 표시됩니다</strong>
+          <code>{registrationToken}</code>
+        </div>
+        <button className="secondary" onClick={() => navigator.clipboard.writeText(registrationToken)}>
+          <Copy size={16}/>복사
+        </button>
+        <button className="secondary" onClick={() => setRegistrationToken("")}>닫기</button>
+      </div>}
+      <label className="enrollment-reason">변경 사유
+        <input value={reason} onChange={event => setReason(event.target.value)}
+          placeholder="예: 사내망 URL-only 자동 등록 허용"/>
+      </label>
+      <div className="form-actions enrollment-actions">
+        <button className="secondary" disabled={busy} onClick={load}><RefreshCw size={16}/>새로고침</button>
+        {policy.token_configured && <button className="secondary" disabled={busy} onClick={deleteToken}><Trash2 size={16}/>토큰 폐기</button>}
+        <button className="secondary" disabled={busy} onClick={issueToken}><KeyRound size={16}/>{policy.token_configured ? "토큰 회전" : "토큰 발급"}</button>
+        <button className="primary compact" disabled={busy || mode === policy.mode} onClick={save}><Save size={16}/>정책 적용</button>
+      </div>
+      <ActionMessage message={message} error={error}/>
+      <div className="agent-config-example">
+        <strong>URL-only Agent 설정 예시</strong>
+        <pre>{`[server]\nurl = "https://invenqor.example.com:7070"`}</pre>
+        <small>Open 모드에서는 등록 토큰이나 사전 자산 생성이 필요하지 않습니다. Agent가 최초 수집을 전송하면 자동 등록됩니다.</small>
+      </div>
+    </div>
+  </AdminPanel>;
 }
 
 function PostgresSettings({csrf}: {csrf: string}) {
@@ -229,10 +447,11 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
     api<{settings: KeycloakSettings; client_secret_configured: boolean}>(
       "/api/v1/admin/settings/keycloak",
     ).then(value => {
-      setSettings(value.settings);
+      const normalized = normalizeKeycloakSettings(value.settings);
+      setSettings(normalized);
       setSecretConfigured(value.client_secret_configured);
-      setRoleMappings(formatMappings(value.settings.role_mappings));
-      setGroupMappings(formatMappings(value.settings.group_mappings));
+      setRoleMappings(formatMappings(normalized.role_mappings));
+      setGroupMappings(formatMappings(normalized.group_mappings));
     }),
   []);
   React.useEffect(() => {
@@ -347,7 +566,117 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
   </AdminPanel>;
 }
 
+type GeneralSetting = {
+  key: string;
+  value: unknown;
+  secret: boolean;
+  apply_mode: "immediate"|"restart"|"migration";
+  pending: boolean;
+  version: number;
+  updated_at?: string;
+};
+type SettingVersion = {
+  id: string;
+  key: string;
+  version: number;
+  before: unknown;
+  after: unknown;
+  changed_by?: string;
+  reason: string;
+  created_at: string;
+};
+
+function GeneralSettingsPanel({csrf}: {csrf: string}) {
+  const [items, setItems] = React.useState<GeneralSetting[]>([]);
+  const [history, setHistory] = React.useState<SettingVersion[]>([]);
+  const [key, setKey] = React.useState("");
+  const [value, setValue] = React.useState("{}");
+  const [secret, setSecret] = React.useState(false);
+  const [applyMode, setApplyMode] = React.useState<GeneralSetting["apply_mode"]>("immediate");
+  const [reason, setReason] = React.useState("");
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(() => Promise.all([
+    api<{items: GeneralSetting[]}>("/api/v1/admin/settings").then(result => setItems(result.items)),
+    api<{items: SettingVersion[]}>("/api/v1/admin/settings/history").then(result => setHistory(result.items)),
+  ]), []);
+  React.useEffect(() => { load().catch(reason => setError((reason as Error).message)); }, [load]);
+  const select = (item: GeneralSetting) => {
+    setKey(item.key); setSecret(item.secret); setApplyMode(item.apply_mode);
+    setValue(item.secret ? "\"새 비밀값을 입력\"" : JSON.stringify(item.value, null, 2));
+  };
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault(); setError(""); setMessage("");
+    try {
+      const parsed = JSON.parse(value);
+      await api("/api/v1/admin/settings", jsonRequest(csrf, {
+        settings: [{key, value: parsed, secret, apply_mode: applyMode, reason}],
+      }, "PATCH"));
+      setMessage("설정을 저장하고 새 버전을 기록했습니다.");
+      setReason(""); await load();
+    } catch (reason) { setError((reason as Error).message); }
+  };
+  const rollback = async (entry: SettingVersion) => {
+    if (!window.confirm(`${entry.key} 설정을 버전 ${entry.version} 값으로 되돌립니까?`)) return;
+    try {
+      await api("/api/v1/admin/settings/rollback", jsonRequest(csrf, {
+        key: entry.key, version: entry.version, reason: "관리 콘솔 설정 롤백",
+      }));
+      setMessage(`${entry.key} 설정을 롤백했습니다.`); await load();
+    } catch (reason) { setError((reason as Error).message); }
+  };
+  return <div className="general-settings-grid">
+    <AdminPanel title="설정 카탈로그" action={`${items.length}개`}>
+      <div className="setting-catalog">{items.map(item => <button key={item.key} onClick={() => select(item)}>
+        <div><strong>{item.key}</strong><span>v{item.version} · {item.apply_mode}</span></div>
+        <div>{item.secret && <b>SECRET</b>}{item.pending && <b className="pending">PENDING</b>}</div>
+      </button>)}{!items.length && <div className="admin-empty">등록된 고급 설정이 없습니다.</div>}</div>
+    </AdminPanel>
+    <AdminPanel title={key ? `설정 편집 · ${key}` : "새 설정"} action="JSON 값">
+      <form className="settings-body" onSubmit={save}>
+        <div className="admin-form">
+          <label className="wide">Key<input value={key} onChange={event => setKey(event.target.value)}
+            placeholder="agents.collection.interval" required/></label>
+          <label>적용 방식<select value={applyMode} onChange={event => setApplyMode(event.target.value as GeneralSetting["apply_mode"])}>
+            <option value="immediate">immediate</option><option value="restart">restart</option>
+            <option value="migration">migration</option></select></label>
+          <label className="toggle-row"><input type="checkbox" checked={secret} onChange={event => setSecret(event.target.checked)}/>
+            <span><strong>비밀값</strong><small>암호화 저장·조회 마스킹</small></span></label>
+          <label className="wide">JSON Value<textarea value={value} onChange={event => setValue(event.target.value)}
+            spellCheck={false} required/></label>
+          <label className="wide">변경 사유<input value={reason} onChange={event => setReason(event.target.value)} required/></label>
+        </div>
+        <div className="form-actions"><button className="primary compact"><Save size={15}/>버전 저장</button></div>
+        <ActionMessage message={message} error={error}/>
+      </form>
+    </AdminPanel>
+    <div className="general-history">
+      <AdminPanel title="설정 변경 이력" action={`최근 ${history.length}건`}>
+        <div className="history-list">{history.map(entry => <details key={entry.id}>
+          <summary><div><strong>{entry.key}</strong><span>v{entry.version} · {formatAdminDate(entry.created_at)}</span></div>
+            <span>{entry.reason || "변경 사유 없음"}</span><button onClick={event => {event.preventDefault(); rollback(entry);}}>
+              <RotateCcw size={14}/>롤백</button></summary>
+          <pre>{JSON.stringify({before: entry.before, after: entry.after}, null, 2)}</pre>
+        </details>)}</div>
+      </AdminPanel>
+    </div>
+  </div>;
+}
+
 function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
+  const [health, setHealth] = React.useState<Record<string, unknown>>({});
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(async () => {
+    try {
+      const [live, ready, database] = await Promise.all([
+        api<Record<string, unknown>>("/health/live"),
+        api<Record<string, unknown>>("/health/ready"),
+        api<Record<string, unknown>>("/health/database"),
+      ]);
+      setHealth({live, ready, database}); setError("");
+    } catch (reason) { setError((reason as Error).message); }
+  }, []);
+  React.useEffect(() => { load(); }, [load]);
   return <AdminPanel title="실행 정보" action="읽기 전용">
     <div className="setting-list">
       <InfoRow label="Server 버전" value={info?.server_version || "확인 중"}/>
@@ -355,7 +684,17 @@ function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
       <InfoRow label="Build time" value={info?.build_time || "unknown"}/>
       <InfoRow label="Database mode" value={info?.database_mode || "확인 중"}/>
       <InfoRow label="서비스 포트" value="7070"/>
+      <InfoRow label="Agent 자동 등록" value={
+        info?.agent_enrollment_mode === "open" ? "활성 · URL-only" :
+          info?.agent_enrollment_mode === "token" ? "활성 · 공용 Token 보호" :
+            info?.agent_auto_enrollment ? "활성" : "비활성"
+      }/>
+      <InfoRow label="Liveness" value={String((health.live as Record<string, unknown>|undefined)?.status || "확인 중")}/>
+      <InfoRow label="Readiness" value={String((health.ready as Record<string, unknown>|undefined)?.status || "확인 중")}/>
+      <InfoRow label="Database health" value={String((health.database as Record<string, unknown>|undefined)?.mode || "확인 중")}/>
     </div>
+    <div className="form-actions settings-body"><button className="secondary" onClick={load}><RefreshCw size={15}/>상태 다시 확인</button></div>
+    {error && <div className="error action-message">{error}</div>}
   </AdminPanel>;
 }
 
@@ -473,12 +812,23 @@ export function UsersPage({
           <label>표시 이름<input value={displayName} onChange={event => setDisplayName(event.target.value)}/></label>
           <label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)}/></label>
           <label>초기 비밀번호<input type="password" value={password} onChange={event => setPassword(event.target.value)} required autoComplete="new-password"/></label>
-          <fieldset><legend>역할</legend>{roles.map(role =>
-            <label className="role-check" key={role.id} title={role.permissions.join(", ")}>
-              <input type="checkbox" checked={selectedRoles.includes(role.name)} onChange={() => setSelectedRoles(selectedRoles.includes(role.name) ? selectedRoles.filter(value => value !== role.name) : [...selectedRoles, role.name])}/>
-              <span><strong>{role.name}</strong><small>{role.description}</small></span>
-            </label>,
-          )}</fieldset>
+          <fieldset className="role-selector"><legend><span>역할</span>
+            <small>{selectedRoles.length}개 선택</small></legend>
+            <div className="role-options">{roles.map(role => {
+              const selected = selectedRoles.includes(role.name);
+              return <label className={`role-check${selected ? " selected" : ""}`}
+                key={role.id} title={role.permissions.join(", ")}>
+                <input type="checkbox" checked={selected} onChange={() =>
+                  setSelectedRoles(selected
+                    ? selectedRoles.filter(value => value !== role.name)
+                    : [...selectedRoles, role.name])}/>
+                <span className="role-checkmark"><CheckCircle2 size={16}/></span>
+                <span className="role-copy"><strong>{role.name}</strong>
+                  <small>{role.description}</small>
+                  <em>{role.permissions.length} permissions</em></span>
+              </label>;
+            })}</div>
+          </fieldset>
           <button className="primary compact" disabled={busy || !selectedRoles.length}><UserPlus size={16}/>사용자 생성</button>
         </form>
       </AdminPanel>
@@ -542,6 +892,9 @@ const formatPostgresTarget = (target: PostgresTarget|null|undefined) =>
     ? `${target.user || "user"}@${target.host || "host"}:${target.port || 5432}/${target.database || ""}`
     : target ? "DSN 오류" : "미설정";
 const splitList = (value: string) => value.split(",").map(item => item.trim()).filter(Boolean);
+const formatAdminDate = (value: string) => value
+  ? new Intl.DateTimeFormat("ko-KR", {year: "2-digit", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"}).format(new Date(value))
+  : "—";
 export const formatMappings = (mappings: Record<string, string>) =>
   Object.entries(mappings || {})
     .sort(([left], [right]) => left.localeCompare(right))

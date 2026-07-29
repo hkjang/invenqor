@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatMappings, parseMappings } from "./adminPages";
+import {
+  formatMappings,
+  normalizeKeycloakSettings,
+  parseMappings,
+} from "./adminPages";
 
 describe("Keycloak mapping editor", () => {
   it("parses mappings while ignoring blanks and comments", () => {
@@ -24,5 +28,18 @@ describe("Keycloak mapping editor", () => {
   it("formats mappings deterministically", () => {
     expect(formatMappings({viewer: "viewer", admin: "super_admin"}))
       .toBe("admin=super_admin\nviewer=viewer");
+  });
+
+  it("normalizes nullable collections returned by older settings", () => {
+    const settings = normalizeKeycloakSettings({
+      scopes: null,
+      allowed_email_domains: null,
+      role_mappings: null,
+      group_mappings: null,
+    } as never);
+    expect(settings.scopes).toEqual(["openid", "profile", "email"]);
+    expect(settings.allowed_email_domains).toEqual([]);
+    expect(settings.role_mappings).toEqual({});
+    expect(settings.group_mappings).toEqual({});
   });
 });

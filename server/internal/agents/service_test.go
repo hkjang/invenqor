@@ -119,3 +119,62 @@ func TestCertificateAuthentication(t *testing.T) {
 		t.Fatalf("agent ID = %q, want %q", agent.ID, result.Agent.ID)
 	}
 }
+
+func TestAutoEnrollmentIsRetryableOnlyByOriginalDeviceClaim(t *testing.T) {
+	t.Parallel()
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	service := NewService(runtime.DB())
+	externalID := uuid.NewString()
+	claim := "ivq_ec_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	first, err := service.AutoEnroll(
+		context.Background(), externalID, "auto-host", claim,
+	)
+	if err != nil {
+		t.Fatalf("AutoEnroll() error = %v", err)
+	}
+	if first.Token == "" || first.Agent.AuthMethod != "auto_bearer" {
+		t.Fatalf("unexpected enrollment result: %+v", first)
+	}
+	if _, err := service.AuthenticateBearer(
+		context.Background(), first.Token,
+	); err != nil {
+		t.Fatalf("first device token was rejected: %v", err)
+	}
+
+	retry, err := service.AutoEnroll(
+		context.Background(), externalID, "renamed-host", claim,
+	)
+	if err != nil {
+		t.Fatalf("retry AutoEnroll() error = %v", err)
+	}
+	if retry.Token == first.Token {
+		t.Fatal("retry returned the previous device token")
+	}
+	if _, err := service.AuthenticateBearer(
+		context.Background(), first.Token,
+	); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("replaced token error = %v, want ErrUnauthorized", err)
+	}
+	if _, err := service.AuthenticateBearer(
+		context.Background(), retry.Token,
+	); err != nil {
+		t.Fatalf("replacement device token was rejected: %v", err)
+	}
+
+	_, err = service.AutoEnroll(
+		context.Background(),
+		externalID,
+		"attacker",
+		"ivq_ec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	if !errors.Is(err, ErrEnrollmentClaimMismatch) {
+		t.Fatalf("mismatched claim error = %v, want ErrEnrollmentClaimMismatch", err)
+	}
+}

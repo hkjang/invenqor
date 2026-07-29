@@ -157,6 +157,16 @@ func setSessionCookie(response http.ResponseWriter, session auth.Session) {
 		Expires:  session.AbsoluteExpiresAt,
 		MaxAge:   int(time.Until(session.AbsoluteExpiresAt).Seconds()),
 	})
+	http.SetCookie(response, &http.Cookie{
+		Name:     auth.CSRFCookie,
+		Value:    session.CSRFToken,
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: false,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  session.AbsoluteExpiresAt,
+		MaxAge:   int(time.Until(session.AbsoluteExpiresAt).Seconds()),
+	})
 }
 
 func (s *Server) me(response http.ResponseWriter, request *http.Request) {
@@ -197,6 +207,16 @@ func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
 		Path:     "/",
 		Secure:   true,
 		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
+	http.SetCookie(response, &http.Cookie{
+		Name:     auth.CSRFCookie,
+		Value:    "",
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: false,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),

@@ -1,6 +1,6 @@
 # Invenqor 자산 API·MCP·키 관리 가이드
 
-대상 Server 버전: v0.2.3 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.4 · 기준일: 2026-07-29
 
 ## 1. 목적과 설계 원칙
 
@@ -20,6 +20,13 @@ MCP 구현은 안정 규격 `2025-11-25`의 JSON-RPC 2.0과 Streamable HTTP를
 기준으로 합니다. Server가 client session ID를 발급하지 않는 stateless 방식이라
 sticky session이 필요 없습니다. 공식 전송 규격이 요구하는 Origin 검증을 적용하고,
 SSE가 필요 없는 현재 도구 집합은 POST JSON 응답을 사용합니다.
+
+Agent 자동 등록의 운영 API도 같은 Session+CSRF 경계에 있습니다. 관리자는
+`/api/v1/admin/settings/agent-enrollment`에서 URL-only Open, Token 보호,
+비활성 모드를 전환하고 `/token` 하위 경로에서 등록 Token을 발급·회전·
+폐기합니다. 정책은 공용 DB에서 요청마다 검증되어 모든 Server Pod에 즉시
+적용되며 Token 원문은 발급 응답에서 한 번만 반환됩니다. 상세 계약은
+`openapi.yaml`을 따릅니다.
 
 ## 2. Scope 카탈로그
 
@@ -44,6 +51,10 @@ SSE가 필요 없는 현재 도구 집합은 POST JSON 응답을 사용합니다
 
 모든 관리 요청은 관리자 Session Cookie, `X-CSRF-Token`,
 `api_keys.manage` 권한이 필요합니다.
+
+브라우저 콘솔은 로컬 로그인 또는 Keycloak callback에서 발급된 SameSite CSRF
+cookie를 상태 변경 요청의 `X-CSRF-Token`에 자동 연결합니다. CLI 예시에서는
+cookie jar와 로그인 응답의 CSRF 값을 명시적으로 보관해야 합니다.
 
 | Method | 경로 | 기능 |
 |---|---|---|

@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.1 · Server v0.2.3</p>
+    <p><strong>대상 버전</strong> Agent v0.2.2 · Server v0.2.4</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.3 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.4 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -31,7 +31,7 @@
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.1을 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.2를 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +40,7 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.1에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.2에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -104,13 +104,13 @@ Linux 호스트
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.2/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.1은 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.2는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -191,7 +191,7 @@ sudo service invenqor-agent status
 ```toml
 [server]
 url = "https://inventory.example.internal:7070"
-bearer_token = "장비별-토큰"
+enrollment_token_file = "/etc/invenqor-agent/enrollment.token"
 # ca_file = "/etc/invenqor-agent/ca.pem"
 # client_identity_pem = "/etc/invenqor-agent/device.pem"
 allow_insecure_http = false
@@ -241,8 +241,10 @@ sudo -u invenqor-agent \
 | 키 | 기본값 | 제약·의미 |
 |---|---:|---|
 | `server.url` | 없음 | Server 기본 URL. 운영은 단일 HTTPS `:7070` 사용 |
-| `server.allow_insecure_http` | `false` | 격리 E2E망에서만 HTTP 명시 허용 |
-| `server.bearer_token` | 없음 | HTTP Authorization bearer token |
+| `server.allow_insecure_http` | `false` | 공인 주소 HTTP의 명시 허용; 사설/내부 HTTP는 URL만으로 허용 |
+| `server.enrollment_token` | 없음 | Server가 보호 모드일 때만 필요한 공용 Token, 32자 이상 |
+| `server.enrollment_token_file` | 없음 | 선택적 공용 등록 Token 파일의 절대 경로 |
+| `server.bearer_token` | 없음 | 수동 등록 예외 장비의 장비별 bearer token |
 | `server.ca_file` | 없음 | 사설 루트 CA PEM 경로 |
 | `server.client_identity_pem` | 없음 | 클라이언트 인증서 체인+개인키 PEM |
 | `server.timeout_seconds` | `30` | 전체 HTTP 요청 제한, 0 금지 |
@@ -365,7 +367,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.1 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.2 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -431,7 +433,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.1에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.2에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -445,7 +447,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.1의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.2의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -586,7 +588,7 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.1
+User-Agent: invenqor-agent/0.2.2
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -616,7 +618,7 @@ Authorization: Bearer <token>   # 구성한 경우
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.1은 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.2는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -660,13 +662,18 @@ HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_ver
 최종 등급은 조직 정책에 따릅니다. 중앙 게이트웨이는 전송 암호화뿐 아니라 저장
 암호화, 역할 기반 접근, 조회 감사, 보존/파기 정책을 구현해야 합니다.
 
-### 10.3 v0.2.1 보안 한계
+### 10.3 보안 경계와 잔여 위험
 
 - 아카이브 SHA-256은 제공하지만 서명, SBOM, provenance는 없음
-- 자동 인증서/토큰 회전 기능 없음
+- URL-only 자동 등록은 7070에 도달 가능한 장비의 최초 등록을 허용하므로 신뢰
+  경계 밖에 노출할 때 enrollment token 보호 모드 또는 자동 등록 비활성화 필요
+- 보호 모드의 enrollment token은 최초 등록 권한이므로 Secret 관리와 정기 회전 필요
+- 자동 등록 Agent는 장비 Token 무효화 시 device claim으로 자동 복구하지만,
+  mTLS 인증서 발급·폐기는 조직 PKI 수명주기를 따름
 - 로컬 큐 자체 암호화 없음(파일시스템 접근 통제에 의존)
 - 중앙 Server의 RBAC·감사 로그를 적용하고 정기 접근권한 검토 필요
-- 자동 업데이트와 안전한 rollback 프로토콜 없음
+- 자동 업데이트는 서명 검증·원자 교체를 제공하지만 조직 승인과 rollback
+  artifact 운영은 별도 절차 필요
 - 원격 명령 기능 없음
 
 ## 11. 모니터링과 운영 지표
@@ -726,9 +733,24 @@ sudo find /var/lib/invenqor-agent/queue -maxdepth 1 \
 6. 게이트웨이에서 해당 agent의 event 수신 확인
 7. 백업 보존 기한 후 안전 삭제
 
+Server의 Agent 등록 정책은 예외적으로 재기동 없이 적용됩니다. 관리 콘솔
+**설정 → Agent 등록**에서 `disabled`, Token 없는 URL-only `open`, 등록 Token이
+필요한 `token` 모드를 선택합니다.
+
+- `open`: Agent의 `[server].url`만 설정하면 최초 요청에서 자동 등록
+- `token`: 화면에서 발급한 `ivq_et_...`를 Agent의 `enrollment_token` 또는
+  `enrollment_token_file`에 배포한 뒤 등록
+- `disabled`: 신규 등록만 차단하고 기존 Agent 수집은 유지
+
+발급/회전 Token 원문은 한 번만 보이며 DB에는 SHA-256 비교값만 저장됩니다.
+Token 폐기 시 자동 등록이 활성 상태면 Open 모드가 됩니다. 정책과 버전은 공용
+DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉시 동일하게
+적용됩니다. `AGENT_AUTO_ENROLLMENT`와 등록 Token 환경변수는 DB 정책이 없는
+최초 기동의 초기값으로만 사용됩니다.
+
 ### 12.2 업그레이드
 
-v0.2.1은 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
+v0.2.2는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 systemd
 root helper 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에
 배포하지 않고 오프라인 환경에서 보관합니다. Agent는 더 높은 버전, 일치하는
 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이 모두 맞을 때만
@@ -902,6 +924,39 @@ SSO를 활성화하거나 존재하지 않는 내부 역할을 mapping하는 설
 폐기하며, SSO 계정 비밀번호/프로필은 Keycloak에서 관리합니다. 긴급 접근을 위해
 TOTP가 적용된 로컬 Super Admin 하나 이상을 Keycloak 장애 도메인 밖에
 보관하십시오.
+
+## 17. 운영 통계와 관리 콘솔 API 연결
+
+**운영 현황**은 브라우저에서 임의 합산하지 않고
+`GET /api/v1/dashboard/statistics`의 PostgreSQL 집계를 사용합니다. 이 API는
+`assets.read` 권한이 필요하며 삭제되지 않은 자산만 집계합니다.
+
+| 지표 | 판정 기준 |
+|---|---|
+| 자산 최신성 | `last_seen_at`이 최근 24시간 이내 |
+| 점검 필요 자산 | 전체 활성 자산 - 최근 24시간 확인 자산 |
+| 정상 Agent | 차단되지 않고 `last_seen_at`이 최근 30분 이내 |
+| 점검 필요 Agent | 전체 Agent - 정상 Agent |
+| 수집/실패 | 최근 24시간 `agent_events`와 `processing_status=failed` |
+| 7일 추이 | UTC 날짜 기준 이벤트·실패 일별 합계, 빈 날짜도 0으로 반환 |
+
+멀티 Pod에서도 모든 수치는 공용 PostgreSQL에서 계산되므로 sticky session이나
+Pod 로컬 cache가 필요 없습니다. 운영 경보 기준은 조직의 수집 주기에 맞춰 별도
+모니터링 시스템에서 정하되, 화면의 30분/24시간 기준은 일상 점검의 공통
+baseline으로 사용하십시오.
+
+관리 콘솔은 자산 CRUD·삭제/복원·이력·관계·병합/분리, Agent 등록·회전·
+차단·mTLS·서명 업데이트, Query 검증/실행, Agent 자동 등록·PostgreSQL·
+Keycloak·일반 설정과
+rollback, 사용자 수명주기, API key scope/회전/폐기, 감사 상세 API를 연결합니다.
+권한이 없는 메뉴와 버튼은 숨기고 Server에서도 동일 RBAC를 다시 검증합니다.
+로컬 로그인과 Keycloak callback은 동일한 SameSite CSRF cookie를 발급하며
+콘솔 API client가 상태 변경 요청에 자동 적용합니다.
+
+우측 상단 프로필 메뉴는 내 계정 보안, 개인화와 로그아웃을 연결합니다. 개인화는
+사용자 ID별 브라우저 저장소에 테마, 정보 밀도, 로그인 시작 화면, 운영 통계
+자동 갱신 주기와 모션 축소를 보관합니다. 이 값은 Server 정책이나 다른
+브라우저에 전파되지 않으므로 보안·권한 설정 용도로 사용하지 않습니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

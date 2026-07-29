@@ -152,6 +152,62 @@ func TestLoadPrefersCanonicalPostgresDSNEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAgentEnrollmentTokenFromSecretFile(t *testing.T) {
+	clearAgentEnrollmentEnvironment(t)
+	path := filepath.Join(t.TempDir(), "enrollment-token")
+	token := "ivq_et_0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("INVENQOR_AGENT_ENROLLMENT_TOKEN_FILE", path)
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.AgentEnrollmentToken != token {
+		t.Fatal("Load() did not read the agent enrollment token file")
+	}
+	if !config.AgentAutoEnrollment {
+		t.Fatal("automatic enrollment should default to enabled")
+	}
+}
+
+func TestLoadCanDisableAgentAutoEnrollment(t *testing.T) {
+	clearAgentEnrollmentEnvironment(t)
+	t.Setenv("INVENQOR_AGENT_AUTO_ENROLLMENT", "false")
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if config.AgentAutoEnrollment {
+		t.Fatal("Load() ignored the disabled automatic enrollment setting")
+	}
+}
+
+func TestLoadRejectsInvalidAgentAutoEnrollment(t *testing.T) {
+	clearAgentEnrollmentEnvironment(t)
+	t.Setenv("INVENQOR_AGENT_AUTO_ENROLLMENT", "sometimes")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "must be true or false") {
+		t.Fatalf("Load() error = %v, want strict boolean validation", err)
+	}
+}
+
+func TestValidateRejectsShortAgentEnrollmentToken(t *testing.T) {
+	config := Config{
+		ListenAddress:        "127.0.0.1:7070",
+		StateDir:             t.TempDir(),
+		SQLitePath:           "/tmp/invenqor.db",
+		DatabaseSchema:       "public",
+		DatabaseTimeout:      time.Second,
+		ShutdownTimeout:      time.Second,
+		AgentEnrollmentToken: "too-short",
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted a short agent enrollment token")
+	}
+}
+
 func clearPostgresEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -175,6 +231,23 @@ func clearBootstrapEnvironment(t *testing.T) {
 		"INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE",
 		"BOOTSTRAP_ADMIN_PASSWORD_FILE",
 		"bootstrap_admin_password_file",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+func clearAgentEnrollmentEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"INVENQOR_AGENT_ENROLLMENT_TOKEN",
+		"AGENT_ENROLLMENT_TOKEN",
+		"agent_enrollment_token",
+		"INVENQOR_AGENT_ENROLLMENT_TOKEN_FILE",
+		"AGENT_ENROLLMENT_TOKEN_FILE",
+		"agent_enrollment_token_file",
+		"INVENQOR_AGENT_AUTO_ENROLLMENT",
+		"AGENT_AUTO_ENROLLMENT",
+		"agent_auto_enrollment",
 	} {
 		t.Setenv(name, "")
 	}

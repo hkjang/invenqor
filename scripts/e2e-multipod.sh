@@ -93,6 +93,49 @@ csrf=$(printf '%s' "$login" | jq -r .csrf_token)
 curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port_a/api/v1/auth/me" |
   jq -e '.user.username == "multipod.admin"' >/dev/null
+
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port_a/api/v1/admin/settings/agent-enrollment" |
+  jq -e '.mode == "open" and .source == "database"' >/dev/null
+curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
+  -H 'Content-Type: application/json' -X PATCH \
+  -d '{"mode":"disabled","reason":"multi-pod enrollment E2E"}' \
+  "http://127.0.0.1:$port_a/api/v1/admin/settings/agent-enrollment" |
+  jq -e '.mode == "disabled"' >/dev/null
+disabled_status=$(curl -sS -o "$work/disabled-enrollment.json" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-disabled\",\"claim_token\":\"ivq_ec_$(printf 'a%.0s' {1..64})\"}" \
+  "http://127.0.0.1:$port_b/v1/agent/enroll")
+test "$disabled_status" = 403
+
+curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
+  -H 'Content-Type: application/json' -X PATCH \
+  -d '{"mode":"open","reason":"URL-only enrollment E2E"}' \
+  "http://127.0.0.1:$port_b/api/v1/admin/settings/agent-enrollment" |
+  jq -e '.mode == "open"' >/dev/null
+curl -fsS -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-open\",\"claim_token\":\"ivq_ec_$(printf 'b%.0s' {1..64})\"}" \
+  "http://127.0.0.1:$port_a/v1/agent/enroll" |
+  jq -e '.token | startswith("ivq_at_")' >/dev/null
+
+registration_response=$(curl -fsS -b "$work/cookies" \
+  -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  -d '{"reason":"protected enrollment E2E"}' \
+  "http://127.0.0.1:$port_a/api/v1/admin/settings/agent-enrollment/token")
+registration_token=$(printf '%s' "$registration_response" | jq -r .registration_token)
+printf '%s' "$registration_response" |
+  jq -e '.mode == "token" and .shown_once == true' >/dev/null
+protected_status=$(curl -sS -o "$work/protected-enrollment.json" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-protected\",\"claim_token\":\"ivq_ec_$(printf 'c%.0s' {1..64})\"}" \
+  "http://127.0.0.1:$port_b/v1/agent/enroll")
+test "$protected_status" = 401
+curl -fsS -H 'Content-Type: application/json' \
+  -H "X-Invenqor-Enrollment-Token: $registration_token" \
+  -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-token\",\"claim_token\":\"ivq_ec_$(printf 'd%.0s' {1..64})\"}" \
+  "http://127.0.0.1:$port_b/v1/agent/enroll" |
+  jq -e '.token | startswith("ivq_at_")' >/dev/null
+
 api_key_response=$(curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -H 'Content-Type: application/json' \
   -d '{"name":"multipod-mcp","scopes":["mcp.access","assets.read"]}' \
@@ -109,4 +152,4 @@ migrations=$(docker exec "$postgres" psql -U invenqor -d invenqor -Atc \
 test "$migrations" -ge 3
 test "$(docker inspect -f '{{.State.Running}}' "$pod_a")" = true
 test "$(docker inspect -f '{{.State.Running}}' "$pod_b")" = true
-echo "E2E PASS: two server pods migrated concurrently and shared authentication state"
+echo "E2E PASS: two server pods shared authentication and live Agent enrollment policy"

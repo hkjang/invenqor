@@ -33,6 +33,8 @@ type Config struct {
 	PostgresDSNFromEnv     bool
 	BootstrapAdmin         string
 	BootstrapAdminPassword string
+	AgentAutoEnrollment    bool
+	AgentEnrollmentToken   string
 }
 
 func Load() (Config, error) {
@@ -43,6 +45,30 @@ func Load() (Config, error) {
 		"postgres_dsn",
 	)
 	bootstrapAdmin, bootstrapPassword, err := bootstrapCredentials()
+	if err != nil {
+		return Config{}, err
+	}
+	agentEnrollmentToken, err := secretFromEnvironment(
+		[]string{
+			"INVENQOR_AGENT_ENROLLMENT_TOKEN",
+			"AGENT_ENROLLMENT_TOKEN",
+			"agent_enrollment_token",
+		},
+		[]string{
+			"INVENQOR_AGENT_ENROLLMENT_TOKEN_FILE",
+			"AGENT_ENROLLMENT_TOKEN_FILE",
+			"agent_enrollment_token_file",
+		},
+	)
+	if err != nil {
+		return Config{}, fmt.Errorf("agent enrollment token: %w", err)
+	}
+	agentAutoEnrollment, err := boolEnvironment(
+		true,
+		"INVENQOR_AGENT_AUTO_ENROLLMENT",
+		"AGENT_AUTO_ENROLLMENT",
+		"agent_auto_enrollment",
+	)
 	if err != nil {
 		return Config{}, err
 	}
@@ -60,6 +86,8 @@ func Load() (Config, error) {
 		PostgresDSNFromEnv:     postgresDSNFromEnv,
 		BootstrapAdmin:         bootstrapAdmin,
 		BootstrapAdminPassword: bootstrapPassword,
+		AgentAutoEnrollment:    agentAutoEnrollment,
+		AgentEnrollmentToken:   agentEnrollmentToken,
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -94,6 +122,9 @@ func (c Config) Validate() error {
 	}
 	if (c.BootstrapAdmin == "") != (c.BootstrapAdminPassword == "") {
 		return errors.New("bootstrap administrator and password must be configured together")
+	}
+	if c.AgentEnrollmentToken != "" && len(c.AgentEnrollmentToken) < 32 {
+		return errors.New("agent enrollment token must contain at least 32 characters")
 	}
 	if c.BaseURL != "" {
 		parsed, err := url.Parse(c.BaseURL)
@@ -151,6 +182,25 @@ func bootstrapCredentials() (string, string, error) {
 	return admin, password, nil
 }
 
+func secretFromEnvironment(valueNames, fileNames []string) (string, error) {
+	value := firstEnv(valueNames...)
+	file := firstTrimmedEnv(fileNames...)
+	if value != "" && file != "" {
+		return "", errors.New("direct value and secret file cannot both be configured")
+	}
+	if file == "" {
+		return strings.TrimSpace(value), nil
+	}
+	if !filepath.IsAbs(file) {
+		return "", errors.New("secret file path must be absolute")
+	}
+	bytes, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("read secret file: %w", err)
+	}
+	return strings.TrimSpace(string(bytes)), nil
+}
+
 func firstTrimmedEnv(names ...string) string {
 	for _, name := range names {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
@@ -190,6 +240,21 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 	return fallback
+}
+
+func boolEnvironment(fallback bool, names ...string) (bool, error) {
+	for _, name := range names {
+		value, present := os.LookupEnv(name)
+		if !present || strings.TrimSpace(value) == "" {
+			continue
+		}
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return false, fmt.Errorf("%s must be true or false", name)
+		}
+		return parsed, nil
+	}
+	return fallback, nil
 }
 
 func validSchemaName(value string) bool {

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,58 @@ import (
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
+
+func TestKeycloakSettingsNormalizeNullableCollections(t *testing.T) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO settings(key,value_json,secret,apply_mode,version)
+		 VALUES('auth.keycloak',$1,FALSE,'new_login',1)`,
+		`{"scopes":null,"role_mappings":null,"group_mappings":null,
+		  "allowed_email_domains":null}`,
+	); err != nil {
+		t.Fatalf("insert nullable Keycloak settings: %v", err)
+	}
+	response := performAuthenticatedJSON(
+		t,
+		server,
+		http.MethodGet,
+		"/api/v1/admin/settings/keycloak",
+		nil,
+		cookie,
+		csrf,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Settings struct {
+			Scopes              []string          `json:"scopes"`
+			RoleMappings        map[string]string `json:"role_mappings"`
+			GroupMappings       map[string]string `json:"group_mappings"`
+			AllowedEmailDomains []string          `json:"allowed_email_domains"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Settings.Scopes == nil ||
+		payload.Settings.RoleMappings == nil ||
+		payload.Settings.GroupMappings == nil ||
+		payload.Settings.AllowedEmailDomains == nil {
+		t.Fatalf("nullable settings were not normalized: %#v", payload.Settings)
+	}
+	if strings.Join(payload.Settings.Scopes, ",") != "openid,profile,email" {
+		t.Fatalf("nullable scopes did not recover safe defaults: %#v", payload.Settings.Scopes)
+	}
+}
 
 func TestKeycloakSettingsRequireSecretBeforeEnable(t *testing.T) {
 	runtime, err := storage.Open(context.Background(), storage.Options{

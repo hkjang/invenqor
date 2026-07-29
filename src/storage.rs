@@ -1,12 +1,13 @@
 use crate::model::{AssetChange, AssetRecord, ChangeKind, Envelope, Snapshot};
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct StateStore {
@@ -14,6 +15,12 @@ pub struct StateStore {
     queue: PathBuf,
     max_queue_bytes: u64,
     sequence: Arc<Mutex<u128>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ServerCredential {
+    server_url: String,
+    secret: String,
 }
 
 impl StateStore {
@@ -227,6 +234,63 @@ impl StateStore {
             .map(|meta| meta.len())
             .sum())
     }
+
+    pub fn device_token(&self, server_url: &str) -> Option<String> {
+        self.read_server_credential("device-credential.json", server_url)
+            .map(|credential| credential.secret)
+    }
+
+    pub fn set_device_token(&self, server_url: &str, token: &str) -> Result<()> {
+        anyhow::ensure!(
+            token.starts_with("ivq_at_"),
+            "server returned an invalid device token"
+        );
+        self.write_server_credential("device-credential.json", server_url, token)
+    }
+
+    pub fn clear_device_token(&self, server_url: &str) -> Result<()> {
+        if self.device_token(server_url).is_none() {
+            return Ok(());
+        }
+        let path = self.root.join("device-credential.json");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+
+    pub fn enrollment_claim(&self, server_url: &str) -> Result<String> {
+        if let Some(credential) = self.read_server_credential("enrollment-claim.json", server_url) {
+            anyhow::ensure!(
+                credential.secret.starts_with("ivq_ec_"),
+                "stored enrollment claim is invalid"
+            );
+            return Ok(credential.secret);
+        }
+        let claim = format!(
+            "ivq_ec_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        self.write_server_credential("enrollment-claim.json", server_url, &claim)?;
+        Ok(claim)
+    }
+
+    fn read_server_credential(&self, name: &str, server_url: &str) -> Option<ServerCredential> {
+        let bytes = fs::read(self.root.join(name)).ok()?;
+        let credential: ServerCredential = serde_json::from_slice(&bytes).ok()?;
+        (credential.server_url == normalized_server_url(server_url)).then_some(credential)
+    }
+
+    fn write_server_credential(&self, name: &str, server_url: &str, secret: &str) -> Result<()> {
+        let credential = ServerCredential {
+            server_url: normalized_server_url(server_url),
+            secret: secret.to_string(),
+        };
+        let bytes = serde_json::to_vec(&credential)?;
+        atomic_write(&self.root.join(name), &bytes, 0o600)
+    }
 }
 
 // Separate view lets the stable hash omit per-collection timestamps.
@@ -279,6 +343,10 @@ fn unix_nanos() -> u128 {
         .as_nanos()
 }
 
+fn normalized_server_url(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +379,39 @@ mod tests {
             StateStore::snapshot_hash(&snapshot(1)).unwrap(),
             StateStore::snapshot_hash(&snapshot(2)).unwrap()
         );
+    }
+
+    #[test]
+    fn persists_credentials_per_server_without_exposing_them_in_config() {
+        let root = temp_dir();
+        let store = StateStore::open(&root, 1024 * 1024).unwrap();
+        let claim = store
+            .enrollment_claim("https://inventory.example:7070/")
+            .unwrap();
+        assert!(claim.starts_with("ivq_ec_"));
+        assert_eq!(
+            store
+                .enrollment_claim("https://inventory.example:7070")
+                .unwrap(),
+            claim
+        );
+        store
+            .set_device_token("https://inventory.example:7070/", "ivq_at_device-token")
+            .unwrap();
+        assert_eq!(
+            store
+                .device_token("https://inventory.example:7070")
+                .as_deref(),
+            Some("ivq_at_device-token")
+        );
+        assert!(store.device_token("https://other.example:7070").is_none());
+        let mode = fs::metadata(root.join("device-credential.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
