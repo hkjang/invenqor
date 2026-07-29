@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -79,6 +78,11 @@ func (s *Server) autoEnrollAgent(
 		}
 		details["policy_version"] = policy.Version
 		details["network_mode"] = policy.NetworkMode
+		details["enrollment_mode"] = policy.mode()
+		details["agent_version"] = agentVersion(request.UserAgent())
+		if level != "info" {
+			details["remediation"] = enrollmentRemediation(code)
+		}
 		s.recordDiagnostic(request, diagnostics.Event{
 			Level:     level,
 			Component: "agent_enrollment",
@@ -105,60 +109,24 @@ func (s *Server) autoEnrollAgent(
 		)
 		return
 	}
-	if !policy.Enabled {
+	verdict := evaluateEnrollment(
+		policy,
+		sourceIP,
+		request.Header.Get("X-Invenqor-Enrollment-Token"),
+	)
+	if !verdict.Allowed {
 		recordEnrollment(
 			"warning",
-			"AGENT_AUTO_ENROLLMENT_DISABLED",
-			"Automatic Agent enrollment is disabled.",
+			verdict.Code,
+			enrollmentRejectionMessage(verdict.Code),
 			"",
-			nil,
+			map[string]any{"token_presented": verdict.TokenPresented},
 		)
 		writeAPIError(
-			response, request, http.StatusForbidden,
-			"AGENT_AUTO_ENROLLMENT_DISABLED",
-			"Automatic agent enrollment is not configured.",
+			response, request, verdict.Status,
+			verdict.Code, verdict.Message,
 		)
 		return
-	}
-	if policy.NetworkMode == "allowlist" &&
-		!networkRulesContain(policy.AllowedNetworks, sourceIP) {
-		recordEnrollment(
-			"warning",
-			"AGENT_SOURCE_NOT_ALLOWED",
-			"The Agent source IP was rejected by the enrollment policy.",
-			"",
-			nil,
-		)
-		writeAPIError(
-			response, request, http.StatusForbidden,
-			"AGENT_SOURCE_NOT_ALLOWED",
-			"The Agent source IP is not permitted by the enrollment policy.",
-		)
-		return
-	}
-	if policy.RequireToken {
-		provided := sha256.Sum256([]byte(strings.TrimSpace(
-			request.Header.Get("X-Invenqor-Enrollment-Token"),
-		)))
-		expected, _ := hex.DecodeString(policy.TokenHash)
-		if subtle.ConstantTimeCompare(
-			provided[:],
-			expected,
-		) != 1 {
-			recordEnrollment(
-				"warning",
-				"AGENT_ENROLLMENT_UNAUTHORIZED",
-				"The fleet enrollment credential was rejected.",
-				"",
-				nil,
-			)
-			writeAPIError(
-				response, request, http.StatusUnauthorized,
-				"AGENT_ENROLLMENT_UNAUTHORIZED",
-				"The fleet enrollment credential is invalid.",
-			)
-			return
-		}
 	}
 	var input struct {
 		AgentID    string `json:"agent_id"`
@@ -328,7 +296,11 @@ func (s *Server) receiveAgentEvent(
 	)
 	diagnosticSourceIP := s.agentDiagnosticSourceIP(request)
 	recordEventFailure := func(code string, message string, err error) {
-		details := map[string]any{"path": request.URL.Path}
+		details := map[string]any{
+			"path":          request.URL.Path,
+			"agent_version": agentVersion(request.UserAgent()),
+			"remediation":   enrollmentRemediation(code),
+		}
 		if err != nil {
 			details["error"] = err.Error()
 		}

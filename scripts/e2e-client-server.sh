@@ -94,6 +94,30 @@ curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/admin/diagnostics/logs?q=$rejected_request_id" |
   jq -e '.items[] | select(.event_code == "INVALID_AGENT_IDENTITY")' >/dev/null
 
+# Verify that an Agent, or an operator holding only curl, can establish whether
+# registration would succeed before any state exists.
+curl -fsS "http://127.0.0.1:$port/v1/agent/preflight" > "$work/preflight.json"
+jq -e '.enrollment.would_enroll == true and
+       .enrollment.reason == "AGENT_ENROLLMENT_READY" and
+       .credential.state == "absent" and
+       (.observed_source_ip | length > 0)' "$work/preflight.json" >/dev/null
+
+# A base URL carrying a stray path must answer JSON, not the console SPA, and
+# must leave a record an administrator can find.
+stray_status=$(curl -sS -o "$work/stray.json" -w '%{http_code}' -X POST \
+  -H 'Content-Type: application/json' -d '{}' \
+  "http://127.0.0.1:$port/invenqor/v1/agent/enroll")
+test "$stray_status" = 404
+jq -e '.error.code == "AGENT_ENDPOINT_NOT_FOUND"' "$work/stray.json" >/dev/null
+
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/diagnostics/enrollment?hours=24" \
+  > "$work/enrollment-diagnostics.json"
+jq -e '.totals.succeeded >= 1 and
+       (.by_event_code[] | select(.event_code == "AGENT_ENDPOINT_NOT_FOUND")) and
+       (.awaiting_inventory | length >= 1)' \
+  "$work/enrollment-diagnostics.json" >/dev/null
+
 docker volume create "$agent_volume" >/dev/null
 mkdir -p "$work/config"
 
@@ -124,6 +148,13 @@ sed \
 chmod 0640 "$work/config/config.toml"
 chmod -R a+rX "$work/config"
 
+# The Agent's own self-test must agree with the Server before anything is sent.
+docker run --rm --network "$network" \
+  -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
+  -v "$agent_volume:/var/lib/invenqor-agent" \
+  invenqor-agent:e2e --diagnose > "$work/diagnose.txt"
+grep -q 'result: OK' "$work/diagnose.txt"
+grep -q '\[PASS\] registration policy' "$work/diagnose.txt"
 docker run --rm --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
@@ -131,6 +162,11 @@ docker run --rm --network "$network" \
 jq -e '.records | length > 0' "$work/snapshot.json" >/dev/null
 docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
   sh -c 'test -s /state/device-credential.json && test -s /state/enrollment-claim.json'
+# status.json is the record that survives when no Server is reachable at all.
+docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 cat /state/status.json |
+  jq -e '.enrollment.state == "enrolled" and
+         .delivery.delivered_events >= 1 and
+         .delivery.last_error == null' >/dev/null
 docker run --name "$update_client" --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \

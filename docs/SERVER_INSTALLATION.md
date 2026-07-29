@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.5 · Agent 버전: v0.2.3 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.6 · Agent 버전: v0.2.6 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -66,17 +66,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.5.tar.gz`
-- `invenqor-0.2.5.tar.gz.sha256`
+- `invenqor-0.2.6.tar.gz`
+- `invenqor-0.2.6.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.5.tar.gz.sha256
-gzip -t invenqor-0.2.5.tar.gz
-docker load < invenqor-0.2.5.tar.gz
-docker image inspect invenqor-server:0.2.5 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.6.tar.gz.sha256
+gzip -t invenqor-0.2.6.tar.gz
+docker load < invenqor-0.2.6.tar.gz
+docker image inspect invenqor-server:0.2.6 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -96,7 +96,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.5
+./scripts/build-offline-images.sh 0.2.6
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -111,7 +111,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.5
+  invenqor-server:0.2.6
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -207,8 +207,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -352,7 +352,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.5`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.6`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -361,7 +361,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.5 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.6 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -380,9 +380,59 @@ v0.2.5 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하
 
 ## 12. 장애 판단
 
+### 12.1 등록이 안 될 때 확인 경로
+
+등록 실패는 Agent가 Server에 도달했는지에 따라 확인 지점이 다릅니다. 아래 세
+경로 중 하나에는 반드시 기록이 남습니다.
+
+| 상황 | 확인 위치 | 내용 |
+|---|---|---|
+| Server에 도달함 | 콘솔 **Agent 관리 → 등록 진단** | 최근 24시간 등록 성공·거부 건수, 출처 IP별 마지막 원인 코드와 조치, 등록 후 첫 수집이 없는 Agent |
+| Server에 도달함 | 콘솔 **Server 진단 로그** | `request_id`, 처리 Pod, 판정 IP, 정책 버전 포함 원본 이벤트 |
+| Server에 도달 못함 | Agent 장비 | `invenqor-agent --diagnose`, `--status`, `/var/lib/invenqor-agent/status.json` |
+
+Agent 없이 등록 가능 여부만 확인하려면 사전 점검 API를 호출합니다. 자격 증명
+없이 호출할 수 있고, Server가 인식한 출처 IP와 거부 사유를 그대로 돌려줍니다.
+Authorization 헤더에 장비 Token을 함께 보내면 그 Token의 유효성까지 판정합니다.
+
+```bash
+curl -s https://invenqor.example.com:7070/v1/agent/preflight | jq .
+```
+
+```json
+{
+  "observed_source_ip": "10.20.7.31",
+  "enrollment": {
+    "mode": "open", "network_mode": "allowlist", "network_allowed": false,
+    "would_enroll": false, "reason": "AGENT_SOURCE_NOT_ALLOWED"
+  },
+  "credential": {"presented": false, "state": "absent"}
+}
+```
+
+이 호출은 상태를 만들지 않지만 진단 로그에는 `AGENT_PREFLIGHT_READY` 또는
+`AGENT_PREFLIGHT_BLOCKED`로 남으므로, 등록에 실패한 장비의 시도도 콘솔에서
+확인할 수 있습니다. 잘못된 경로로 들어온 Agent 요청은
+`AGENT_ENDPOINT_NOT_FOUND`로 기록되며 HTML 대신 JSON 404를 반환합니다.
+
+관리 API로 요약을 직접 조회할 수도 있습니다(`agents.read` 권한).
+
+```bash
+curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .totals
+```
+
+### 12.2 증상별 판단
+
 - Agent 로그의 `code=... request_id=...`를 **Server 로그** 화면에서 검색하면
   요청 처리 Pod, source IP, 정책 버전과 안전하게 정리된 내부 원인을 확인할 수
-  있습니다.
+  있습니다. 모든 응답에 `X-Request-Id` 헤더가 포함되므로 프록시 로그에서도 같은
+  ID로 대조할 수 있습니다.
+- Agent가 목록에 아예 없음: 등록 자체가 실패한 것입니다. 12.1의 **등록 진단**
+  패널에서 출처 IP별 원인 코드를 확인하고, 기록이 없다면 Agent가 Server에
+  도달하지 못한 것이므로 해당 장비에서 `--diagnose`를 실행합니다.
+- Agent는 있으나 자산이 없음: 등록은 됐고 수집 이벤트가 없는 상태입니다.
+  **등록 진단**의 *첫 수집 대기* 목록과 Agent의 `--status` 큐 깊이를 함께
+  확인합니다.
 - `401`: Agent UUID와 장비별 Token, 차단 여부를 확인합니다.
 - `403 AGENT_SOURCE_NOT_ALLOWED`: IP/CIDR allowlist, 신뢰 프록시와
   `X-Forwarded-For` 판정을 확인합니다.
@@ -504,7 +554,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.5
+  invenqor-server:0.2.6
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서

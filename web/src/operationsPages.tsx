@@ -53,6 +53,51 @@ type Agent = {
   last_seen_at?: string;
   last_inventory_at?: string;
 };
+type EnrollmentDiagnostics = {
+  window_hours: number;
+  instance_id: string;
+  totals: {
+    events: number;
+    succeeded: number;
+    rejected: number;
+    preflight_checks: number;
+    preflight_blocked: number;
+    transport_failed: number;
+  };
+  by_event_code: {
+    event_code: string;
+    level: string;
+    count: number;
+    message: string;
+    remediation: string;
+    last_occurred_at?: string;
+    last_request_id?: string;
+  }[];
+  sources: {
+    source_ip: string;
+    agent_id: string;
+    attempts: number;
+    failures: number;
+    last_event_code: string;
+    last_level: string;
+    last_message: string;
+    last_request_id?: string;
+    last_instance_id?: string;
+    last_occurred_at?: string;
+    remediation: string;
+    agent_version?: string;
+  }[];
+  awaiting_inventory: {
+    id: string;
+    agent_id: string;
+    hostname: string;
+    status: string;
+    auth_method: string;
+    created_at?: string;
+    last_seen_at?: string;
+  }[];
+  enrollment?: {mode: string; network_mode: string; allowed_networks: string[]};
+};
 type Bucket = {label: string; count: number};
 type Statistics = {
   generated_at: string;
@@ -342,6 +387,7 @@ export function AgentsPage({
       </Notice>}
     {secret && <SecretReveal secret={secret} onClose={() => setSecret("")}/>}
     {error && <div className="error action-message">{error}</div>}
+    <EnrollmentDiagnosticsPanel/>
     {can(access, "agents.manage") && <div className="agent-admin-grid">
       <Panel title="예외 장비 수동 등록" action="자동 등록 권장">
         <form className="compact-form" onSubmit={provision}>
@@ -383,6 +429,93 @@ export function AgentsPage({
       {!items.length && <Empty icon={Activity} text="등록된 Agent가 없습니다. 자동 등록 설정과 Agent 로그를 확인하십시오."/>}
     </div>
   </section>;
+}
+
+// An Agent that never registers cannot appear in the Agent list, so the only
+// way to see it is the record of its attempts. This panel puts that record, and
+// the matching remedy, next to the fleet it is missing from.
+function EnrollmentDiagnosticsPanel() {
+  const [data, setData] = React.useState<EnrollmentDiagnostics|null>(null);
+  const [hours, setHours] = React.useState(24);
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(async () => {
+    try {
+      setData(await api<EnrollmentDiagnostics>(
+        `/api/v1/admin/diagnostics/enrollment?hours=${hours}`));
+      setError("");
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  }, [hours]);
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    const timer = window.setInterval(() => { load(); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+  const failing = (data?.sources || []).filter(source => source.failures > 0);
+  const blocked = (data?.totals.rejected || 0) + (data?.totals.preflight_blocked || 0);
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  return <Panel title="등록 진단" action={`최근 ${data?.window_hours ?? hours}시간`}>
+    {error && <div className="error">{error}</div>}
+    <div className="status-grid enrollment-diagnostics-summary">
+      <div><span>등록 성공</span><strong>{number(data?.totals.succeeded)}</strong></div>
+      <div><span>등록 거부</span><strong>{number(data?.totals.rejected)}</strong></div>
+      <div><span>사전 점검 차단</span><strong>{number(data?.totals.preflight_blocked)}</strong></div>
+      <div><span>전송 실패</span><strong>{number(data?.totals.transport_failed)}</strong></div>
+      <div><span>첫 수집 대기</span><strong>{number(data?.awaiting_inventory.length)}</strong></div>
+    </div>
+    <div className="filter-bar">
+      <select value={hours} onChange={event => setHours(Number(event.target.value))}>
+        <option value="1">최근 1시간</option><option value="24">최근 24시간</option>
+        <option value="168">최근 7일</option><option value="720">최근 30일</option>
+      </select>
+      <button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>
+    </div>
+    {blocked === 0 && !failing.length
+      ? <Notice tone="info" title="차단된 등록 시도가 없습니다.">
+          Agent가 보이지 않는다면 해당 장비에서 <code>invenqor-agent --diagnose</code>를
+          실행하십시오. Server에 도달조차 못한 경우 Agent 측 로그와
+          <code>/var/lib/invenqor-agent/status.json</code>에 원인이 기록됩니다.
+        </Notice>
+      : <div className="audit-table enrollment-source-table">
+          {failing.map(source => <details key={`${source.source_ip}|${source.agent_id}`}>
+            <summary>
+              <i className="bad"/>
+              <time>{formatDate(source.last_occurred_at)}</time>
+              <strong>{source.source_ip || "출처 불명"}</strong>
+              <span>{source.last_event_code} · 시도 {source.attempts} · 실패 {source.failures}</span>
+              <Badge value={source.last_level}/>
+            </summary>
+            <div className="audit-detail">
+              <DataRow label="Agent ID" value={source.agent_id || "등록 전"}/>
+              <DataRow label="Agent 버전" value={source.agent_version || "—"}/>
+              <DataRow label="Server 메시지" value={source.last_message}/>
+              <DataRow label="Request ID" value={source.last_request_id || "—"}/>
+              <DataRow label="처리 Pod" value={source.last_instance_id || "—"}/>
+              <DataRow label="조치" value={source.remediation}/>
+            </div>
+          </details>)}
+        </div>}
+    {!!data?.by_event_code.length && <div className="breakdown enrollment-code-breakdown">
+      {data.by_event_code.slice(0, 8).map((code, index) =>
+        <div key={code.event_code} title={code.remediation}>
+          <span className={`chart-color c${index % 6}`}/>
+          <strong>{code.event_code}</strong><b>{number(code.count)}</b>
+        </div>)}
+    </div>}
+    {!!data?.awaiting_inventory.length && <div className="agent-list awaiting-inventory">
+      {data.awaiting_inventory.slice(0, 8).map(agent =>
+        <div key={agent.id}><i/>
+          <div><strong>{agent.hostname || agent.agent_id}</strong>
+            <span>등록 {formatDate(agent.created_at)} · 아직 수집 이벤트가 없습니다</span></div>
+          <Badge value={agent.status}/></div>)}
+    </div>}
+    <p className="hint enrollment-diagnostics-hint">
+      Agent 장비에서 <code>invenqor-agent --diagnose</code>, 임의 장비에서{" "}
+      <code>curl -s {origin}/v1/agent/preflight</code>를 실행하면 등록 가능 여부와
+      Server가 인식한 출처 IP를 즉시 확인할 수 있습니다.
+    </p>
+  </Panel>;
 }
 
 export function QueryPage({csrf}: {csrf: string}) {
@@ -810,9 +943,17 @@ type DiagnosticLog = {
   details: Record<string, unknown>;
 };
 const pretty = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
-const formatDate = (value?: string|null) => value
-  ? new Intl.DateTimeFormat("ko-KR", {year: "2-digit", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"}).format(new Date(value))
-  : "—";
+// The SQLite start-up fallback renders timestamps in Go's own layout, which
+// Date cannot parse. Showing the raw value beats showing "Invalid Date".
+const formatDate = (value?: string|null) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "2-digit", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  }).format(parsed);
+};
 const number = (value?: number) => (value || 0).toLocaleString("ko-KR");
 const recentEnough = (value: string|undefined, minutes: number) =>
   !!value && Date.now() - new Date(value).getTime() <= minutes * 60_000;

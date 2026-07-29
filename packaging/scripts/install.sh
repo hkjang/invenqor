@@ -67,3 +67,20 @@ else
 fi
 
 echo "Invenqor agent installed."
+
+# A fresh configuration has no server.url, so the service starts and quietly
+# collects into its local queue. Say so here rather than letting the operator
+# discover it as a missing Agent in the console.
+if ! grep -Eq '^[[:space:]]*url[[:space:]]*=' "$CONFIG_DIR/config.toml"; then
+    echo
+    echo "NEXT STEP: server.url is not set in $CONFIG_DIR/config.toml."
+    echo "  Until it is, this Agent collects inventory into its local queue,"
+    echo "  never registers with a Server, and nothing appears in the console."
+    echo "  1) Set server.url to the Server scheme, host and port."
+    echo "  2) Restart the service."
+    echo "  3) Verify with:"
+    echo "     $BIN_DIR/invenqor-agent --config $CONFIG_DIR/config.toml --diagnose"
+else
+    echo "Verify registration with:"
+    echo "  $BIN_DIR/invenqor-agent --config $CONFIG_DIR/config.toml --diagnose"
+fi

@@ -1,5 +1,7 @@
 pub mod collectors;
 pub mod config;
+pub mod diagnose;
+pub mod health;
 pub mod identity;
 pub mod model;
 pub mod scheduler;

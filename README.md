@@ -48,6 +48,10 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
   표준 claim을 자동 구성하고 검증 후 활성화하는 빠른 연동
 - Agent와 Server가 오류 코드·request ID를 공유하고 모든 Server Pod의 진단을
   공용 DB에서 검색하는 보존 제한 Server 로그 화면
+- 등록이 실패해도 확인 가능한 진단 체계: 상태를 바꾸지 않는 Agent
+  `--diagnose`·`--status`, 매 주기 기록되는 `status.json`, 자격 증명 없이 등록
+  가능 여부와 인식된 출처 IP를 돌려주는 `GET /v1/agent/preflight`, 출처별 실패
+  원인과 조치를 보여주는 콘솔 **등록 진단** 패널
 - 주 메뉴와 설정 하위 메뉴를 URL·사용자별 브라우저 상태에 동기화해 새로고침
   후에도 유지하는 콘솔 탐색
 - 외부 HTTPS 443을 내부 단일 Service 7070으로 연결하는 선택적 Helm Ingress
@@ -77,6 +81,14 @@ cargo run -- --config config/config.toml --once
 ```bash
 cargo run -- --config config/config.toml --validate-config
 cargo run -- --print-default-config
+```
+
+등록·연동 상태 확인. 두 명령 모두 상태를 바꾸지 않으며 문제가 있으면 0이 아닌
+코드로 종료합니다.
+
+```bash
+cargo run -- --config config/config.toml --diagnose
+cargo run -- --config config/config.toml --status
 ```
 
 로그 수준은 `RUST_LOG`로 설정합니다. 토큰, 인증서 원문, 프로세스 명령행은

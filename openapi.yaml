@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.5
+  version: 0.2.6
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
@@ -29,6 +29,59 @@ paths:
         "202": {description: Durably spooled during PostgreSQL degradation}
         "400": {description: Invalid event}
         "401": {description: Invalid credential}
+  /v1/agent/preflight:
+    get:
+      operationId: agentRegistrationPreflight
+      summary: Report whether this caller could register, without changing state
+      description: Answers the registration question before any state exists, so a failed rollout can be diagnosed from the Agent host or from curl. It creates no Agent, consumes no claim and never invalidates a credential. An optional device credential is validated and reported. Every call is recorded in the shared diagnostics log as AGENT_PREFLIGHT_READY or AGENT_PREFLIGHT_BLOCKED, which is what makes an Agent that never registered visible in the console.
+      security: [{}, {agentEnrollment: []}, {agentBearer: []}, {agentMTLS: []}]
+      parameters:
+        - {in: header, name: X-Invenqor-Agent-Id, required: false, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Registration decision for this source address
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+            X-Request-Id: {schema: {type: string}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observed_source_ip, enrollment, credential]
+                properties:
+                  request_id: {type: string}
+                  server_version: {type: string}
+                  instance_id: {type: string}
+                  database_mode: {type: string}
+                  observed_source_ip: {type: string, description: Source address after trusted proxy resolution}
+                  enrollment:
+                    type: object
+                    properties:
+                      enabled: {type: boolean}
+                      mode: {type: string, enum: [disabled, open, token]}
+                      token_required: {type: boolean}
+                      token_presented: {type: boolean}
+                      network_mode: {type: string, enum: [any, allowlist]}
+                      network_allowed: {type: boolean}
+                      policy_version: {type: integer}
+                      would_enroll: {type: boolean}
+                      reason:
+                        type: string
+                        description: AGENT_ENROLLMENT_READY, or the same code the enrollment endpoint would return
+                      detail: {type: string}
+                  credential:
+                    type: object
+                    properties:
+                      presented: {type: boolean}
+                      state: {type: string, enum: [absent, valid, invalid, blocked, unavailable]}
+                      agent_id: {type: string, format: uuid}
+                      hostname: {type: string}
+                      auth_method: {type: string}
+                      status: {type: string}
+                  endpoints: {type: object, additionalProperties: {type: string}}
+        "400": {description: The source address could not be verified}
+        "429": {description: Enrollment rate limit exceeded}
+        "503": {description: The enrollment policy could not be loaded}
   /v1/agent/enroll:
     post:
       operationId: autoEnrollAgent
@@ -448,6 +501,83 @@ paths:
                   instance_id: {type: string}
         "401": {description: Authentication required}
         "403": {description: audit.read permission required}
+  /api/v1/admin/diagnostics/enrollment:
+    get:
+      operationId: getEnrollmentDiagnostics
+      summary: Summarise Agent registration attempts, failures and silent Agents
+      description: Requires agents.read. Aggregates the agent_enrollment, agent_transport and agent_preflight diagnostics for a time window, and lists Agents that hold a credential but never delivered inventory. Answers "which machines tried to register and what stopped them" without knowing what to search for.
+      security: [{session: []}]
+      parameters:
+        - {in: query, name: hours, schema: {type: integer, minimum: 1, maximum: 720, default: 24}}
+      responses:
+        "200":
+          description: Registration health for the requested window
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [window_hours, totals, by_event_code, sources, awaiting_inventory]
+                properties:
+                  generated_at: {type: string, format: date-time}
+                  window_hours: {type: integer}
+                  instance_id: {type: string}
+                  database_mode: {type: string}
+                  totals:
+                    type: object
+                    properties:
+                      events: {type: integer}
+                      succeeded: {type: integer}
+                      rejected: {type: integer}
+                      preflight_checks: {type: integer}
+                      preflight_blocked: {type: integer}
+                      transport_failed: {type: integer}
+                  by_event_code:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        event_code: {type: string}
+                        level: {type: string, enum: [info, warning, error]}
+                        count: {type: integer}
+                        message: {type: string}
+                        remediation: {type: string}
+                        last_occurred_at: {type: string}
+                        last_request_id: {type: string}
+                  sources:
+                    type: array
+                    description: One entry per source address and Agent identifier, failing sources first
+                    items:
+                      type: object
+                      properties:
+                        source_ip: {type: string}
+                        agent_id: {type: string}
+                        attempts: {type: integer}
+                        failures: {type: integer}
+                        last_event_code: {type: string}
+                        last_level: {type: string}
+                        last_message: {type: string}
+                        last_request_id: {type: string}
+                        last_instance_id: {type: string}
+                        last_occurred_at: {type: string}
+                        remediation: {type: string}
+                        agent_version: {type: string}
+                  awaiting_inventory:
+                    type: array
+                    description: Registered Agents with no inventory event yet
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, format: uuid}
+                        agent_id: {type: string, format: uuid}
+                        hostname: {type: string}
+                        status: {type: string}
+                        auth_method: {type: string}
+                        version: {type: string}
+                        created_at: {type: string}
+                        last_seen_at: {type: string, nullable: true}
+                  enrollment: {type: object, description: Current registration policy as shown in Settings}
+        "401": {description: Authentication required}
+        "403": {description: agents.read permission required}
   /api/v1/admin/users:
     get:
       operationId: listUsers

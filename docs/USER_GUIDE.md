@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.3 · Server v0.2.5</p>
+    <p><strong>대상 버전</strong> Agent v0.2.6 · Server v0.2.6</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.3는 Server v0.2.5와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.6는 Server v0.2.6와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -105,8 +105,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.3/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.6/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -190,7 +190,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.3`입니다.
+예상 출력은 `invenqor-agent 0.2.6`입니다.
 
 ## 5. 최초 설정
 
@@ -271,6 +271,60 @@ OpenRC는 `sudo rc-service invenqor-agent restart`, SysV는
 
 ## 6. 정상 동작 확인
 
+### 6.0 등록·연동 자체 진단 (가장 먼저 실행)
+
+Agent가 콘솔에 나타나지 않을 때 가장 먼저 실행합니다. 상태를 바꾸지 않으므로
+운영 중에도 안전하며, 문제가 있으면 0이 아닌 코드로 종료합니다.
+
+```bash
+sudo -u invenqor-agent \
+  /opt/invenqor-agent/bin/invenqor-agent \
+  --config /etc/invenqor-agent/config.toml --diagnose
+```
+
+```text
+invenqor-agent 0.2.6 registration diagnosis at 2026-07-29T09:12:44Z
+  host          app-web-01
+  agent-id      d8d847a5-7a75-48bc-8ee8-c8e1af94f74c
+  config        /etc/invenqor-agent/config.toml
+  server.url    https://inventory.example:7070
+
+  [PASS] configuration file            read /etc/invenqor-agent/config.toml
+  [PASS] state directory               /var/lib/invenqor-agent is writable, agent-id d8d847a5…
+  [PASS] durable queue                 0 undelivered event(s), 0 of 104857600 bytes used
+  [PASS] stored credential             a device credential exists for this Server URL
+  [PASS] server.url                    https://inventory.example:7070 (scheme https, host inventory.example, port 7070)
+  [PASS] transport encryption          HTTPS is configured
+  [PASS] name resolution               inventory.example resolves to 10.10.4.20:7070
+  [PASS] server reachability           GET /health/ready answered READY
+  [PASS] server identity               Invenqor Server 0.2.6 (pod invenqor-0, database POSTGRES)
+  [PASS] observed source address       the Server sees this host as 10.20.7.31
+  [PASS] registration policy           mode open, network any: this host may register
+  [PASS] device credential             accepted by the Server as agent d8d847a5… (auto_bearer)
+
+  result: OK - the Agent can reach the Server and register
+```
+
+실패한 항목에는 원인 코드와 조치가 함께 출력됩니다. 예를 들어 Server의 등록
+허용 목록에 이 호스트가 없으면 다음과 같이 표시됩니다.
+
+```text
+  [FAIL] registration policy           mode open, network allowlist: The Agent source IP is not permitted…
+         code: AGENT_SOURCE_NOT_ALLOWED
+         fix:  Add the observed source address, or its CIDR, to the registration allowlist…
+```
+
+`--json`을 덧붙이면 같은 결과를 기계 판독용 JSON으로 출력합니다. 점검 항목은
+설정 → 상태 디렉터리 → URL → DNS → 도달성 → Server 정책 → 자격 증명 순서이므로,
+처음 실패한 항목이 곧 원인입니다.
+
+Agent 바이너리 없이 확인해야 하면 아무 장비에서 사전 점검 API를 호출합니다.
+Server가 인식한 출처 IP와 등록 가능 여부를 그대로 돌려줍니다.
+
+```bash
+curl -s https://inventory.example:7070/v1/agent/preflight | jq .enrollment
+```
+
 ### 6.1 로그 확인
 
 systemd:
@@ -279,9 +333,27 @@ systemd:
 sudo journalctl -u invenqor-agent --since "10 minutes ago" --no-pager
 ```
 
-정상 수집 시 `queued collection event`, 정상 전송 시
-`delivered queued events` 메시지를 확인할 수 있습니다. 서버 URL이 없으면
-전송 메시지가 없는 것이 정상입니다.
+기동 직후 `agent transport configured` 한 줄에 적용된 Server URL, 인증 방식,
+등록 상태가 함께 기록됩니다. 정상 수집 시 `queued collection event`, 정상 전송 시
+`delivered queued events` 메시지를 확인할 수 있습니다.
+
+`server.url`이 설정되지 않은 경우에는 기동 시 다음 경고가 남고, 수집 결과는
+로컬 큐에만 쌓입니다. 등록이 진행되지 않는 가장 흔한 원인입니다.
+
+```text
+WARN server.url is not configured: inventory is collected into the local queue only,
+     no registration is attempted, and nothing is sent to a Server
+```
+
+등록이나 전송이 실패하면 한 줄에 원인 코드, Server의 `request_id`, 조치가 함께
+기록되므로 콘솔의 **Server 진단 로그**에서 같은 `request_id`로 서버 측 기록을
+바로 찾을 수 있습니다.
+
+```text
+WARN Server exchange failed stage="automatic enrollment" code=AGENT_SOURCE_NOT_ALLOWED
+     http_status=Some(403) path=/v1/agent/enroll request_id=invenqor-0/abc-000123
+     remediation=The Server registration allowlist rejects this host's source IP…
+```
 
 실시간 로그:
 
@@ -304,7 +376,36 @@ sudo du -sh /var/lib/invenqor-agent/queue
 | `inventory.json` | 직전 유효 인벤토리 |
 | `snapshot.sha256` | 변경 감지용 안정 해시 |
 | `last-heartbeat` | 마지막 이벤트/하트비트 시각 |
+| `status.json` | 등록·전송·큐 상태와 마지막 실패 원인, 권한 `0600` |
+| `enrollment-claim.json` | 이 장비의 등록 청구 값, 권한 `0600` |
+| `device-credential.json` | 자동 발급된 장비 전용 Token, 권한 `0600` |
 | `queue/*.jsonl` | 아직 서버가 수락하지 않은 이벤트 |
+
+`status.json`은 매 주기마다 갱신되며, 저널을 열람할 수 없는 환경에서도 등록
+실패 원인을 남기는 것이 목적입니다. 사람이 읽는 요약은 `--status`로 확인합니다.
+
+```bash
+sudo -u invenqor-agent \
+  /opt/invenqor-agent/bin/invenqor-agent \
+  --config /etc/invenqor-agent/config.toml --status
+```
+
+```text
+invenqor-agent 0.2.6 on app-web-01
+  updated       2026-07-29T09:14:02Z
+  server.url    https://inventory.example:7070
+  registration  failed (the Server rejected or could not be reached for registration)
+  queue         3 event(s), 41231 of 104857600 bytes
+  delivered     0 event(s), last success never
+  last error    AGENT_SOURCE_NOT_ALLOWED during automatic enrollment at 2026-07-29T09:14:02Z
+                The Agent source IP is not permitted by the enrollment policy.
+                server request_id invenqor-0/abc-000123
+                fix: The Server registration allowlist rejects this host's source IP…
+  summary       registration is failing (AGENT_SOURCE_NOT_ALLOWED): …
+```
+
+정상 상태에서는 종료 코드 0, 등록이나 전송이 밀려 있으면 1을 반환하므로 감시
+스크립트에서 그대로 사용할 수 있습니다. `--json`으로 원본 구조를 얻습니다.
 
 큐 파일은 서버가 2xx 응답과 `accepted: true`를 모두 반환한 후에만 삭제됩니다.
 전송 장애 중 큐 파일이 증가하는 것은 데이터 보존 동작입니다.
@@ -368,6 +469,39 @@ include_process_cmdline = true
 
 ## 8. 문제 해결
 
+### 8.0 Agent가 콘솔에 보이지 않음
+
+가장 흔한 순서대로 확인합니다. 1번만으로 대부분 판정됩니다.
+
+1. `--diagnose`를 실행합니다(6.0). 처음 `[FAIL]`이 표시된 항목이 원인이며 조치가
+   함께 출력됩니다.
+2. `--status`로 마지막 실패 코드와 Server `request_id`를 확인합니다(6.2).
+3. `server.url`이 설정돼 있는지 확인합니다. 주석 처리된 상태로 서비스가 기동하면
+   수집만 하고 등록은 시도하지 않습니다.
+
+```bash
+grep -n '^\s*url' /etc/invenqor-agent/config.toml
+```
+
+4. 관리자에게 콘솔 **Agent 관리 → 등록 진단** 패널 확인을 요청합니다. Agent가
+   Server에 도달했지만 정책에 막힌 경우, 등록조차 되지 않은 장비의 출처 IP와
+   원인 코드가 그 화면에 남습니다.
+
+주요 원인 코드와 조치:
+
+| 코드 | 원인 | 조치 |
+|---|---|---|
+| `SERVER_UNREACHABLE` | TCP 연결 실패 | URL·라우팅·방화벽(7070/TCP outbound) 확인 |
+| `SERVER_TIMEOUT` | 응답 지연 | `timeout_seconds` 상향, 중간 프록시 점검 |
+| `TLS_REJECTED` | 서버 인증서 검증 실패 | `ca_file`에 사설 CA 인증서 지정 |
+| `SERVER_RESPONSE_NOT_JSON` | 콘솔·프록시가 대신 응답 | `server.url`을 scheme·host·port만으로 설정 |
+| `AGENT_ENDPOINT_NOT_FOUND` | URL에 경로가 포함됨 | 같은 조치 |
+| `AGENT_AUTO_ENROLLMENT_DISABLED` | Server가 자동 등록 비활성 | 콘솔에서 자동 등록 활성화 |
+| `AGENT_SOURCE_NOT_ALLOWED` | 출처 IP가 허용 목록 밖 | 허용 목록에 IP/CIDR 추가 |
+| `AGENT_ENROLLMENT_UNAUTHORIZED` | 공용 등록 Token 불일치 | 발급 Token을 `enrollment_token_file`에 기록 |
+| `AGENT_ALREADY_CLAIMED` | 이미지 복제로 agent-id 중복 | 복제본의 `agent-id`, `enrollment-claim.json` 삭제 |
+| `AGENT_BLOCKED` | 관리자가 차단 | 콘솔에서 차단 해제 |
+
 ### 8.1 서비스가 시작되지 않음
 
 ```bash
@@ -404,10 +538,13 @@ Server가 요청을 거부하면 Agent 로그에는 다음처럼 HTTP 상태 외
 코드, API 경로와 request ID가 함께 표시됩니다.
 
 ```text
-automatic enrollment returned HTTP 403 Forbidden
-code=AGENT_SOURCE_NOT_ALLOWED path=/v1/agent/enroll
-request_id=01J... message=The Agent source IP is not permitted...
+WARN Server exchange failed stage="automatic enrollment" code=AGENT_SOURCE_NOT_ALLOWED
+     http_status=Some(403) path=/v1/agent/enroll request_id=invenqor-0/abc-000123
+     server_message=The Agent source IP is not permitted by the enrollment policy.
+     remediation=The Server registration allowlist rejects this host's source IP…
 ```
+
+같은 내용이 `status.json`에도 남으므로 로그 유실 시에도 조회할 수 있습니다.
 
 `request_id` 전체를 관리자에게 전달하십시오. 관리자는 **Server 로그** 화면에서
 같은 ID를 검색해 요청을 처리한 Pod, 판정 IP, 정책 버전과 실패 단계를 확인할 수

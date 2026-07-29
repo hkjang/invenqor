@@ -1,3 +1,4 @@
+use crate::health::StatusReport;
 use crate::model::{AssetChange, AssetRecord, ChangeKind, Envelope, Snapshot};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -275,6 +276,23 @@ impl StateStore {
         );
         self.write_server_credential("enrollment-claim.json", server_url, &claim)?;
         Ok(claim)
+    }
+
+    pub fn status_path(&self) -> PathBuf {
+        self.root.join("status.json")
+    }
+
+    /// Persists the operational summary next to the queue it describes. A
+    /// failure to write it must never stop collection, so the caller logs and
+    /// continues; the report is a diagnosis aid, not durable state.
+    pub fn write_status(&self, report: &StatusReport) -> Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(report)?;
+        bytes.push(b'\n');
+        atomic_write(&self.status_path(), &bytes, 0o600)
+    }
+
+    pub fn read_status(&self) -> Option<StatusReport> {
+        serde_json::from_slice(&fs::read(self.status_path()).ok()?).ok()
     }
 
     fn read_server_credential(&self, name: &str, server_url: &str) -> Option<ServerCredential> {

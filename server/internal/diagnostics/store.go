@@ -213,6 +213,76 @@ func (store *Store) List(
 	return items, instances, rows.Err()
 }
 
+// Since returns the recorded events for the named components inside a time
+// window, newest first. The caller aggregates in Go so the same query works on
+// PostgreSQL and on the SQLite start-up fallback.
+func (store *Store) Since(
+	ctx context.Context,
+	components []string,
+	since time.Time,
+	limit int,
+) ([]Item, error) {
+	if len(components) == 0 {
+		return nil, nil
+	}
+	if limit < 1 {
+		limit = 1_000
+	}
+	if limit > 5_000 {
+		limit = 5_000
+	}
+	arguments := make([]any, 0, len(components)+2)
+	placeholders := make([]string, 0, len(components))
+	for _, component := range components {
+		arguments = append(arguments, component)
+		placeholders = append(
+			placeholders,
+			fmt.Sprintf("$%d", len(arguments)),
+		)
+	}
+	arguments = append(arguments, since.UTC())
+	sinceArgument := len(arguments)
+	arguments = append(arguments, limit)
+	statement := fmt.Sprintf(
+		`SELECT id,occurred_at,level,component,event_code,message,
+		 request_id,instance_id,agent_id,source_ip,details_json
+		 FROM diagnostic_logs
+		 WHERE component IN (%s) AND occurred_at >= $%d
+		 ORDER BY occurred_at DESC LIMIT $%d`,
+		strings.Join(placeholders, ","),
+		sinceArgument,
+		len(arguments),
+	)
+	rows, err := store.database.QueryContext(ctx, statement, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("list diagnostic activity: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Item, 0, 64)
+	for rows.Next() {
+		var item Item
+		var details any
+		if err := rows.Scan(
+			&item.ID,
+			&item.OccurredAt,
+			&item.Level,
+			&item.Component,
+			&item.EventCode,
+			&item.Message,
+			&item.RequestID,
+			&item.InstanceID,
+			&item.AgentID,
+			&item.SourceIP,
+			&details,
+		); err != nil {
+			return nil, err
+		}
+		item.Details = decodeDetails(details)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (store *Store) instances(ctx context.Context) ([]string, error) {
 	rows, err := store.database.QueryContext(
 		ctx,

@@ -151,6 +151,7 @@ func (s *Server) routes() {
 	s.router.Get("/api/v1/auth/methods", s.authMethods)
 	s.router.Get("/api/v1/auth/keycloak/start", s.keycloakStart)
 	s.router.Get("/api/v1/auth/keycloak/callback", s.keycloakCallback)
+	s.router.Get("/v1/agent/preflight", s.agentPreflight)
 	s.router.Post("/v1/agent/enroll", s.autoEnrollAgent)
 	s.router.Post("/v1/agent/events", s.receiveAgentEvent)
 	s.router.Get("/v1/agent/updates", s.agentUpdateManifest)
@@ -341,6 +342,9 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("audit.read")).Get(
 			"/api/v1/admin/diagnostics/logs", s.listDiagnosticLogs,
 		)
+		protected.With(s.requirePermission("agents.read")).Get(
+			"/api/v1/admin/diagnostics/enrollment", s.enrollmentDiagnostics,
+		)
 		protected.With(s.requirePermission("users.read")).Get(
 			"/api/v1/admin/users", s.listUsers,
 		)
@@ -393,7 +397,77 @@ func (s *Server) routes() {
 			"/api/v1/admin/api-keys/{keyID}", s.revokeAPIKey,
 		)
 	})
-	s.router.NotFound(webui.Handler().ServeHTTP)
+	s.router.NotFound(s.notFound)
+	s.router.MethodNotAllowed(s.methodNotAllowed)
+}
+
+// notFound keeps a misconfigured Agent visible. Without this, an Agent whose
+// server.url carries a stray path only ever produces a stdout line on one Pod,
+// so the console shows an absent Agent and no reason for it.
+func (s *Server) notFound(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	// A base URL carrying a stray path prefix is the most confusing
+	// misconfiguration there is: the console SPA would answer HTTP 200 with
+	// HTML and the Agent would report a JSON decode error. Match the Agent
+	// endpoints anywhere in the path so the answer names the real problem.
+	if strings.Contains(request.URL.Path, "/v1/agent/") {
+		s.recordAgentEndpointMisuse(
+			request,
+			"AGENT_ENDPOINT_NOT_FOUND",
+			"An Agent called a path this server does not serve.",
+		)
+		writeAPIError(
+			response, request, http.StatusNotFound,
+			"AGENT_ENDPOINT_NOT_FOUND",
+			"This path is not an Agent endpoint. Configure server.url with "+
+				"the scheme, host and port only.",
+		)
+		return
+	}
+	webui.Handler().ServeHTTP(response, request)
+}
+
+func (s *Server) methodNotAllowed(
+	response http.ResponseWriter,
+	request *http.Request,
+) {
+	if strings.Contains(request.URL.Path, "/v1/agent/") {
+		s.recordAgentEndpointMisuse(
+			request,
+			"AGENT_ENDPOINT_METHOD_NOT_ALLOWED",
+			"An Agent used the wrong HTTP method on an Agent endpoint.",
+		)
+	}
+	writeAPIError(
+		response, request, http.StatusMethodNotAllowed,
+		"METHOD_NOT_ALLOWED",
+		"The requested method is not supported for this resource.",
+	)
+}
+
+func (s *Server) recordAgentEndpointMisuse(
+	request *http.Request,
+	code string,
+	message string,
+) {
+	s.recordDiagnostic(request, diagnostics.Event{
+		Level:     "warning",
+		Component: "agent_transport",
+		EventCode: code,
+		Message:   message,
+		AgentID: strings.TrimSpace(
+			request.Header.Get("X-Invenqor-Agent-Id"),
+		),
+		SourceIP: s.agentDiagnosticSourceIP(request),
+		Details: map[string]any{
+			"method":        request.Method,
+			"path":          request.URL.Path,
+			"agent_version": agentVersion(request.UserAgent()),
+			"remediation":   enrollmentRemediation(code),
+		},
+	})
 }
 
 func (s *Server) root(response http.ResponseWriter, _ *http.Request) {
@@ -508,6 +582,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		started := time.Now()
+		// The Agent logs this header verbatim, which is what lets an operator
+		// paste one identifier into the console and find the server side of a
+		// failed registration.
+		requestID := middleware.GetReqID(request.Context())
+		if requestID != "" {
+			response.Header().Set("X-Request-Id", requestID)
+		}
 		wrapped := middleware.NewWrapResponseWriter(response, request.ProtoMajor)
 		next.ServeHTTP(wrapped, request)
 		s.logger.Info(

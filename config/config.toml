@@ -1,7 +1,9 @@
 [server]
-# HTTPS endpoint of the inventory gateway. When omitted, events remain in the
-# durable local queue and `--once` still prints the snapshot.
-# url = "https://inventory.example.internal"
+# REQUIRED for registration. Set the Server scheme, host and port only - no
+# path. Until this is set the Agent collects into its durable local queue, does
+# not register, and sends nothing; it logs a warning saying so on every start.
+# Verify the result with: invenqor-agent --diagnose
+# url = "https://inventory.example.internal:7070"
 # bearer_token = "replace-with-provisioned-device-token"
 # URL-only zero-touch registration is the default. The Agent exchanges its
 # locally generated device claim for a device token and stores both under
