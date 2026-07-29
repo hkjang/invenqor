@@ -64,7 +64,14 @@ root가 파일을 읽을 수 있다는 사실은 서비스가 읽을 수 있는�
                                    /etc/invenqor-agent/config.toml
 ```
 
-## 4. Helm chart의 기본 image tag가 0.2.7에 멈춰 있었습니다
+## 4. 사용할 수 없는 설정에서 진단이 보고 없이 종료했습니다
+
+`--diagnose`가 TOML 오류를 만나면 그 오류만 출력하고 종료했습니다. 오타를 낸
+운영자는 오타 위치만 알게 되고, Server 도달 여부나 자격 증명 유효성은 아무것도
+확인하지 못했습니다. 이제 사용할 수 없는 설정도 `[FAIL] configuration file`
+항목으로 보고하고 나머지 점검을 계속 수행합니다.
+
+## 5. Helm chart의 기본 image tag가 0.2.7에 멈춰 있었습니다
 
 `values.yaml`의 `tag`가 따옴표를 포함한 형태여서 버전 일괄 변경에서 빠졌습니다.
 v0.2.8 chart는 `appVersion: 0.2.8`이면서 기본 이미지로 `invenqor-server:0.2.7`을
