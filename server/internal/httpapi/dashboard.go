@@ -180,18 +180,29 @@ func groupedCounts(
 	return result, rows.Err()
 }
 
+// dateExpression truncates a timestamp column to its calendar day on both
+// engines. SQLite holds the driver's Go time layout ("2006-01-02 15:04:05.999
+// -0700 MST"), which SQLite's own DATE() cannot parse and silently returns NULL
+// for - so every daily series was empty in the start-up fallback mode. Casting
+// to text and taking the leading ten characters yields the same ISO day on
+// PostgreSQL and SQLite alike.
+func dateExpression(column string) string {
+	return "substr(CAST(" + column + " AS TEXT),1,10)"
+}
+
 func dailyEventCounts(
 	ctx context.Context,
 	database *sql.DB,
 	now time.Time,
 ) ([]dailyStatistic, error) {
 	start := now.AddDate(0, 0, -6)
+	day := dateExpression("received_at")
 	rows, err := database.QueryContext(
 		ctx,
-		`SELECT DATE(received_at), COUNT(*),
+		`SELECT `+day+`, COUNT(*),
 		 SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END)
 		 FROM agent_events WHERE received_at >= $1
-		 GROUP BY DATE(received_at) ORDER BY DATE(received_at)`,
+		 GROUP BY `+day+` ORDER BY `+day,
 		start,
 	)
 	if err != nil {

@@ -176,7 +176,11 @@ func TestDashboardStatisticsUseAuthoritativeTotals(t *testing.T) {
 		} `json:"agents"`
 		Collection struct {
 			Events24h int64 `json:"events_24h"`
-			Daily     []any `json:"daily"`
+			Daily     []struct {
+				Date   string `json:"date"`
+				Events int64  `json:"events"`
+				Failed int64  `json:"failed"`
+			} `json:"daily"`
 		} `json:"collection"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -185,6 +189,24 @@ func TestDashboardStatisticsUseAuthoritativeTotals(t *testing.T) {
 	if payload.Assets.Total != 1 || payload.Agents.Healthy != 1 ||
 		payload.Collection.Events24h != 1 || len(payload.Collection.Daily) != 7 {
 		t.Fatalf("unexpected statistics: %+v", payload)
+	}
+	// A seven-slot array of zeros used to satisfy this test while the trend chart
+	// was empty in SQLite mode, so assert the event actually lands on its day.
+	var plotted int64
+	for _, day := range payload.Collection.Daily {
+		plotted += day.Events
+		if day.Date == "" {
+			t.Fatalf("daily bucket without a date: %+v", payload.Collection.Daily)
+		}
+	}
+	if plotted != 1 {
+		t.Fatalf(
+			"daily series plotted %d events, want 1: %+v",
+			plotted, payload.Collection.Daily,
+		)
+	}
+	if payload.Collection.Daily[6].Events != 1 {
+		t.Fatalf("today's bucket = %+v", payload.Collection.Daily[6])
 	}
 }
 

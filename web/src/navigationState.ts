@@ -1,6 +1,7 @@
 export type ConsolePage =
   | "dashboard"
   | "assets"
+  | "visualization"
   | "agents"
   | "query"
   | "settings"
@@ -21,6 +22,7 @@ export type SettingsTab =
 const consolePages = new Set<ConsolePage>([
   "dashboard",
   "assets",
+  "visualization",
   "agents",
   "query",
   "settings",

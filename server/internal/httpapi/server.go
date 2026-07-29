@@ -276,6 +276,9 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/dashboard/statistics", s.dashboardStatistics,
 		)
+		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets/visualization", s.assetVisualization,
+		)
 		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
 			"/api/v1/assets", s.createAsset,
 		)

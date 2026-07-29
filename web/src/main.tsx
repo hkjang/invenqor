@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
-  Activity, Boxes, ChevronDown, ChevronRight, LayoutDashboard,
+  Activity, Boxes, ChartPie, ChevronDown, ChevronRight, LayoutDashboard,
   Copy, KeyRound, LogOut, Menu, Palette, RefreshCw, Search, Settings,
   ScrollText, ShieldCheck, Trash2, UserCog, Users, X,
 } from "lucide-react";
@@ -16,6 +16,7 @@ import {
   QueryPage,
   ServerLogsPage,
 } from "./operationsPages";
+import {VisualizationPage} from "./visualizationPage";
 import { ProductVersion, type SystemInfo } from "./productVersion";
 import {PersonalizationPage} from "./personalizationPage";
 import {
@@ -171,6 +172,7 @@ function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete }: {
 const navigation: {id: Page; label: string; icon: React.ElementType; permission: string}[] = [
   {id:"dashboard",label:"운영 현황",icon:LayoutDashboard,permission:"assets.read"},
   {id:"assets",label:"자산",icon:Boxes,permission:"assets.read"},
+  {id:"visualization",label:"시각화",icon:ChartPie,permission:"assets.read"},
   {id:"agents",label:"Agent",icon:Activity,permission:"agents.read"},
   {id:"query",label:"Query DSL",icon:Search,permission:"queries.execute"},
   {id:"settings",label:"설정",icon:Settings,permission:"settings.read"},
@@ -288,6 +290,7 @@ function App() {
       {activePage==="dashboard"&&<OperationsDashboard systemInfo={systemInfo}
         refreshSeconds={preferences.dashboard_refresh_seconds}/>}
       {activePage==="assets"&&<AssetsPage csrf={csrf} access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
+      {activePage==="visualization"&&<VisualizationPage/>}
       {activePage==="agents"&&<AgentsPage csrf={csrf} systemInfo={systemInfo}
         access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
       {activePage==="query"&&<QueryPage csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo} userID={user.id}/>}
