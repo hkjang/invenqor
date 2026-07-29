@@ -7,6 +7,7 @@ output_dir=${2:-"$root/dist"}
 server_image="invenqor-server:$version"
 postgres_image="postgres:17-alpine"
 archive="$output_dir/invenqor-$version.tar.gz"
+archive_name=$(basename "$archive")
 
 mkdir -p "$output_dir"
 cd "$root"
@@ -16,5 +17,8 @@ test "$(docker image inspect "$server_image" --format '{{.Architecture}}')" = am
 test "$(docker image inspect "$postgres_image" --format '{{.Architecture}}')" = amd64
 docker save "$server_image" "$postgres_image" | gzip -9 > "$archive"
 gzip -t "$archive"
-sha256sum "$archive" > "$archive.sha256"
+(
+  cd "$output_dir"
+  sha256sum "$archive_name" > "$archive_name.sha256"
+)
 echo "$archive"
