@@ -105,16 +105,48 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 	if sessionCookie == nil {
 		t.Fatal("login response omitted session cookie")
 	}
-	if !sessionCookie.HttpOnly || !sessionCookie.Secure ||
-		sessionCookie.SameSite != http.SameSiteStrictMode {
+	// SameSite must be Lax, not Strict: the Keycloak callback returns through a
+	// cross-site redirect, and a Strict cookie is withheld on that navigation, so
+	// the console loads signed out until the user reloads by hand.
+	if !sessionCookie.HttpOnly ||
+		sessionCookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("session cookie flags = %#v", sessionCookie)
+	}
+	// This request arrived over plain HTTP. A Secure cookie would be discarded
+	// by the browser, which is what broke login on HTTP-only installations.
+	if sessionCookie.Secure {
+		t.Fatalf("session cookie is Secure on a plain HTTP response: %#v", sessionCookie)
 	}
 	if csrfCookie == nil || csrfCookie.Value != loginPayload.CSRFToken {
 		t.Fatal("login response omitted the browser CSRF cookie")
 	}
-	if csrfCookie.HttpOnly || !csrfCookie.Secure ||
-		csrfCookie.SameSite != http.SameSiteStrictMode {
+	if csrfCookie.HttpOnly || csrfCookie.Secure ||
+		csrfCookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("CSRF cookie flags = %#v", csrfCookie)
+	}
+
+	// Behind a TLS-terminating proxy the cookies must be Secure again.
+	forwarded := performJSON(
+		t,
+		server,
+		http.MethodPost,
+		"/api/v1/auth/local/login",
+		map[string]string{
+			"username": "admin.user",
+			"password": "CorrectHorse!42",
+		},
+		map[string]string{"X-Forwarded-Proto": "https"},
+	)
+	if forwarded.Code != http.StatusOK {
+		t.Fatalf("forwarded login status = %d body = %s", forwarded.Code, forwarded.Body.String())
+	}
+	for _, cookie := range forwarded.Result().Cookies() {
+		if cookie.Name != auth.SessionCookie && cookie.Name != auth.CSRFCookie {
+			continue
+		}
+		if !cookie.Secure {
+			t.Fatalf("%s cookie is not Secure behind an HTTPS proxy: %#v", cookie.Name, cookie)
+		}
 	}
 
 	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)

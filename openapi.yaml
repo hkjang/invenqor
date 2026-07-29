@@ -615,10 +615,12 @@ paths:
       parameters: [{$ref: "#/components/parameters/UserId"}]
       responses:
         "200": {description: Updated; deactivation revokes sessions and API keys}
+        "400": {description: "Invalid profile or role; ROLE_REQUIRED when the update would leave the account with no role"}
         "409": {description: Self-lockout or last Super Admin protection}
     delete:
       operationId: deleteUser
-      summary: Soft-delete a user and revoke all access
+      summary: Soft-delete a user, revoke all access and release the account name
+      description: The account name is released for reuse. The deleted row keeps the original name in a retired form so the audit trail stays intact.
       security: [{session: []}]
       parameters: [{$ref: "#/components/parameters/UserId"}]
       responses:

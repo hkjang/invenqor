@@ -628,6 +628,38 @@ Keycloak에서 회수된 역할도 제거됩니다. 관리 콘솔에서 비활�
 Logout Redirect URI가 설정된 SSO 사용자는 로컬 Session 폐기 후 Keycloak
 end-session endpoint로 이동해 IdP Session 종료도 이어서 수행합니다.
 
+### 15.1 SSO 로그인 실패 확인
+
+Keycloak 로그인은 브라우저 이동으로 진행되므로 실패해도 화면에 JSON이 표시되지
+않습니다. Server는 로그인 화면으로 되돌려보내며 원인 코드와 request ID를 함께
+표시하고, 같은 내용을 **Server 진단 로그**의 `keycloak` 구성요소에 조치 문구와
+함께 기록합니다.
+
+| 코드 | 원인 | 조치 |
+|---|---|---|
+| `KEYCLOAK_DISABLED` | 자동 로그인 비활성 | 설정 → Keycloak에서 활성화 |
+| `KEYCLOAK_SECRET_REQUIRED` | Client Secret 미설정 | Secret을 입력하고 저장 |
+| `KEYCLOAK_UNREACHABLE` | discovery 실패 | URL·realm·DNS·TLS 신뢰 확인, 연결 테스트 실행 |
+| `KEYCLOAK_PROVIDER_REJECTED` | Keycloak이 요청 거부 | client의 Valid Redirect URI와 인증 흐름 정책 확인 |
+| `KEYCLOAK_FLOW_EXPIRED` | 10분 초과 또는 재사용 | 로그인을 다시 시작 |
+| `KEYCLOAK_USERNAME_CONFLICT` | 같은 이름의 로컬 계정 존재 | 로컬 계정을 정리하거나 다른 username claim 사용 |
+| `KEYCLOAK_EMAIL_DOMAIN_REJECTED` | 허용 도메인 밖 | 도메인 허용 목록 수정 |
+| `KEYCLOAK_PROVISIONING_DISABLED` | 자동 생성 비활성 | 계정을 먼저 생성하거나 자동 생성 활성화 |
+| `KEYCLOAK_USER_INACTIVE` | 연결 계정 비활성 | 사용자 화면에서 활성화 |
+| `KEYCLOAK_ROLE_MISSING` | 매핑이 없는 역할을 지정 | 역할 매핑 수정 |
+
+Client Secret이 없는 상태로 활성화되어 있으면 로그인 화면은 Keycloak 버튼을
+표시하지 않고 미완성 상태임을 안내합니다. 동작하지 않는 버튼을 노출하지 않기
+위한 동작입니다.
+
+<div class="callout warning">
+<strong>Session Cookie와 HTTPS:</strong> Session Cookie는 요청이 HTTPS일 때만
+<code>Secure</code>로 발급됩니다. TLS를 상위 Proxy에서 종료하는 경우
+<code>X-Forwarded-Proto: https</code>를 전달하도록 구성하십시오. 평문 HTTP로
+운영하면 Cookie에 <code>Secure</code>가 붙지 않으며, 신뢰 경계를 넘는 트래픽은
+반드시 HTTPS를 사용해야 합니다.
+</div>
+
 ## 16. 사용자 관리
 
 **사용자** 화면은 계정 생성, 검색, 프로필 수정, 활성/비활성, 잠금 해제,
@@ -641,4 +673,10 @@ end-session endpoint로 이동해 IdP Session 종료도 이어서 수행합니�
 - `SSO` 표시 역할은 매 로그인마다 Keycloak에서 동기화되므로 콘솔에서 제거할
   수 없습니다. 별도 로컬 역할만 콘솔에서 추가·회수할 수 있습니다.
 - Keycloak 사용자의 비밀번호와 프로필 원본은 Keycloak에서 관리합니다.
+- 권한은 역할에서만 나오므로 마지막 역할은 회수할 수 없습니다. 접근을 막아야
+  하면 계정을 비활성화하십시오. Keycloak이 부여한 역할이 남아 있는 계정은 로컬
+  역할을 모두 회수할 수 있습니다.
+- 삭제한 계정의 사용자 ID는 즉시 재사용할 수 있습니다. 삭제된 행은 목록에서
+  숨기고 이름을 `원래이름#deleted-<id>` 형태로 보존하므로 감사 추적은 유지되며
+  같은 ID로 새 계정을 만들 수 있습니다.
 - 모든 관리 변경은 행위자, 대상, 결과와 사유를 감사 로그에 기록합니다.

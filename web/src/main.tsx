@@ -77,15 +77,53 @@ function BootstrapSetup({onComplete}: {onComplete: () => void}) {
   </form></section></main>;
 }
 
-function Login({ onLogin, systemInfo, keycloakEnabled }: {
+// The server redirects a failed Keycloak login back here with a code, because a
+// browser navigation cannot show a JSON error body. Translate it for the user.
+const keycloakLoginErrors: Record<string, string> = {
+  KEYCLOAK_DISABLED: "Keycloak 로그인이 비활성화되어 있습니다. 관리자에게 설정 → Keycloak 활성화를 요청하십시오.",
+  KEYCLOAK_SECRET_REQUIRED: "Keycloak client secret이 설정되지 않았습니다. 관리자가 설정 → Keycloak에서 저장해야 합니다.",
+  KEYCLOAK_UNREACHABLE: "Keycloak 서버에 연결할 수 없습니다. URL, realm, DNS, TLS 신뢰를 확인해야 합니다.",
+  KEYCLOAK_FLOW_EXPIRED: "로그인 시도가 만료되었거나 이미 사용되었습니다. 다시 시도하십시오.",
+  KEYCLOAK_NONCE_MISMATCH: "ID token 검증에 실패했습니다. 관리자에게 문의하십시오.",
+  KEYCLOAK_PROVIDER_REJECTED: "Keycloak이 로그인 요청을 거부했습니다. 동의를 취소했거나 client 설정을 확인해야 합니다.",
+  KEYCLOAK_EMAIL_DOMAIN_REJECTED: "허용되지 않은 이메일 도메인입니다. 관리자에게 도메인 허용을 요청하십시오.",
+  KEYCLOAK_PROVISIONING_DISABLED: "자동 사용자 생성이 비활성화되어 있습니다. 관리자가 계정을 먼저 만들어야 합니다.",
+  KEYCLOAK_USERNAME_UNUSABLE: "Keycloak 사용자명 claim을 사용할 수 없습니다. 관리자에게 claim 매핑 확인을 요청하십시오.",
+  KEYCLOAK_USERNAME_CONFLICT: "같은 이름의 로컬 계정이 이미 존재합니다. 관리자가 로컬 계정을 정리해야 합니다.",
+  KEYCLOAK_USER_INACTIVE: "연결된 계정이 비활성 상태입니다. 관리자에게 활성화를 요청하십시오.",
+  KEYCLOAK_ROLE_MISSING: "Keycloak 역할 매핑이 존재하지 않는 역할을 가리킵니다. 관리자가 매핑을 수정해야 합니다.",
+  KEYCLOAK_LOGIN_FAILED: "Keycloak 로그인을 완료하지 못했습니다.",
+};
+
+const consumeAuthErrorFromURL = (): {code: string; requestID: string} | null => {
+  if (typeof window === "undefined") return null;
+  const parameters = new URLSearchParams(window.location.search);
+  const code = parameters.get("auth_error");
+  if (!code) return null;
+  const requestID = parameters.get("request_id") || "";
+  // Clear the query so a reload does not repeat a stale failure.
+  parameters.delete("auth_error");
+  parameters.delete("request_id");
+  const query = parameters.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
+  return {code, requestID};
+};
+
+function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete }: {
   onLogin: (user: User, csrf: string) => void;
   systemInfo: SystemInfo | null;
   keycloakEnabled: boolean;
+  keycloakIncomplete: boolean;
 }) {
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [totpCode, setTOTPCode] = React.useState("");
   const [error, setError] = React.useState("");
+  const [ssoError] = React.useState(consumeAuthErrorFromURL);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault(); setError("");
     try {
@@ -113,9 +151,17 @@ function Login({ onLogin, systemInfo, keycloakEnabled }: {
         <label>Authenticator 코드 <small className="optional">TOTP 사용 계정만 입력</small>
           <input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={totpCode}
             onChange={e=>setTOTPCode(e.target.value)} autoComplete="one-time-code" placeholder="000000"/></label>
+        {ssoError && <div className="error sso-error">
+          {keycloakLoginErrors[ssoError.code] || keycloakLoginErrors.KEYCLOAK_LOGIN_FAILED}
+          <small>코드 {ssoError.code}{ssoError.requestID ? ` · request ${ssoError.requestID}` : ""}</small>
+        </div>}
         {error && <div className="error">{error}</div>}
         <button className="primary" type="submit">안전하게 로그인 <ChevronRight size={18}/></button>
         {keycloakEnabled && <a className="sso" href="/api/v1/auth/keycloak/start">Keycloak으로 계속</a>}
+        {keycloakIncomplete && <p className="muted sso-incomplete">
+          Keycloak 로그인이 활성화되어 있지만 client secret이 없어 사용할 수 없습니다.
+          관리자가 설정 → Keycloak에서 secret을 저장해야 합니다.
+        </p>}
         <ProductVersion info={systemInfo}/>
       </form>
     </section>
@@ -154,11 +200,16 @@ function App() {
   const [mobile, setMobile] = React.useState(false);
   const [systemInfo, setSystemInfo] = React.useState<SystemInfo|null>(null);
   const [keycloakEnabled, setKeycloakEnabled] = React.useState(false);
+  const [keycloakIncomplete, setKeycloakIncomplete] = React.useState(false);
   const [bootstrap, setBootstrap] = React.useState<BootstrapStatus|null>(null);
   const [preferences, setPreferences] = React.useState<UserPreferences>(defaultPreferences);
   React.useEffect(()=>{ api<{user:User}>("/api/v1/auth/me").then(v=>setUser(v.user)).catch(()=>{}); },[]);
   React.useEffect(()=>{ api<SystemInfo>("/api/v1/system/info").then(setSystemInfo).catch(()=>{}); },[]);
-  React.useEffect(()=>{ api<{keycloak:boolean}>("/api/v1/auth/methods").then(v=>setKeycloakEnabled(v.keycloak)).catch(()=>{}); },[]);
+  React.useEffect(()=>{
+    api<{keycloak:boolean; keycloak_incomplete?:boolean}>("/api/v1/auth/methods")
+      .then(v=>{ setKeycloakEnabled(v.keycloak); setKeycloakIncomplete(!!v.keycloak_incomplete); })
+      .catch(()=>{});
+  },[]);
   React.useEffect(()=>{ api<BootstrapStatus>("/api/v1/bootstrap/status").then(setBootstrap).catch(()=>{}); },[]);
   React.useEffect(() => {
     if (!user) return;
@@ -205,7 +256,7 @@ function App() {
     return () => media.removeEventListener("change", synchronize);
   }, [preferences]);
   if (bootstrap?.required) return <BootstrapSetup onComplete={() => setBootstrap({required:false})}/>;
-  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
+  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
   const visibleNavigation=navigation.filter(item=>!item.permission||user.super_admin||user.permissions.includes(item.permission));
   const personalPage=page==="account"||page==="preferences";
   const activePage=personalPage||visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;

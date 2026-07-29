@@ -1004,6 +1004,31 @@ Discovery 실패 시 기존 운영 설정은 유지됩니다.
 TOTP가 적용된 로컬 Super Admin 하나 이상을 Keycloak 장애 도메인 밖에
 보관하십시오.
 
+역할과 계정 이름 규칙:
+
+- 권한은 역할 부여에서만 나옵니다. 마지막 역할을 회수하는 변경은 `ROLE_REQUIRED`
+  로 거부됩니다. 접근을 차단할 때는 계정을 비활성화하십시오. Keycloak이 부여한
+  역할이 남아 있으면 로컬 역할은 모두 회수할 수 있습니다.
+- 계정 삭제는 논리 삭제이지만 사용자 ID는 즉시 해제되어 재사용할 수 있습니다.
+  삭제된 행은 `원래이름#deleted-<id>`로 보존되어 감사 추적과 외부 참조가
+  유지됩니다.
+- Keycloak 사용자명이 기존 로컬 계정과 겹치면 자동 연결하지 않고
+  `KEYCLOAK_USERNAME_CONFLICT`로 거부합니다. 이름만으로 자동 연결하면 디렉터리
+  쪽 이름 변경으로 로컬 계정을 탈취할 수 있기 때문입니다. 로컬 계정을 정리하거나
+  다른 username claim을 사용하십시오.
+
+### 16.1 Session Cookie와 SSO 왕복
+
+Session과 CSRF Cookie는 `SameSite=Lax`로 발급됩니다. Keycloak Callback은 외부
+사이트에서 되돌아오는 이동이므로 `Strict`에서는 Cookie가 전송되지 않아 SSO 직후
+콘솔이 로그아웃 상태로 보입니다. 상태를 바꾸는 모든 요청은 여전히
+`X-CSRF-Token` 헤더와 Cookie 이중 확인을 요구합니다.
+
+`Secure` 속성은 요청이 HTTPS일 때만 부여합니다. 브라우저는 평문 HTTP로 전달된
+`Secure` Cookie를 저장하지 않으므로, 폐쇄망 HTTP 설치에서 로그인이 성공한 듯
+보이고도 실패하는 문제를 방지하기 위한 동작입니다. TLS를 상위 Proxy에서 종료할
+때는 `X-Forwarded-Proto: https`를 전달하도록 구성하십시오.
+
 ## 17. 운영 통계와 관리 콘솔 API 연결
 
 **운영 현황**은 브라우저에서 임의 합산하지 않고

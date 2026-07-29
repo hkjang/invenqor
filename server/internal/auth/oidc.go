@@ -33,6 +33,11 @@ var (
 	ErrOIDCUserInactive = errors.New("Keycloak-linked user is inactive")
 	ErrOIDCSecret       = errors.New("Keycloak client secret is required")
 	ErrOIDCRole         = errors.New("Keycloak role mapping references an unknown role")
+	// ErrOIDCUsernameTaken separates "a local account owns this name" from a
+	// generic database failure. Without it the administrator sees only a failed
+	// login and has no way to learn that renaming the local account fixes it.
+	ErrOIDCUsernameTaken = errors.New("a local account already uses this Keycloak username")
+	ErrOIDCUnreachable   = errors.New("Keycloak issuer could not be reached")
 )
 
 const keycloakSettingKey = "auth.keycloak"
@@ -93,9 +98,11 @@ func (settings OIDCSettings) EffectiveIssuer() string {
 	return issuer
 }
 
-func (settings OIDCSettings) Validate() error {
-	if !settings.Enabled {
-		return nil
+// validateIssuer checks only what a discovery attempt needs, so the connection
+// test can run against a configuration that is not enabled yet.
+func (settings OIDCSettings) validateIssuer() error {
+	if strings.TrimSpace(settings.IssuerURL) == "" {
+		return errors.New("Keycloak URL is required")
 	}
 	issuer, err := url.Parse(settings.EffectiveIssuer())
 	if err != nil || issuer.Scheme != "https" || issuer.Host == "" {
@@ -103,6 +110,22 @@ func (settings OIDCSettings) Validate() error {
 	}
 	if strings.TrimSpace(settings.ClientID) == "" {
 		return errors.New("Keycloak client ID is required")
+	}
+	if strings.TrimSpace(settings.PrivateCAPEM) != "" {
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM([]byte(settings.PrivateCAPEM)) {
+			return errors.New("Keycloak private CA PEM is invalid")
+		}
+	}
+	return nil
+}
+
+func (settings OIDCSettings) Validate() error {
+	if !settings.Enabled {
+		return nil
+	}
+	if err := settings.validateIssuer(); err != nil {
+		return err
 	}
 	redirect, err := url.Parse(settings.RedirectURI)
 	if err != nil ||
@@ -307,6 +330,13 @@ func (service *OIDCService) TestConnection(
 	ctx context.Context,
 	settings OIDCSettings,
 ) error {
+	// Validate() short-circuits for a disabled provider, but the natural order is
+	// to test the connection before enabling it. Check the fields the test
+	// actually needs so an empty form reports the missing field instead of a
+	// discovery failure.
+	if err := settings.validateIssuer(); err != nil {
+		return err
+	}
 	if err := settings.Validate(); err != nil {
 		return err
 	}
@@ -318,7 +348,7 @@ func (service *OIDCService) TestConnection(
 		return err
 	}
 	if _, err := oidc.NewProvider(oidcContext, settings.EffectiveIssuer()); err != nil {
-		return fmt.Errorf("discover Keycloak issuer: %w", err)
+		return fmt.Errorf("%w: %s", ErrOIDCUnreachable, err.Error())
 	}
 	return nil
 }
@@ -474,6 +504,16 @@ func (service *OIDCService) Start(
 	if !safeReturnTo(returnTo) {
 		returnTo = "/"
 	}
+	// Abandoned logins are the common case (a user closes the tab), so the table
+	// only grows unless finished and expired rows are cleared here.
+	if _, err := service.db.ExecContext(
+		ctx,
+		`DELETE FROM oidc_flows
+		  WHERE expires_at < CURRENT_TIMESTAMP
+		     OR consumed_at IS NOT NULL`,
+	); err != nil {
+		return OIDCStart{}, fmt.Errorf("prune expired OIDC flows: %w", err)
+	}
 	expiresAt := time.Now().UTC().Add(10 * time.Minute)
 	if _, err := service.db.ExecContext(
 		ctx,
@@ -578,6 +618,22 @@ func (service *OIDCService) Callback(
 	if nonce == "" || !subtleHashCompare(hashSecret(nonce), nonceHash) {
 		return Session{}, "", ErrOIDCNonce
 	}
+	// Claim the single-use flow before anything is created. Consuming it after
+	// the session was issued left an unreferenced session behind whenever two
+	// callbacks raced on the same state value.
+	result, err := service.db.ExecContext(
+		ctx,
+		`UPDATE oidc_flows
+		 SET consumed_at = CURRENT_TIMESTAMP
+		 WHERE id = $1 AND consumed_at IS NULL`,
+		flowID,
+	)
+	if err != nil {
+		return Session{}, "", fmt.Errorf("consume OIDC flow: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return Session{}, "", ErrOIDCFlow
+	}
 	user, err := service.provisionUser(ctx, settings, idToken.Subject, claims)
 	if err != nil {
 		return Session{}, "", err
@@ -595,19 +651,6 @@ func (service *OIDCService) Callback(
 	)
 	if err != nil {
 		return Session{}, "", err
-	}
-	result, err := service.db.ExecContext(
-		ctx,
-		`UPDATE oidc_flows
-		 SET consumed_at = CURRENT_TIMESTAMP
-		 WHERE id = $1 AND consumed_at IS NULL`,
-		flowID,
-	)
-	if err != nil {
-		return Session{}, "", fmt.Errorf("consume OIDC flow: %w", err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return Session{}, "", ErrOIDCFlow
 	}
 	if err := service.audit.Record(ctx, service.db, audit.Entry{
 		ActorType:    "user",
@@ -648,7 +691,7 @@ func (service *OIDCService) provider(
 		return OIDCSettings{}, nil, nil, err
 	}
 	if values.KeycloakClientSecret == "" {
-		return OIDCSettings{}, nil, nil, errors.New("Keycloak client secret is not configured")
+		return OIDCSettings{}, nil, nil, ErrOIDCSecret
 	}
 	oidcContext, err := oidcHTTPContext(ctx, settings.PrivateCAPEM)
 	if err != nil {
@@ -656,7 +699,9 @@ func (service *OIDCService) provider(
 	}
 	provider, err := oidc.NewProvider(oidcContext, settings.EffectiveIssuer())
 	if err != nil {
-		return OIDCSettings{}, nil, nil, fmt.Errorf("discover Keycloak issuer: %w", err)
+		// Typed so the login handlers can report an unreachable identity
+		// provider instead of an opaque internal error.
+		return OIDCSettings{}, nil, nil, fmt.Errorf("%w: %s", ErrOIDCUnreachable, err.Error())
 	}
 	oauthConfig := &oauth2.Config{
 		ClientID:     settings.ClientID,
@@ -775,6 +820,19 @@ func (service *OIDCService) provisionUser(
 		return User{}, fmt.Errorf("begin Keycloak user provisioning: %w", err)
 	}
 	defer transaction.Rollback()
+	// Auto-linking by name would let a renamed directory account take over a
+	// local one, so refuse instead - but say which name collided.
+	var taken int
+	if err := transaction.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM users WHERE normalized_username = $1",
+		normalizeUsername(username),
+	).Scan(&taken); err != nil {
+		return User{}, fmt.Errorf("check Keycloak username availability: %w", err)
+	}
+	if taken != 0 {
+		return User{}, fmt.Errorf("%w: %s", ErrOIDCUsernameTaken, username)
+	}
 	user = User{
 		ID:          uuid.NewString(),
 		Username:    username,

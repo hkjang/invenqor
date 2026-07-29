@@ -938,6 +938,13 @@ export function UsersPage({
     const next = localRoles.includes(role)
       ? localRoles.filter(value => value !== role)
       : [...localRoles, role];
+    // Permissions come only from roles, so removing the last one would leave an
+    // account that can sign in and reach nothing. Say so before the round trip.
+    if (!next.length && !(user.oidc_roles || []).length) {
+      setMessage("");
+      setError("역할을 최소 하나는 유지해야 합니다. 접근을 막으려면 계정을 비활성화하십시오.");
+      return Promise.resolve();
+    }
     return mutate(
       () => api(`/api/v1/admin/users/${user.id}`, jsonRequest(csrf, {
         roles: next, reason: "관리 콘솔 역할 변경",

@@ -72,7 +72,7 @@ func (s *Server) localLogin(response http.ResponseWriter, request *http.Request)
 	)
 	switch {
 	case err == nil:
-		setSessionCookie(response, session)
+		setSessionCookie(response, request, session)
 		writeJSON(response, http.StatusOK, map[string]any{
 			"user":                session.User,
 			"csrf_token":          session.CSRFToken,
@@ -147,14 +147,19 @@ func (s *Server) disableTOTP(response http.ResponseWriter, request *http.Request
 	writeJSON(response, http.StatusOK, map[string]any{"totp_enabled": false})
 }
 
-func setSessionCookie(response http.ResponseWriter, session auth.Session) {
+func setSessionCookie(
+	response http.ResponseWriter,
+	request *http.Request,
+	session auth.Session,
+) {
+	secure := requestIsHTTPS(request)
 	http.SetCookie(response, &http.Cookie{
 		Name:     auth.SessionCookie,
 		Value:    session.Token,
 		Path:     "/",
-		Secure:   true,
+		Secure:   secure,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Expires:  session.AbsoluteExpiresAt,
 		MaxAge:   int(time.Until(session.AbsoluteExpiresAt).Seconds()),
 	})
@@ -162,12 +167,50 @@ func setSessionCookie(response http.ResponseWriter, session auth.Session) {
 		Name:     auth.CSRFCookie,
 		Value:    session.CSRFToken,
 		Path:     "/",
-		Secure:   true,
+		Secure:   secure,
 		HttpOnly: false,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 		Expires:  session.AbsoluteExpiresAt,
 		MaxAge:   int(time.Until(session.AbsoluteExpiresAt).Seconds()),
 	})
+}
+
+// clearSessionCookies must mirror the attributes used when the cookies were
+// issued: a browser matches a deletion cookie on name, path and domain, and an
+// attribute mismatch leaves a stale cookie behind.
+func clearSessionCookies(response http.ResponseWriter, request *http.Request) {
+	secure := requestIsHTTPS(request)
+	for _, name := range []string{auth.SessionCookie, auth.CSRFCookie} {
+		http.SetCookie(response, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			Secure:   secure,
+			HttpOnly: name == auth.SessionCookie,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+			Expires:  time.Unix(1, 0),
+		})
+	}
+}
+
+// requestIsHTTPS decides whether the session cookies may carry the Secure
+// attribute. A browser silently discards a Secure cookie delivered over plain
+// HTTP, which made login appear to succeed and then fail on the closed-network
+// HTTP deployments this product documents. Marking the cookie Secure on an
+// HTTP response protects nothing, so follow the actual transport instead.
+func requestIsHTTPS(request *http.Request) bool {
+	if request == nil {
+		return true
+	}
+	if request.TLS != nil {
+		return true
+	}
+	if forwarded := request.Header.Get("X-Forwarded-Proto"); forwarded != "" {
+		first, _, _ := strings.Cut(forwarded, ",")
+		return strings.EqualFold(strings.TrimSpace(first), "https")
+	}
+	return strings.EqualFold(request.Header.Get("X-Forwarded-Ssl"), "on")
 }
 
 func (s *Server) me(response http.ResponseWriter, request *http.Request) {
@@ -202,26 +245,7 @@ func (s *Server) logout(response http.ResponseWriter, request *http.Request) {
 			"error", logoutURLError,
 		)
 	}
-	http.SetCookie(response, &http.Cookie{
-		Name:     auth.SessionCookie,
-		Value:    "",
-		Path:     "/",
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-		Expires:  time.Unix(1, 0),
-	})
-	http.SetCookie(response, &http.Cookie{
-		Name:     auth.CSRFCookie,
-		Value:    "",
-		Path:     "/",
-		Secure:   true,
-		HttpOnly: false,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-		Expires:  time.Unix(1, 0),
-	})
+	clearSessionCookies(response, request)
 	writeJSON(response, http.StatusOK, map[string]any{
 		"logged_out": true,
 		"logout_url": logoutURL,

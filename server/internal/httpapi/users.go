@@ -75,7 +75,6 @@ func (s *Server) listUsers(response http.ResponseWriter, request *http.Request) 
 	}
 	defer rows.Close()
 	users := make([]managedUserRecord, 0)
-	byID := make(map[string]*managedUserRecord)
 	for rows.Next() {
 		user := managedUserRecord{
 			Roles:      make([]string, 0),
@@ -98,7 +97,6 @@ func (s *Server) listUsers(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 		users = append(users, user)
-		byID[user.ID] = &users[len(users)-1]
 	}
 	if err := rows.Err(); err != nil {
 		s.internalError(response, request, err)
@@ -119,19 +117,31 @@ func (s *Server) listUsers(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	defer roleRows.Close()
+	// Collect grants by user identifier rather than by pointer: `users` is still
+	// growing while these rows are read, and a slice that reallocates leaves any
+	// retained element pointer addressing a discarded array.
+	type grants struct {
+		all      []string
+		local    []string
+		keycloak []string
+	}
+	byID := make(map[string]*grants, len(users))
 	for roleRows.Next() {
 		var userID, role, source string
 		if err := roleRows.Scan(&userID, &role, &source); err != nil {
 			s.internalError(response, request, err)
 			return
 		}
-		if user := byID[userID]; user != nil {
-			user.Roles = appendUniqueRole(user.Roles, role)
-			if source == "keycloak" {
-				user.OIDCRoles = appendUniqueRole(user.OIDCRoles, role)
-			} else {
-				user.LocalRoles = appendUniqueRole(user.LocalRoles, role)
-			}
+		entry := byID[userID]
+		if entry == nil {
+			entry = &grants{}
+			byID[userID] = entry
+		}
+		entry.all = appendUniqueRole(entry.all, role)
+		if source == "keycloak" {
+			entry.keycloak = appendUniqueRole(entry.keycloak, role)
+		} else {
+			entry.local = appendUniqueRole(entry.local, role)
 		}
 	}
 	if err := roleRows.Err(); err != nil {
@@ -140,6 +150,11 @@ func (s *Server) listUsers(response http.ResponseWriter, request *http.Request) 
 	}
 	items := make([]map[string]any, 0, len(users))
 	for _, user := range users {
+		if entry := byID[user.ID]; entry != nil {
+			user.Roles = appendUniqueRoles(user.Roles, entry.all...)
+			user.LocalRoles = appendUniqueRoles(user.LocalRoles, entry.local...)
+			user.OIDCRoles = appendUniqueRoles(user.OIDCRoles, entry.keycloak...)
+		}
 		items = append(items, managedUserJSON(user))
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"users": items})
@@ -359,6 +374,13 @@ func (s *Server) updateUser(response http.ResponseWriter, request *http.Request)
 		roles, err = resolveManagedRoles(request.Context(), transaction, *input.Roles)
 		if err != nil {
 			writeAPIError(response, request, http.StatusBadRequest, "INVALID_ROLES", "One or more roles are invalid.")
+			return
+		}
+		// Permissions come only from role grants, so an account left with none
+		// can sign in and reach nothing. Creation already refuses this; the
+		// update path has to refuse it too, unless Keycloak still grants a role.
+		if len(roles) == 0 && len(current.OIDCRoles) == 0 {
+			writeAPIError(response, request, http.StatusBadRequest, "ROLE_REQUIRED", "At least one role is required.")
 			return
 		}
 		externalSuperAdmin, err := managedRoleFromSource(
@@ -603,12 +625,20 @@ func (s *Server) deleteUser(response http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
+	// normalized_username is globally unique, so a soft delete that keeps the
+	// name makes the account impossible to recreate while the blocking row stays
+	// invisible in the console. Release the name and keep the original in the
+	// audit record and in the retired form.
+	retired := retiredUsername(current.Username, userID)
 	if _, err := transaction.ExecContext(
 		request.Context(),
 		`UPDATE users SET active=FALSE,deleted_at=CURRENT_TIMESTAMP,
+		        username=$2,normalized_username=$3,
 		        updated_at=CURRENT_TIMESTAMP
 		  WHERE id=$1`,
 		userID,
+		retired,
+		auth.NormalizeUsername(retired),
 	); err != nil {
 		s.internalError(response, request, err)
 		return
@@ -631,10 +661,27 @@ func (s *Server) deleteUser(response http.ResponseWriter, request *http.Request)
 		"user",
 		userID,
 		managedUserJSON(current),
-		map[string]any{"deleted": true},
+		map[string]any{
+			"deleted":           true,
+			"username_released": current.Username,
+			"retired_username":  retired,
+		},
 		"",
 	)
 	response.WriteHeader(http.StatusNoContent)
+}
+
+// retiredUsername keeps the original name readable while freeing it for reuse.
+// The '#' cannot appear in a valid account name, so a retired row can never
+// collide with a live one.
+func retiredUsername(username string, userID string) string {
+	suffix := "#deleted-" + strings.ReplaceAll(userID, "-", "")
+	// normalized_username has no length limit in the schema, but keeping the
+	// visible part bounded avoids surprising audit output.
+	if len(username) > 64 {
+		username = username[:64]
+	}
+	return username + suffix
 }
 
 func resolveManagedRoles(
