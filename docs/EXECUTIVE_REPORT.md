@@ -1,9 +1,9 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · EXECUTIVE BRIEF</p>
   <h1>임원 보고서</h1>
-  <p class="subtitle">Linux 자산 가시성 확보를 위한 v0.2.1 도입 가치, 통제 경계와 단계별 확산 제안</p>
+  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.1·Server v0.2.2 도입 가치, 통제 경계와 단계별 확산 제안</p>
   <div class="meta">
-    <p><strong>대상 릴리즈</strong> v0.2.1</p>
+    <p><strong>대상 릴리즈</strong> Agent v0.2.1 · Server v0.2.2</p>
     <p><strong>보고서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-29</p>
     <p><strong>의사결정 등급</strong> 제한 운영 승인 검토</p>

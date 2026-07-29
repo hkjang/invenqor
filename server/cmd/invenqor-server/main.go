@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -107,6 +108,36 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if bootstrapStatus.Required && processConfig.BootstrapAdmin != "" {
+		user, createErr := bootstrapManager.CreateInitialAdminFromConfig(
+			rootContext,
+			auth.InitialAdminInput{
+				Username:    processConfig.BootstrapAdmin,
+				Password:    processConfig.BootstrapAdminPassword,
+				DisplayName: processConfig.BootstrapAdmin,
+			},
+		)
+		switch {
+		case createErr == nil:
+			logger.Info(
+				"initial_admin_created_from_environment",
+				"username", user.Username,
+			)
+		case errors.Is(createErr, auth.ErrBootstrapComplete):
+			logger.Info("initial_admin_already_configured")
+		default:
+			return fmt.Errorf(
+				"create initial administrator from environment: %w",
+				createErr,
+			)
+		}
+		bootstrapStatus, err = bootstrapManager.Ensure(rootContext)
+		if err != nil {
+			return err
+		}
+	}
+	// Do not retain the plaintext startup secret after the one-time decision.
+	processConfig.BootstrapAdminPassword = ""
 	if bootstrapStatus.Required {
 		logger.Warn(
 			"initial_setup_required",

@@ -106,19 +106,6 @@ func (manager *BootstrapManager) CreateInitialAdmin(
 ) (User, error) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-	username, err := validateUsername(input.Username)
-	if err != nil {
-		return User{}, err
-	}
-	if err := manager.policy.Validate(input.Password); err != nil {
-		return User{}, err
-	}
-	if input.Email != "" {
-		address, err := mail.ParseAddress(input.Email)
-		if err != nil || !strings.EqualFold(address.Address, strings.TrimSpace(input.Email)) {
-			return User{}, errors.New("email address is invalid")
-		}
-	}
 	var expectedHash string
 	if err := manager.db.QueryRowContext(
 		ctx,
@@ -135,15 +122,112 @@ func (manager *BootstrapManager) CreateInitialAdmin(
 		subtle.ConstantTimeCompare(actualHash[:], expectedBytes) != 1 {
 		return User{}, ErrBootstrapToken
 	}
-	passwordHash, err := HashPassword(input.Password)
+	username, passwordHash, err := manager.prepareInitialAdmin(input)
 	if err != nil {
 		return User{}, err
 	}
+	return manager.createInitialAdmin(
+		ctx,
+		input,
+		username,
+		passwordHash,
+		`DELETE FROM server_metadata
+		 WHERE key = 'bootstrap_token_hash' AND value = $1`,
+		[]any{expectedHash},
+		sourceIP,
+		userAgent,
+		requestID,
+		"token",
+	)
+}
+
+// CreateInitialAdminFromConfig consumes the shared bootstrap claim without
+// requiring access to a pod-local token file. It is intended only for
+// process-start credentials supplied by the operator. The metadata DELETE is
+// the cross-pod claim: exactly one transaction can create the initial user.
+func (manager *BootstrapManager) CreateInitialAdminFromConfig(
+	ctx context.Context,
+	input InitialAdminInput,
+) (User, error) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	count, err := manager.userCount(ctx, manager.db)
+	if err != nil {
+		return User{}, err
+	}
+	if count != 0 {
+		_ = os.Remove(manager.TokenPath())
+		return User{}, ErrBootstrapComplete
+	}
+	username, passwordHash, err := manager.prepareInitialAdmin(input)
+	if err != nil {
+		return User{}, err
+	}
+	return manager.createInitialAdmin(
+		ctx,
+		input,
+		username,
+		passwordHash,
+		`DELETE FROM server_metadata WHERE key = 'bootstrap_token_hash'`,
+		nil,
+		"",
+		"server-startup",
+		"startup",
+		"environment",
+	)
+}
+
+func (manager *BootstrapManager) prepareInitialAdmin(
+	input InitialAdminInput,
+) (string, string, error) {
+	username, err := validateUsername(input.Username)
+	if err != nil {
+		return "", "", err
+	}
+	if err := manager.policy.Validate(input.Password); err != nil {
+		return "", "", err
+	}
+	if input.Email != "" {
+		address, err := mail.ParseAddress(input.Email)
+		if err != nil || !strings.EqualFold(address.Address, strings.TrimSpace(input.Email)) {
+			return "", "", errors.New("email address is invalid")
+		}
+	}
+	passwordHash, err := HashPassword(input.Password)
+	if err != nil {
+		return "", "", err
+	}
+	return username, passwordHash, nil
+}
+
+func (manager *BootstrapManager) createInitialAdmin(
+	ctx context.Context,
+	input InitialAdminInput,
+	username string,
+	passwordHash string,
+	claimQuery string,
+	claimArguments []any,
+	sourceIP string,
+	userAgent string,
+	requestID string,
+	method string,
+) (User, error) {
 	transaction, err := manager.db.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, fmt.Errorf("begin initial administrator transaction: %w", err)
 	}
 	defer transaction.Rollback()
+	claim, err := transaction.ExecContext(ctx, claimQuery, claimArguments...)
+	if err != nil {
+		return User{}, fmt.Errorf("claim initial administrator bootstrap: %w", err)
+	}
+	claimed, err := claim.RowsAffected()
+	if err != nil {
+		return User{}, fmt.Errorf("read initial administrator claim: %w", err)
+	}
+	if claimed != 1 {
+		return User{}, ErrBootstrapComplete
+	}
 	count, err := manager.userCount(ctx, transaction)
 	if err != nil {
 		return User{}, err
@@ -183,12 +267,6 @@ func (manager *BootstrapManager) CreateInitialAdmin(
 	); err != nil {
 		return User{}, fmt.Errorf("grant initial administrator role: %w", err)
 	}
-	if _, err := transaction.ExecContext(
-		ctx,
-		"DELETE FROM server_metadata WHERE key = 'bootstrap_token_hash'",
-	); err != nil {
-		return User{}, fmt.Errorf("consume bootstrap token: %w", err)
-	}
 	if err := manager.audit.Record(ctx, transaction, audit.Entry{
 		ActorType:    "bootstrap",
 		ActorID:      user.ID,
@@ -206,6 +284,7 @@ func (manager *BootstrapManager) CreateInitialAdmin(
 			"email":        user.Email,
 			"super_admin":  true,
 		},
+		Metadata: map[string]string{"method": method},
 	}); err != nil {
 		return User{}, err
 	}

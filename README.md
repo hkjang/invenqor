@@ -9,6 +9,8 @@ spool을 포함합니다.
 
 ```bash
 export POSTGRES_PASSWORD='change-me-with-a-long-random-value'
+export BOOTSTRAP_ADMIN='admin'
+export BOOTSTRAP_ADMIN_PASSWORD='ChangeMe-With-A-Strong-Password-42!'
 docker compose up -d --build
 open http://127.0.0.1:7070
 ```

@@ -20,31 +20,39 @@ const (
 // Config contains only process bootstrap settings. Runtime settings live in the
 // metadata database and are edited through the administrative API.
 type Config struct {
-	ListenAddress   string
-	BaseURL         string
-	StateDir        string
-	SQLitePath      string
-	PostgresDSN     string
-	DatabaseSchema  string
-	DatabaseTimeout time.Duration
-	ShutdownTimeout time.Duration
-	MasterKeyPath   string
-	UpdateDir       string
+	ListenAddress          string
+	BaseURL                string
+	StateDir               string
+	SQLitePath             string
+	PostgresDSN            string
+	DatabaseSchema         string
+	DatabaseTimeout        time.Duration
+	ShutdownTimeout        time.Duration
+	MasterKeyPath          string
+	UpdateDir              string
+	BootstrapAdmin         string
+	BootstrapAdminPassword string
 }
 
 func Load() (Config, error) {
 	stateDir := envOrDefault("INVENQOR_STATE_DIR", defaultStateDir)
+	bootstrapAdmin, bootstrapPassword, err := bootstrapCredentials()
+	if err != nil {
+		return Config{}, err
+	}
 	config := Config{
-		ListenAddress:   envOrDefault("INVENQOR_LISTEN_ADDRESS", defaultListenAddress),
-		BaseURL:         strings.TrimRight(os.Getenv("INVENQOR_BASE_URL"), "/"),
-		StateDir:        stateDir,
-		SQLitePath:      envOrDefault("INVENQOR_SQLITE_PATH", filepath.Join(stateDir, "invenqor.db")),
-		PostgresDSN:     strings.TrimSpace(os.Getenv("INVENQOR_POSTGRES_DSN")),
-		DatabaseSchema:  envOrDefault("INVENQOR_POSTGRES_SCHEMA", "public"),
-		DatabaseTimeout: durationEnv("INVENQOR_DATABASE_TIMEOUT", 5*time.Second),
-		ShutdownTimeout: durationEnv("INVENQOR_SHUTDOWN_TIMEOUT", 15*time.Second),
-		MasterKeyPath:   strings.TrimSpace(os.Getenv("INVENQOR_MASTER_KEY_FILE")),
-		UpdateDir:       envOrDefault("INVENQOR_UPDATE_DIR", filepath.Join(stateDir, "updates")),
+		ListenAddress:          envOrDefault("INVENQOR_LISTEN_ADDRESS", defaultListenAddress),
+		BaseURL:                strings.TrimRight(os.Getenv("INVENQOR_BASE_URL"), "/"),
+		StateDir:               stateDir,
+		SQLitePath:             envOrDefault("INVENQOR_SQLITE_PATH", filepath.Join(stateDir, "invenqor.db")),
+		PostgresDSN:            strings.TrimSpace(os.Getenv("INVENQOR_POSTGRES_DSN")),
+		DatabaseSchema:         envOrDefault("INVENQOR_POSTGRES_SCHEMA", "public"),
+		DatabaseTimeout:        durationEnv("INVENQOR_DATABASE_TIMEOUT", 5*time.Second),
+		ShutdownTimeout:        durationEnv("INVENQOR_SHUTDOWN_TIMEOUT", 15*time.Second),
+		MasterKeyPath:          strings.TrimSpace(os.Getenv("INVENQOR_MASTER_KEY_FILE")),
+		UpdateDir:              envOrDefault("INVENQOR_UPDATE_DIR", filepath.Join(stateDir, "updates")),
+		BootstrapAdmin:         bootstrapAdmin,
+		BootstrapAdminPassword: bootstrapPassword,
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -77,6 +85,9 @@ func (c Config) Validate() error {
 	if c.UpdateDir != "" && !filepath.IsAbs(c.UpdateDir) {
 		return errors.New("update directory must be absolute")
 	}
+	if (c.BootstrapAdmin == "") != (c.BootstrapAdminPassword == "") {
+		return errors.New("bootstrap administrator and password must be configured together")
+	}
 	if c.BaseURL != "" {
 		parsed, err := url.Parse(c.BaseURL)
 		if err != nil || parsed.Host == "" {
@@ -97,6 +108,58 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func bootstrapCredentials() (string, string, error) {
+	admin := firstTrimmedEnv(
+		"INVENQOR_BOOTSTRAP_ADMIN",
+		"BOOTSTRAP_ADMIN",
+		"bootstrap_admin",
+	)
+	password := firstEnv(
+		"INVENQOR_BOOTSTRAP_ADMIN_PASSWORD",
+		"BOOTSTRAP_ADMIN_PASSWORD",
+		"bootstrap_admin_password",
+	)
+	passwordFile := firstTrimmedEnv(
+		"INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+		"BOOTSTRAP_ADMIN_PASSWORD_FILE",
+		"bootstrap_admin_password_file",
+	)
+	if password != "" && passwordFile != "" {
+		return "", "", errors.New(
+			"bootstrap administrator password and password file cannot both be configured",
+		)
+	}
+	if passwordFile != "" {
+		if !filepath.IsAbs(passwordFile) {
+			return "", "", errors.New("bootstrap administrator password file must be absolute")
+		}
+		bytes, err := os.ReadFile(passwordFile)
+		if err != nil {
+			return "", "", fmt.Errorf("read bootstrap administrator password file: %w", err)
+		}
+		password = strings.TrimRight(string(bytes), "\r\n")
+	}
+	return admin, password, nil
+}
+
+func firstTrimmedEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func durationEnv(name string, fallback time.Duration) time.Duration {

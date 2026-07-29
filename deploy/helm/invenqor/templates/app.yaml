@@ -56,6 +56,12 @@ spec:
             - {name: INVENQOR_STATE_DIR, value: /var/lib/invenqor-server}
             - {name: INVENQOR_UPDATE_DIR, value: /var/lib/invenqor-updates}
             - {name: INVENQOR_MASTER_KEY_FILE, value: /run/secrets/invenqor/master.key}
+            {{- if .Values.bootstrapAdmin.username }}
+            - name: INVENQOR_BOOTSTRAP_ADMIN
+              value: {{ .Values.bootstrapAdmin.username | quote }}
+            - name: INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE
+              value: /run/secrets/invenqor-bootstrap/password
+            {{- end }}
             - name: INVENQOR_POSTGRES_DSN
               valueFrom:
                 secretKeyRef: {name: {{ .Values.postgresDsnSecret.name }}, key: {{ .Values.postgresDsnSecret.key }}}
@@ -74,6 +80,9 @@ spec:
             - {name: state, mountPath: /var/lib/invenqor-server}
             - {name: updates, mountPath: /var/lib/invenqor-updates}
             - {name: master-key, mountPath: /run/secrets/invenqor, readOnly: true}
+            {{- if .Values.bootstrapAdmin.username }}
+            - {name: bootstrap-admin-password, mountPath: /run/secrets/invenqor-bootstrap, readOnly: true}
+            {{- end }}
       volumes:
         - name: updates
           persistentVolumeClaim: {claimName: {{ .Release.Name }}-invenqor-updates}
@@ -81,6 +90,15 @@ spec:
           secret:
             secretName: {{ .Values.masterKeySecret.name }}
             defaultMode: 0440
+        {{- if .Values.bootstrapAdmin.username }}
+        - name: bootstrap-admin-password
+          secret:
+            secretName: {{ required "bootstrapAdmin.passwordSecret.name is required when bootstrapAdmin.username is set" .Values.bootstrapAdmin.passwordSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.bootstrapAdmin.passwordSecret.key }}
+                path: password
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: state

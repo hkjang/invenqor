@@ -1,7 +1,7 @@
 replicaCount: 2
 image:
   repository: ghcr.io/hkjang/invenqor-server
-  tag: "0.2.1"
+  tag: "0.2.2"
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP
@@ -19,6 +19,11 @@ postgresDsnSecret:
 masterKeySecret:
   name: invenqor-master-key
   key: master.key
+bootstrapAdmin:
+  username: ""
+  passwordSecret:
+    name: ""
+    key: password
 resources:
   requests: {cpu: 100m, memory: 128Mi}
   limits: {cpu: "1", memory: 512Mi}

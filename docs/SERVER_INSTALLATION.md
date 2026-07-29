@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 버전: v0.2.1 · 기준일: 2026-07-29
+대상 Server 버전: v0.2.2 · Agent 버전: v0.2.1 · 기준일: 2026-07-29
 
 ## 1. 운영 구조와 단일 포트
 
@@ -50,6 +50,8 @@ Snapshot, 변경 이력과 오류를 함께 보존해 화면 값의 출처를 �
 git clone https://github.com/hkjang/invenqor.git
 cd invenqor
 export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export BOOTSTRAP_ADMIN="admin"
+export BOOTSTRAP_ADMIN_PASSWORD="CorrectHorse!42"
 docker compose up -d --build
 curl -fsS http://127.0.0.1:7070/health/ready
 ```
@@ -62,17 +64,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.1.tar.gz`
-- `invenqor-0.2.1.tar.gz.sha256`
+- `invenqor-0.2.2.tar.gz`
+- `invenqor-0.2.2.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.1.tar.gz.sha256
-gzip -t invenqor-0.2.1.tar.gz
-docker load < invenqor-0.2.1.tar.gz
-docker image inspect invenqor-server:0.2.1 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.2.tar.gz.sha256
+gzip -t invenqor-0.2.2.tar.gz
+docker load < invenqor-0.2.2.tar.gz
+docker image inspect invenqor-server:0.2.2 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -81,6 +83,8 @@ docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 
 ```bash
 export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export BOOTSTRAP_ADMIN="admin"
+export BOOTSTRAP_ADMIN_PASSWORD="CorrectHorse!42"
 docker compose -f compose.offline.yaml up -d
 curl -fsS http://127.0.0.1:7070/health/ready
 ```
@@ -90,16 +94,54 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.1
+./scripts/build-offline-images.sh 0.2.2
 ```
 
 ## 5. 최초 관리자와 Agent 등록
 
-Server는 최초 기동 시 일회용 관리자 토큰을 상태 볼륨에 만듭니다.
+쉘이 없는 Distroless Server image에서는 환경변수로 초기 관리자를 자동 생성하는
+방식을 권장합니다. 다음 이름은 모두 지원하지만 `INVENQOR_` 접두사가 있는 이름을
+표준으로 사용하십시오.
 
 ```bash
-docker compose exec server \
-  cat /var/lib/invenqor-server/initial-admin.token
+docker run -d --name invenqor-server \
+  -p 7070:7070 \
+  -v invenqor-server-state:/var/lib/invenqor-server \
+  -e INVENQOR_BOOTSTRAP_ADMIN=admin \
+  -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
+  invenqor-server:0.2.2
+```
+
+Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
+환경변수로 전달합니다. 소문자 `bootstrap_admin`,
+`bootstrap_admin_password`도 직접 `docker run -e`로 전달할 수 있습니다.
+
+| 용도 | 표준 이름 | 호환 이름 |
+|---|---|---|
+| 관리자 ID | `INVENQOR_BOOTSTRAP_ADMIN` | `BOOTSTRAP_ADMIN`, `bootstrap_admin` |
+| 관리자 비밀번호 | `INVENQOR_BOOTSTRAP_ADMIN_PASSWORD` | `BOOTSTRAP_ADMIN_PASSWORD`, `bootstrap_admin_password` |
+| 비밀번호 파일 | `INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE` | `BOOTSTRAP_ADMIN_PASSWORD_FILE`, `bootstrap_admin_password_file` |
+
+비밀번호 값과 비밀번호 파일을 동시에 지정하면 안전을 위해 Server가 기동을
+거부합니다. 비밀번호 파일 경로는 컨테이너 내부의 절대 경로여야 하며 마지막
+개행 문자는 제거해서 사용합니다.
+
+이 값은 **사용자가 한 명도 없는 최초 DB에서만** Super Admin을 생성합니다.
+재시작하거나 여러 Pod가 동시에 기동해도 기존 계정과 비밀번호는 변경하지 않으며,
+성공 후 일회성 Token과 DB claim을 폐기합니다. 비밀번호는 정책 검증 후
+Argon2id hash로만 저장되고 로그·감사 내역에는 기록되지 않습니다.
+
+환경변수 값은 `docker inspect` 또는 일부 운영 도구에서 보일 수 있으므로 계정
+생성 후 Compose 환경에서 비밀번호를 제거하십시오. Kubernetes에서는
+`INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE`과 Secret volume 방식을 사용합니다.
+
+환경변수를 사용하지 않은 경우에는 기존 일회용 Token API도 유지됩니다. Token
+파일은 상태 볼륨을 마운트한 임시 진단 컨테이너에서 읽을 수 있습니다.
+
+```bash
+docker run --rm --volumes-from invenqor-server:ro \
+  --entrypoint /bin/sh postgres:17-alpine \
+  -c 'cat /var/lib/invenqor-server/initial-admin.token'
 ```
 
 ```bash
@@ -109,8 +151,7 @@ curl -X POST http://127.0.0.1:7070/api/v1/bootstrap/admin \
   -d '{"username":"admin","password":"CorrectHorse!42","display_name":"관리자"}'
 ```
 
-성공 즉시 토큰은 DB에서 폐기되어 재사용할 수 없습니다. 멀티 파드에서는 한
-Pod만 토큰 파일을 생성하지만 어느 Pod로 요청해도 같은 DB 해시로 검증됩니다.
+성공 즉시 토큰은 DB에서 폐기되어 재사용할 수 없습니다.
 
 관리 콘솔에서 Agent UUID를 등록하고 한 번만 노출되는 장비별 Bearer Token을
 Agent 설정에 넣습니다. 서버 DB에는 Token 원문이 아닌 SHA-256 해시만 저장됩니다.
@@ -133,8 +174,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.1/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -160,8 +201,8 @@ SysV와 OpenRC 정의도 패키지에 포함됩니다. 상태 디렉터리와 `a
 - 서명된 업데이트는 Agent가 주기적으로 확인·검증·스테이징하고 systemd path
   unit이 root helper를 한 번만 호출해 원자 교체합니다.
 
-사람이 반드시 수행할 작업은 최초 관리자 생성, Agent 최초 등록, TLS/서명
-개인키 보관, 백업 복구 훈련과 업데이트 승인입니다.
+사람이 반드시 수행할 작업은 초기 관리자 자격 증명의 안전한 전달·회수, Agent
+최초 등록, TLS/서명 개인키 보관, 백업 복구 훈련과 업데이트 승인입니다.
 
 ## 8. 서명된 Agent 자동 업데이트
 
@@ -210,8 +251,12 @@ head -c 32 /dev/urandom > master.key
 kubectl create secret generic invenqor-master-key --from-file=master.key
 kubectl create secret generic invenqor-database \
   --from-literal=dsn='postgres://user:password@host/db?sslmode=require'
+kubectl create secret generic invenqor-bootstrap-admin \
+  --from-literal=password='CorrectHorse!42'
 helm upgrade --install invenqor deploy/helm/invenqor \
   --set replicaCount=2 \
+  --set bootstrapAdmin.username=admin \
+  --set bootstrapAdmin.passwordSecret.name=invenqor-bootstrap-admin \
   --set updates.storageClassName='YOUR-RWX-STORAGE-CLASS'
 ```
 
@@ -223,6 +268,11 @@ RBAC, Agent 상태와 감사 로그는 PostgreSQL에 있으므로 어느 Pod로 
 클러스터는 업데이트 공유 저장소를 별도 Object Storage 구현으로 대체하기
 전까지 replica 1로 운영해야 합니다.
 
+Chart는 관리자 비밀번호 Secret을
+`/run/secrets/invenqor-bootstrap/password`에 읽기 전용으로 마운트하고
+`INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE`로 읽습니다. 초기 계정 생성이 확인되면
+Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기하십시오.
+
 ## 10. 상태 확인, 백업과 복구
 
 | 경로 | 정상 기준 |
@@ -230,7 +280,7 @@ RBAC, Agent 상태와 감사 로그는 PostgreSQL에 있으므로 어느 Pod로 
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.1`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.2`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -239,7 +289,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.1 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.2 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 

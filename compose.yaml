@@ -18,6 +18,8 @@ services:
       INVENQOR_LISTEN_ADDRESS: 0.0.0.0:7070
       INVENQOR_STATE_DIR: /var/lib/invenqor-server
       INVENQOR_POSTGRES_DSN: postgres://invenqor:${POSTGRES_PASSWORD}@postgres:5432/invenqor?sslmode=disable
+      INVENQOR_BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-}
+      INVENQOR_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     volumes:
       - server-state:/var/lib/invenqor-server
     ports:
