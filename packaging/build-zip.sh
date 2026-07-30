@@ -23,6 +23,27 @@ trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 NAME="invenqor-agent-windows-$ARCH"
 PACKAGE="$STAGE/$NAME"
 
+# The installer runs elevated on machines nobody can debug remotely, and it runs
+# under Windows PowerShell 5.1, which disagrees with the PowerShell 7 a build
+# machine is likely to have. Verify before packaging rather than after shipping.
+# Silence is never a pass: if no PowerShell is available the skip is announced.
+VERIFY="$ROOT/packaging/windows/verify-scripts.ps1"
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -File "$VERIFY"
+elif command -v docker >/dev/null 2>&1 && [ "${SKIP_SCRIPT_VERIFY:-}" != "1" ]; then
+    # One line: a shell line-continuation inside this quoted PowerShell would
+    # reach PowerShell as a literal backslash. Errors are not redirected, so a
+    # failure to install the analyzer is not mistaken for a clean result.
+    docker run --rm -v "$ROOT:/work:ro" mcr.microsoft.com/powershell:latest pwsh -NoProfile -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Force -Scope CurrentUser -AllowClobber | Out-Null; & /work/packaging/windows/verify-scripts.ps1 -Path /work/packaging/windows/*.ps1"
+else
+    echo "WARNING: neither pwsh nor docker is available, so the Windows scripts" >&2
+    echo "         were NOT verified against Windows PowerShell 5.1." >&2
+    echo "         Set SKIP_SCRIPT_VERIFY=1 to acknowledge this deliberately." >&2
+    if [ "${SKIP_SCRIPT_VERIFY:-}" != "1" ]; then
+        exit 1
+    fi
+fi
+
 mkdir -p "$PACKAGE/bin" "$PACKAGE/config" "$PACKAGE/scripts"
 install -m 0755 "$ROOT/$TARGET_DIR/$TARGET/release/invenqor-agent.exe" "$PACKAGE/bin/"
 install -m 0644 "$ROOT/config/config.windows.toml" "$PACKAGE/config/config.toml"

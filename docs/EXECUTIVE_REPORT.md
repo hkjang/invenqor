@@ -1,16 +1,16 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · EXECUTIVE BRIEF</p>
   <h1>임원 보고서</h1>
-  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.10·Server v0.2.10 도입 가치, 통제 경계와 단계별 확산 제안</p>
+  <p class="subtitle">Linux 자산 가시성 확보를 위한 Agent v0.2.11·Server v0.2.11 도입 가치, 통제 경계와 단계별 확산 제안</p>
   <div class="meta">
-    <p><strong>대상 릴리즈</strong> Agent v0.2.10 · Server v0.2.10</p>
+    <p><strong>대상 릴리즈</strong> Agent v0.2.11 · Server v0.2.11</p>
     <p><strong>보고서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-30</p>
     <p><strong>의사결정 등급</strong> 제한 운영 승인 검토</p>
   </div>
 </div>
 
-## v0.2.10 중앙 자산 관리 확장 요약
+## v0.2.11 중앙 자산 관리 확장 요약
 
 이번 릴리즈는 Linux 수집 Agent를 중앙 자산 Intelligence 서비스로 확장합니다.
 PostgreSQL 기반 대표 자산, 원천 추적, 변경 이력, 관계, 안전한 Query DSL과
@@ -49,7 +49,7 @@ CMDB·자동화·AI 활용을 위해 자산 REST API와 읽기 전용 MCP 도구
 
 ## 1. 의사결정 요약
 
-Invenqor Agent v0.2.10는 Linux 서버의 운영체제, 하드웨어 자원, 네트워크,
+Invenqor Agent v0.2.11는 Linux 서버의 운영체제, 하드웨어 자원, 네트워크,
 프로세스, 설치 소프트웨어, 서비스, 계정과 컨테이너 환경을 비특권 방식으로
 수집하는 경량 에이전트입니다. 외부 언어 런타임 없이 x86_64와 aarch64에서
 실행되고, 중앙으로는 outbound HTTPS만 사용합니다.
@@ -93,7 +93,7 @@ Invenqor Agent는 이 문제를 해결하기 위한 **신뢰 가능한 원천 �
 데이터를 경영·보안 의사결정으로 바꾸려면 중앙 정규화, 정책, 대시보드와
 업무 프로세스가 추가로 필요합니다.
 
-## 3. v0.2.10가 제공하는 범위
+## 3. v0.2.11가 제공하는 범위
 
 <div class="kpi-grid">
   <div class="kpi"><strong>10개</strong>기본 수집기 영역</div>
@@ -173,13 +173,13 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 | 데이터 | CMDB 핵심 필드 일치율 | 표본 검증 목표 이상 |
 
 효과 금액은 현재 인력 단가, 서버 수, 감사 빈도, 사고 조사 시간을 입력해
-산출해야 합니다. v0.2.10 자료만으로 절감액이나 ROI를 단정하지 않습니다.
+산출해야 합니다. v0.2.11 자료만으로 절감액이나 ROI를 단정하지 않습니다.
 
 ## 6. 위험과 통제 계획
 
 ### 6.1 주요 위험
 
-| 위험 | 영향 | v0.2.10 상태 | 필수 통제 |
+| 위험 | 영향 | v0.2.11 상태 | 필수 통제 |
 |---|---|---|---|
 | 중앙 시스템 장애 | 최신 데이터 지연 | DB spool·자동 재처리 | PostgreSQL HA·백업·SLO 운영 |
 | 자산정보 과다 노출 | 공격 표면·개인정보 유출 | 계정/네트워크/프로세스 수집 | 분류, RBAC, 암호화, 조회 감사, 보존 |
@@ -279,7 +279,7 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 
 ## 10. 릴리즈 품질 증적
 
-Agent v0.2.10·Server v0.2.10 릴리즈 시 확인된 항목:
+Agent v0.2.11·Server v0.2.11 릴리즈 시 확인된 항목:
 
 - Rust format 검사
 - Clippy 경고 0 기준
@@ -315,7 +315,7 @@ Agent v0.2.10·Server v0.2.10 릴리즈 시 확인된 항목:
 
 ## 12. 결론
 
-Invenqor Agent v0.2.10는 Linux 자산 가시성의 가장 아래층인 **현장 수집과 신뢰성
+Invenqor Agent v0.2.11는 Linux 자산 가시성의 가장 아래층인 **현장 수집과 신뢰성
 있는 전달**에 집중한 초기 릴리즈입니다. 비특권·outbound-only·부분 실패 격리·
 내구성 큐라는 설계는 통제된 Pilot을 시작하기에 합리적입니다.
 

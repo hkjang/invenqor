@@ -25,7 +25,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
+# Not $IsWindows: it does not exist in Windows PowerShell 5.1, and under
+# Set-StrictMode reading it is an error. See install.ps1.
+if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
     throw 'uninstall.ps1 removes a Windows service and must run on Windows.'
 }
 

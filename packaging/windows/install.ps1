@@ -34,7 +34,13 @@ function Assert-Windows {
     # WindowsIdentity throws a raw PlatformNotSupportedException on PowerShell for
     # Linux or macOS, which is a confusing way to learn that this is a Windows
     # installer.
-    if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') {
+    #
+    # $IsWindows must not be used for this: it exists only in PowerShell 6 and
+    # later, and Set-StrictMode turns reading an unset variable into a hard error -
+    # so on Windows PowerShell 5.1, the shell that ships with Windows and the one
+    # an operator actually runs, the guard itself failed and nothing installed.
+    # OSVersion.Platform is present in every edition on every platform.
+    if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') {
         throw 'install.ps1 installs a Windows service and must run on Windows.'
     }
 }
@@ -47,7 +53,7 @@ function Assert-Elevated {
     }
 }
 
-function Restrict-Acl {
+function Protect-Directory {
     param([Parameter(Mandatory)][string] $Path)
     # The state directory holds the device credential and the configuration can
     # hold an enrollment token, so neither may be readable by ordinary users.
@@ -102,8 +108,8 @@ if (Test-Path -LiteralPath $configPath) {
 
 # Applied on every run, including upgrades: a configuration copied in by hand is
 # the usual way these end up readable by everyone.
-Restrict-Acl -Path $DataRoot
-Restrict-Acl -Path $InstallRoot
+Protect-Directory -Path $DataRoot
+Protect-Directory -Path $InstallRoot
 
 if (-not $existing) {
     Write-Host "Registering the $ServiceName service"
