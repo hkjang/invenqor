@@ -3,7 +3,7 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.9 · Server v0.2.9</p>
+    <p><strong>대상 버전</strong> Agent v0.2.10 · Server v0.2.10</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-30</p>
     <p><strong>문서 등급</strong> 공개</p>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.9는 Server v0.2.9와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.10는 Server v0.2.10와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -105,8 +105,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -190,7 +190,56 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.9`입니다.
+예상 출력은 `invenqor-agent 0.2.10`입니다.
+
+## 4.4 Windows에 설치하기
+
+Windows는 별도 배포본을 사용합니다. `invenqor-agent-windows-x86_64.zip`을 받아
+체크섬을 확인하고, 압축을 푼 뒤 **관리자 권한 PowerShell**에서 설치합니다.
+
+```powershell
+(Get-FileHash invenqor-agent-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+Get-Content invenqor-agent-windows-x86_64.zip.sha256   # 두 값이 같아야 합니다
+Expand-Archive invenqor-agent-windows-x86_64.zip -DestinationPath .
+Set-Location invenqor-agent-windows-x86_64
+.\scripts\install.ps1
+```
+
+설치되는 위치:
+
+| 경로 | 내용 |
+|---|---|
+| `%ProgramFiles%\Invenqor\invenqor-agent.exe` | 실행 파일 |
+| `%ProgramData%\Invenqor\config.toml` | 설정 파일 |
+| `%ProgramData%\Invenqor\state\` | 식별자와 미전송 큐 |
+
+Server 주소를 설정하고 재시작합니다. TOML의 작은따옴표 문자열은 이스케이프가
+필요 없으므로 Windows 경로를 그대로 적을 수 있습니다.
+
+```powershell
+notepad "$env:ProgramData\Invenqor\config.toml"
+Restart-Service invenqor-agent
+```
+
+상태 확인:
+
+```powershell
+Get-Service invenqor-agent
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
+  --config "$env:ProgramData\Invenqor\config.toml" --diagnose
+```
+
+로그는 이벤트 로그가 아니라 서비스의 표준 오류로 나가므로, 서비스 상태와
+`--status`, `--diagnose`로 확인합니다.
+
+```powershell
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
+  --config "$env:ProgramData\Invenqor\config.toml" --status
+```
+
+이후 절의 명령은 Linux 기준입니다. Windows에서는 실행 파일 경로와
+`--config` 값만 위의 경로로 바꿔 같은 방식으로 사용하십시오. 서비스 제어는
+`Restart-Service` / `Stop-Service` / `Start-Service`를 사용합니다.
 
 ## 5. 최초 설정
 
@@ -283,7 +332,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.9 registration diagnosis at 2026-07-30T09:12:44Z
+invenqor-agent 0.2.10 registration diagnosis at 2026-07-30T09:12:44Z
   host          app-web-01
   agent-id      d8d847a5-7a75-48bc-8ee8-c8e1af94f74c
   config        /etc/invenqor-agent/config.toml
@@ -297,7 +346,7 @@ invenqor-agent 0.2.9 registration diagnosis at 2026-07-30T09:12:44Z
   [PASS] transport encryption          HTTPS is configured
   [PASS] name resolution               inventory.example resolves to 10.10.4.20:7070
   [PASS] server reachability           GET /health/ready answered READY
-  [PASS] server identity               Invenqor Server 0.2.9 (pod invenqor-0, database POSTGRES)
+  [PASS] server identity               Invenqor Server 0.2.10 (pod invenqor-0, database POSTGRES)
   [PASS] observed source address       the Server sees this host as 10.20.7.31
   [PASS] registration policy           mode open, network any: this host may register
   [PASS] device credential             accepted by the Server as agent d8d847a5… (auto_bearer)
@@ -391,7 +440,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.9 on app-web-01
+invenqor-agent 0.2.10 on app-web-01
   updated       2026-07-30T09:14:02Z
   server.url    https://inventory.example:7070
   registration  failed (the Server rejected or could not be reached for registration)

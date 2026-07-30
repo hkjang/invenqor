@@ -4,7 +4,15 @@ pub mod diagnose;
 pub mod health;
 pub mod identity;
 pub mod model;
+pub mod platform;
 pub mod scheduler;
+pub mod smbios;
 pub mod storage;
 pub mod transport;
 pub mod updater;
+pub mod windows_inventory;
+
+#[cfg(windows)]
+pub mod windows_service;
+#[cfg(windows)]
+pub mod windows_sys;

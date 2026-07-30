@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "invenqor-agent"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "base64",

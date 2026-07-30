@@ -1,14 +1,27 @@
+#[cfg(not(windows))]
 mod accounts;
+#[cfg(not(windows))]
 mod command;
+#[cfg(not(windows))]
 mod containers;
+#[cfg(not(windows))]
 mod cpu;
+#[cfg(not(windows))]
 mod disk;
+#[cfg(not(windows))]
 mod memory;
+#[cfg(not(windows))]
 mod network;
+#[cfg(not(windows))]
 mod os;
+#[cfg(not(windows))]
 mod packages;
+#[cfg(not(windows))]
 mod process;
+#[cfg(not(windows))]
 mod services;
+#[cfg(windows)]
+mod win;
 
 use crate::config::CollectorConfig;
 use crate::model::{unix_time, AssetRecord, CollectionError, Snapshot};
@@ -18,12 +31,21 @@ use std::time::Instant;
 
 pub trait Collector: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Whether this host can answer this collector at all. A collector that
+    /// cannot run reports itself as an error rather than as an empty result,
+    /// because an empty result would read as "nothing installed".
     fn is_supported(&self) -> bool {
-        cfg!(target_os = "linux")
+        cfg!(target_os = "linux") || cfg!(windows)
     }
     fn collect(&self, collected_at: u64) -> Result<Vec<AssetRecord>>;
 }
 
+#[cfg(windows)]
+pub fn configured(config: &CollectorConfig) -> Vec<Arc<dyn Collector>> {
+    win::configured(config)
+}
+
+#[cfg(not(windows))]
 pub fn configured(config: &CollectorConfig) -> Vec<Arc<dyn Collector>> {
     let mut result: Vec<Arc<dyn Collector>> = Vec::new();
     macro_rules! enabled {
@@ -146,6 +168,7 @@ fn asset_id(category: &str, payload: &serde_json::Value) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn read_trimmed(path: impl AsRef<std::path::Path>) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()

@@ -1,0 +1,65 @@
+[server]
+# REQUIRED for registration. Set the Server scheme, host and port only - no
+# path. Until this is set the Agent collects into its durable local queue, does
+# not register, and sends nothing; it logs a warning saying so on every start.
+# Verify the result with: invenqor-agent.exe --diagnose
+# url = "https://inventory.example.internal:7070"
+# bearer_token = "replace-with-provisioned-device-token"
+# URL-only zero-touch registration is the default. The Agent exchanges its
+# locally generated device claim for a device token and stores both under
+# state_dir. If the Server requires a fleet enrollment token, configure the
+# same optional token below; bearer_token is unnecessary in either mode.
+# enrollment_token_file = 'C:\ProgramData\Invenqor\enrollment.token'
+# enrollment_token = "replace-with-at-least-32-random-characters"
+# A private root CA in PEM form. Windows does not read its own certificate store
+# for this - point at the PEM file so the trust decision stays explicit.
+# ca_file = 'C:\ProgramData\Invenqor\ca.pem'
+# A single PEM containing the client certificate chain and private key.
+# client_identity_pem = 'C:\ProgramData\Invenqor\device.pem'
+# Private/internal HTTP works without this flag. Set it only to permit public
+# HTTP in an isolated test network. Production transport must use TLS.
+allow_insecure_http = false
+timeout_seconds = 30
+
+[agent]
+# Single-quoted TOML strings are literal, so a Windows path needs no escaping.
+state_dir = 'C:\ProgramData\Invenqor\state'
+interval_seconds = 900
+heartbeat_seconds = 300
+max_backoff_seconds = 3600
+max_queue_bytes = 104857600
+
+[updates]
+# Signed updates are opt-in. The pinned Ed25519 public key is base64 encoded.
+# On Windows the swap renames the running executable aside and the service is
+# restarted by the Service Control Manager, so no separate helper is installed.
+enabled = false
+channel = "stable"
+check_interval_seconds = 21600
+# public_key = "base64-ed25519-public-key"
+install_path = 'C:\Program Files\Invenqor\invenqor-agent.exe'
+
+[collectors]
+os = true
+cpu = true
+memory = true
+disk = true
+network = true
+# Installed software is read from the Uninstall registry keys in all three
+# scopes: the 64-bit machine view, the 32-bit view under WOW6432Node, and each
+# loaded user hive. Win32_Product is not used - querying it makes Windows
+# Installer run a consistency check on every package.
+packages = true
+# Services carry their start type and the account they run as, not only whether
+# they are running now.
+services = true
+# Local accounts carry their RID and local group membership, so a privileged
+# account is identifiable.
+accounts = true
+containers = true
+
+# Command lines can contain credentials. Windows service and scheduled-task
+# command lines routinely do. Keep this disabled unless the data classification
+# and gateway access policy explicitly permit collection.
+include_process_cmdline = false
+max_processes = 10000

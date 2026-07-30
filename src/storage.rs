@@ -3,9 +3,8 @@ use crate::model::{AssetChange, AssetRecord, ChangeKind, Envelope, Snapshot};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -89,7 +88,7 @@ impl StateStore {
 
     pub fn set_previous_inventory(&self, records: &[AssetRecord]) -> Result<()> {
         let bytes = serde_json::to_vec(records)?;
-        atomic_write(&self.root.join("inventory.json"), &bytes, 0o600)
+        atomic_write(&self.root.join("inventory.json"), &bytes)
     }
 
     pub fn effective_inventory(
@@ -163,7 +162,7 @@ impl StateStore {
     }
 
     pub fn set_previous_hash(&self, value: &str) -> Result<()> {
-        atomic_write(&self.root.join("snapshot.sha256"), value.as_bytes(), 0o600)
+        atomic_write(&self.root.join("snapshot.sha256"), value.as_bytes())
     }
 
     pub fn last_heartbeat(&self) -> u64 {
@@ -176,7 +175,6 @@ impl StateStore {
         atomic_write(
             &self.root.join("last-heartbeat"),
             value.to_string().as_bytes(),
-            0o600,
         )
     }
 
@@ -197,7 +195,7 @@ impl StateStore {
         let path = self
             .queue
             .join(format!("{:039}-{}.jsonl", *sequence, envelope.event_id));
-        atomic_write(&path, &bytes, 0o600)?;
+        atomic_write(&path, &bytes)?;
         Ok(path)
     }
 
@@ -288,7 +286,7 @@ impl StateStore {
     pub fn write_status(&self, report: &StatusReport) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(report)?;
         bytes.push(b'\n');
-        atomic_write(&self.status_path(), &bytes, 0o600)
+        atomic_write(&self.status_path(), &bytes)
     }
 
     pub fn read_status(&self) -> Option<StatusReport> {
@@ -307,7 +305,7 @@ impl StateStore {
             secret: secret.to_string(),
         };
         let bytes = serde_json::to_vec(&credential)?;
-        atomic_write(&self.root.join(name), &bytes, 0o600)
+        atomic_write(&self.root.join(name), &bytes)
     }
 }
 
@@ -326,21 +324,14 @@ fn same_asset(left: &AssetRecord, right: &AssetRecord) -> bool {
 }
 
 fn create_secure_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("secure {}", path.display()))
+    crate::platform::create_private_dir(path)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".tmp-{}", std::process::id()));
     let temporary = PathBuf::from(temporary);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
+    let mut file = crate::platform::create_private_file(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
@@ -423,12 +414,19 @@ mod tests {
             Some("ivq_at_device-token")
         );
         assert!(store.device_token("https://other.example:7070").is_none());
-        let mode = fs::metadata(root.join("device-credential.json"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        // A stored device credential must not be world-readable. Windows has no
+        // mode; there the installer's ACL on the state directory is what keeps it
+        // private, and the directory is checked by --diagnose instead.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(root.join("device-credential.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "the device credential must stay private");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

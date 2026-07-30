@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.9 · Server v0.2.9</p>
+    <p><strong>대상 버전</strong> Agent v0.2.10 · Server v0.2.10</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-30</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.9 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.10 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -31,7 +31,7 @@
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.9를 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.10를 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +40,7 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.9에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.10에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -66,6 +66,49 @@ Linux 호스트
 6. **최소 외부 명령**: `rpm`, `systemctl`, `rc-status`만 고정 인자로 호출합니다.
 
 ## 2. 지원 기준과 사전 조건
+
+### 2.0 Windows 배포
+
+Windows용 Agent는 `invenqor-agent-windows-x86_64.zip`으로 배포합니다. Linux판과
+같은 수집 스키마·자산 키·등록 절차·서명 업데이트를 사용하므로 혼재 환경에서
+Server 설정을 나눌 필요가 없습니다.
+
+| 항목 | 값 |
+|---|---|
+| 대상 | Windows 10/11, Windows Server 2016 이상, x86_64 |
+| 설치 경로 | `%ProgramFiles%\Invenqor\invenqor-agent.exe` |
+| 설정 | `%ProgramData%\Invenqor\config.toml` |
+| 상태·큐 | `%ProgramData%\Invenqor\state` |
+| 서비스 | `invenqor-agent`, LocalSystem, 지연 자동 시작 |
+| 네트워크 | 단일 HTTPS outbound. 수신 포트를 열지 않습니다 |
+| 외부 의존 | 없음. 정적 링크 단일 실행 파일이며 .NET·VC++ 재배포 패키지가 필요하지 않습니다 |
+
+LocalSystem으로 실행하는 이유는 권한 확대가 아니라 수집 범위입니다. Service
+Control Manager 열람, 모든 로드된 사용자 하이브의 설치 소프트웨어, 네트워크
+어댑터 구성은 하위 권한 계정에서 읽을 수 없습니다.
+
+설치:
+
+```powershell
+# 관리자 PowerShell, 압축을 푼 디렉터리에서
+.\scripts\install.ps1
+notepad "$env:ProgramData\Invenqor\config.toml"   # [server] url 설정
+Restart-Service invenqor-agent
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
+  --config "$env:ProgramData\Invenqor\config.toml" --diagnose
+```
+
+`install.ps1`은 멱등입니다. 다시 실행하면 바이너리만 교체하고 설정과 미전송 큐는
+유지하며 권한을 복구합니다. 두 디렉터리는 `icacls`로 SYSTEM과 Administrators로
+제한합니다. 상태 디렉터리에는 장비 자격 증명이 있고 설정 파일에는 등록 Token이
+들어갈 수 있으므로 일반 사용자가 읽을 수 있으면 안 됩니다. `--diagnose`는 이
+조건을 점검해 일반 사용자가 읽을 수 있으면 실패로 보고합니다.
+
+WMI는 사용하지 않습니다. 통상적인 방법이지만 COM 아파트먼트와 Winmgmt 서비스
+의존이 생기고, 필요한 값은 모두 레지스트리·Win32·SCM에서 얻을 수 있습니다.
+특히 `Win32_Product`는 조회할 때마다 설치된 모든 패키지에 Windows Installer
+정합성 검사를 유발하므로 사용하지 않고, 설치 소프트웨어는 Uninstall 레지스트리
+키에서 읽습니다.
 
 ### 2.1 플랫폼 기준
 
@@ -104,13 +147,13 @@ Linux 호스트
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.9는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.10는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -407,7 +450,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.9 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.10 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -473,7 +516,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.9에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.10에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -487,7 +530,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.9의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.10의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -574,6 +617,41 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 컨테이너, Pod, 이미지, 레지스트리, Kubernetes 리소스를 열거하지 않습니다.
 런타임 소켓에 접속하지 않고 존재 여부만 봅니다.
 
+## 6.12 Windows 수집 차이
+
+Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 다릅니다.
+
+| 카테고리 | Windows 원천 | Linux와 다른 필드 |
+|---|---|---|
+| `system` | `CurrentVersion` 레지스트리, SMBIOS | `os_build`(UBR 포함), `edition_id`, `install_type`, `domain_role`, `firmware_uuid` |
+| `hardware.cpu` | `CentralProcessor\0` 레지스트리, `GetNativeSystemInfo` | `megahertz` |
+| `hardware.memory` | `GlobalMemoryStatusEx` | `page_file_total_bytes`, `page_file_available_bytes` |
+| `hardware.filesystem` | `GetLogicalDriveStringsW`, `GetVolumeInformationW` | `mountpoint`은 `C:\` 형태, `drive_type`, `label` |
+| `network.interface` | `GetAdaptersAddresses` | `interface_type`, `dns_suffix`, `operational` |
+| `process` | `CreateToolhelp32Snapshot` | `start_ticks`는 생성 FILETIME |
+| `software.package` | Uninstall 레지스트리 3개 범위 | `publisher`, `scope`, `installer`, `install_location` |
+| `service` | Service Control Manager + 서비스 레지스트리 키 | `start_type`, `run_as`, `delayed_auto_start`, `image_path` |
+| `account.user` | `NetUserEnum` 레벨 3, `NetLocalGroupGetMembers` | `uid`는 RID, `groups`, `administrator`, `disabled`, `locked_out` |
+| `container.environment` | 런타임 서비스 등록 | `runtimes`, `windows_containers_feature` |
+
+판단 근거가 되는 세 가지를 특히 확인하십시오.
+
+- **운영체제 이름**: 모든 Windows 11 호스트는 레지스트리 `ProductName`에
+  "Windows 10 …"을 보고합니다. Microsoft가 값을 갱신하지 않았기 때문이며, 이
+  값을 그대로 쓰는 인벤토리는 Windows 11 전체를 Windows 10으로 집계합니다.
+  Agent는 빌드 번호 22000 이상에서 이름을 교정합니다. Server 계열은 빌드 번호
+  체계를 공유하므로 교정 대상이 아닙니다.
+- **설치 소프트웨어 범위**: 64비트 machine 뷰만 읽으면 32비트 제품(WOW6432Node)
+  과 사용자별 설치가 모두 누락됩니다. 세 범위를 모두 읽고 `scope` 필드로
+  구분합니다. Windows가 프로그램 목록에서 숨기는 항목 — `SystemComponent`,
+  업데이트·핫픽스 `ReleaseType`, 번들 설치 프로그램의 자식 항목 — 은 제외합니다.
+  제외하지 않으면 패치된 서버에서 수천 건의 핫픽스가 실제 소프트웨어를 덮습니다.
+- **서비스**: 현재 상태(`state`)와 시작 유형(`start_type`)을 함께 보고합니다.
+  멈춰 있는 서비스가 멈춰 있어야 하는 것인지는 상태만으로 답할 수 없습니다.
+
+프로세스 명령행은 Windows에서도 기본 비수집입니다. 서비스와 예약 작업의 명령행에
+자격 증명이 들어가는 경우가 흔합니다.
+
 ## 7. 수집 실패와 변경 판정
 
 수집기는 병렬 blocking task로 실행되고 결과와 오류는 이름순/ID순으로 정렬됩니다.
@@ -628,7 +706,7 @@ NSS 외부 계정은 `/etc/passwd`에 정적으로 나타나지 않으면 포함
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.9
+User-Agent: invenqor-agent/0.2.10
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -658,7 +736,7 @@ Authorization: Bearer <token>   # 구성한 경우
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.9는 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.10는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -828,7 +906,7 @@ DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉
 
 ### 12.2 업그레이드
 
-v0.2.9는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
+v0.2.10는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에 배포하지 않고
 오프라인 환경에서 보관합니다. Agent는 더 높은 버전(또는 `allow_downgrade`가
 지정된 릴리즈), 일치하는 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이
@@ -855,6 +933,11 @@ OpenRC와 SysV는 서비스 시작 시 적용합니다.
    않으면 검증 없이 게시되며 콘솔이 그 사실을 표시합니다.
 3. 콘솔 **운영 → Agent 업데이트**에서 채널·아키텍처와 rollout 비율(초기 10%)로
    게시합니다. `.sig` 파일은 그대로 올릴 수 있습니다.
+
+   Windows판은 `os`를 `windows`로 지정해 별도로 게시합니다. 릴리즈는 버전·OS·
+   아키텍처로 구분되므로 같은 버전의 Windows판과 Linux판이 공존하고, 각 Agent는
+   자신의 플랫폼 릴리즈만 받습니다. 서명은 플랫폼별 실행 파일 각각에 대해
+   따로 만들어야 합니다.
 4. canary에서 설치·수집·전송·재시작을 확인합니다. 특정 한 대를 즉시 확인하려면
    해당 호스트에서 `--update-now`를 실행합니다.
 5. 콘솔의 적용 대수와 fleet 버전 분포, 중앙 오류율을 확인한 뒤 25 → 50 → 100%로
@@ -863,6 +946,28 @@ OpenRC와 SysV는 서비스 시작 시 적용합니다.
    따라 되돌립니다.
 
 상태 디렉터리와 `agent-id`를 유지해야 중앙에서 같은 장비로 연속 인식합니다.
+
+#### Windows에서의 적용 경로
+
+Windows는 실행 중인 실행 파일을 덮어쓰거나 삭제할 수 없지만 **이름을 바꿀 수는
+있습니다**. 이동된 파일에서 실행이 계속되므로, Agent는 기존 바이너리를
+`invenqor-agent.exe.previous`로 옮기고 새 파일을 원래 경로에 놓습니다. 그 다음
+새 바이너리를 실행해 약속한 버전을 보고하는지 확인하고, 실패하면 폐기하고 실행
+중인 바이너리를 그대로 둡니다.
+
+교체 후에는 재시작이 필요합니다. 서비스는 스스로를 중지하고 시작할 수 없으므로
+(SCM은 중지 중인 서비스의 시작을 처리하지 않습니다) 전용 종료 코드로 중지하고
+`install.ps1`이 설정한 복구 동작이 새 바이너리로 되살립니다.
+
+```powershell
+sc.exe qfailure invenqor-agent     # 복구 동작 확인
+Get-Service invenqor-agent | Select-Object Status, StartType
+```
+
+콘솔에서 `--update-now`를 실행하면 교체 후 SCM으로 서비스를 직접 재시작합니다.
+바이러스 검사기가 새로 쓴 파일을 잠시 잠그는 일이 흔하므로 이름 변경은 몇 초간
+재시도합니다. 릴리즈는 `os`와 아키텍처로 구분되므로 같은 버전의 Windows판과
+Linux판이 공존하고, Agent는 자신의 플랫폼 릴리즈만 받습니다.
 
 ### 12.3 롤백
 
@@ -928,7 +1033,7 @@ sudo chmod 0640 /etc/invenqor-agent/config.toml
 sudo systemctl restart invenqor-agent
 ```
 
-v0.2.9 이후 Agent는 이 상태에서 기본값으로 넘어가지 않고 조치 명령과 함께 기동을
+v0.2.10 이후 Agent는 이 상태에서 기본값으로 넘어가지 않고 조치 명령과 함께 기동을
 거부하며, `--diagnose`는 서비스 계정이 읽을 수 있는지까지 판정합니다.
 
 ### 13.2 전송 실패

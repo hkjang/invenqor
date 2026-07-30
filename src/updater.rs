@@ -6,9 +6,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use reqwest::{Certificate, Client, Identity, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -65,6 +64,15 @@ pub async fn run_checker(config: Config, agent_id: String) {
     }
 }
 
+/// The platform name the Server publishes releases under.
+pub fn update_os() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
 /// Spreads a fleet across the check interval deterministically.
 pub fn stable_offset(agent_id: &str, interval_seconds: u64) -> u64 {
     if interval_seconds <= 1 {
@@ -95,11 +103,12 @@ pub async fn check_and_stage(config: &Config, agent_id: &str) -> Result<Option<S
         .clone()
         .or_else(|| store.device_token(base));
     let url = format!(
-        "{}/v1/agent/updates?agent_id={}&current_version={}&channel={}&os=linux&arch={}",
+        "{}/v1/agent/updates?agent_id={}&current_version={}&channel={}&os={}&arch={}",
         base.trim_end_matches('/'),
         agent_id,
         env!("CARGO_PKG_VERSION"),
         config.updates.channel,
+        update_os(),
         std::env::consts::ARCH,
     );
     let mut request = client.get(url);
@@ -123,7 +132,16 @@ pub async fn check_and_stage(config: &Config, agent_id: &str) -> Result<Option<S
         "server offered {} which is not newer than {current} and is not marked as a rollback",
         manifest.version
     );
-    anyhow::ensure!(manifest.os == "linux", "update OS does not match");
+    // Asking for the running platform and *checking* the answer are both
+    // necessary: a Linux artifact installed on a Windows host would pass the
+    // signature and hash and then fail its self-test, which is a confusing way to
+    // discover a mis-published release.
+    anyhow::ensure!(
+        manifest.os == update_os(),
+        "update is for {} but this Agent runs on {}",
+        manifest.os,
+        update_os()
+    );
     anyhow::ensure!(
         manifest.architecture == std::env::consts::ARCH,
         "update architecture does not match"
@@ -213,7 +231,48 @@ pub fn apply_pending(config: &Config) -> Result<Option<String>> {
         }
     }
     prune_staged_artifacts(config, &pending.manifest.version);
+    activate_installed_binary(&pending.manifest.version);
     Ok(Some(pending.manifest.version))
+}
+
+/// Starts running the binary that was just installed.
+///
+/// On Linux the old process keeps running from the replaced inode until the
+/// service is restarted, which systemd's update path unit or the init script does
+/// at the next start. Windows has no equivalent: the swap succeeded because a
+/// running executable can be renamed, but this process is still executing the old
+/// file and nothing will replace it on its own. So the restart is requested here.
+fn activate_installed_binary(version: &str) {
+    #[cfg(windows)]
+    {
+        use crate::windows_service;
+        if windows_service::started_by_service_manager() {
+            // A service cannot stop and start itself - the SCM refuses a start
+            // for a service that is still stopping - so it stops with the
+            // recovery-triggering exit code the installer configured, and the SCM
+            // brings it back on the new binary.
+            info!(
+                %version,
+                "update installed; stopping so the service manager restarts on the new binary"
+            );
+            windows_service::request_restart();
+            return;
+        }
+        // Run from a console: restart the installed service, if there is one, so
+        // the operator is not left with a new binary and an old process.
+        match windows_service::restart_service_externally() {
+            Ok(()) => info!(%version, "update installed and the service was restarted"),
+            Err(error) => info!(
+                %version,
+                reason = %format!("{error:#}"),
+                "update installed; restart the service to run it"
+            ),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = version;
+    }
 }
 
 /// Removes staged artifacts left by earlier attempts. Staging writes one file per
@@ -261,20 +320,36 @@ fn verify_artifact(bytes: &[u8], manifest: &UpdateManifest, public_key: &str) ->
 
 fn stage(config: &Config, manifest: UpdateManifest, bytes: &[u8]) -> Result<()> {
     let directory = config.agent.state_dir.join("updates");
-    fs::create_dir_all(&directory).context("create update staging directory")?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-    let artifact = directory.join(format!("invenqor-agent-{}", manifest.version));
-    atomic_write(&artifact, bytes, 0o700)?;
+    crate::platform::create_private_dir(&directory).context("create update staging directory")?;
+    // The self-test executes this file, and Windows decides what is executable by
+    // extension: staged without .exe it cannot be run, so the test that protects
+    // the fleet would fail on every Windows host for the wrong reason.
+    let artifact = directory.join(format!(
+        "invenqor-agent-{}{}",
+        manifest.version,
+        std::env::consts::EXE_SUFFIX
+    ));
+    atomic_write(&artifact, bytes)?;
+    crate::platform::make_executable(&artifact)?;
     let pending = serde_json::to_vec(&PendingUpdate { manifest, artifact })?;
-    atomic_write(&directory.join("pending.json"), &pending, 0o600)
+    atomic_write(&directory.join("pending.json"), &pending)
 }
 
 fn atomic_install(target: &Path, bytes: &[u8], version: &str) -> Result<()> {
     let parent = target
         .parent()
         .context("update install path has no parent")?;
-    let temporary = parent.join(format!(".invenqor-agent.update-{}", std::process::id()));
-    atomic_write(&temporary, bytes, 0o755)?;
+    // The candidate is written beside the target, not in the staging directory:
+    // the swap below must be a rename within one volume, and %ProgramData% and
+    // %ProgramFiles% are not guaranteed to be the same one. The extension matters
+    // on Windows, where the self-test cannot execute a file without it.
+    let temporary = parent.join(format!(
+        ".invenqor-agent.update-{}{}",
+        std::process::id(),
+        std::env::consts::EXE_SUFFIX
+    ));
+    atomic_write(&temporary, bytes)?;
+    crate::platform::make_executable(&temporary)?;
     // Run the candidate before it becomes the installed agent. A signed,
     // correctly hashed binary can still be unable to start - wrong architecture
     // family, a missing kernel feature, a bad build - and activating it would
@@ -284,12 +359,17 @@ fn atomic_install(target: &Path, bytes: &[u8], version: &str) -> Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
+    // Windows will not let anything delete or overwrite a running executable, but
+    // it will let it be *renamed*: the running process keeps executing from the
+    // moved file. So the old binary is moved aside first and the new one takes the
+    // original path, which is the only sequence that works while the service is
+    // running - and it happens to be the same sequence Linux wants anyway.
     let previous = target.with_extension("previous");
     if target.exists() {
         let _ = fs::remove_file(&previous);
-        fs::rename(target, &previous).context("preserve previous agent binary")?;
+        replace_file(target, &previous).context("preserve previous agent binary")?;
     }
-    if let Err(error) = fs::rename(&temporary, target) {
+    if let Err(error) = replace_file(&temporary, target) {
         if previous.exists() {
             let _ = fs::rename(&previous, target);
         }
@@ -325,27 +405,59 @@ fn self_test(candidate: &Path, expected_version: &str) -> Result<()> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(mode)
-        .open(&temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
+    let mut file = crate::platform::create_private_file(&temporary)?;
     if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(&temporary);
         return Err(error.into());
     }
     drop(file);
-    fs::rename(&temporary, path)?;
+    replace_file(&temporary, path)?;
     sync_directory(path.parent().context("path has no parent")?)
 }
 
+/// Flushes the directory entry so a rename survives a power loss. Windows has no
+/// equivalent call for a directory handle opened this way, and NTFS metadata
+/// journaling covers the same ground, so it is a no-op there.
 fn sync_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)?.sync_all()?;
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     Ok(())
+}
+
+/// Moves `from` onto `to`, retrying briefly.
+///
+/// On Windows a file that was just written is routinely held open for a moment by
+/// a virus scanner, and the rename fails with a sharing violation. Failing the
+/// update for that would leave a host on the old version until someone noticed,
+/// so the rename is retried for a few seconds before it is called an error.
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..20 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last = Some(error);
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        }
+    }
+    Err(last.expect("at least one attempt")).with_context(|| {
+        format!(
+            "replace {} - the file is held open by another process",
+            to.display()
+        )
+    })
 }
 
 fn update_client(config: &Config) -> Result<Client> {
@@ -385,8 +497,13 @@ mod tests {
     /// Writes a stand-in agent binary: a script that behaves like the real one
     /// for `--version`, which is all the self-test needs.
     fn executable(path: &Path, version: &str, exit_code: i32) -> Vec<u8> {
-        let script = format!("#!/bin/sh\necho \"invenqor-agent {version}\"\nexit {exit_code}\n");
-        atomic_write(path, script.as_bytes(), 0o755).unwrap();
+        let script = if cfg!(windows) {
+            format!("@echo off\r\necho invenqor-agent {version}\r\nexit /b {exit_code}\r\n")
+        } else {
+            format!("#!/bin/sh\necho \"invenqor-agent {version}\"\nexit {exit_code}\n")
+        };
+        atomic_write(path, script.as_bytes()).unwrap();
+        crate::platform::make_executable(path).unwrap();
         script.into_bytes()
     }
 

@@ -199,8 +199,7 @@ pub async fn run(
         Err(error) => checks.push(Check::fail(
             "state directory",
             format!("{:#}", error),
-            "Create the directory and grant the Agent service account write \
-             access with mode 0700.",
+            state_directory_remedy(&config.agent.state_dir),
         )),
     }
 
@@ -242,7 +241,7 @@ pub async fn run(
         Err(error) => checks.push(Check::fail(
             "durable queue",
             format!("{:#}", error),
-            "Grant the Agent write access to the state directory.",
+            state_directory_remedy(&config.agent.state_dir),
         )),
     }
 
@@ -527,16 +526,53 @@ fn resolve_check(url: &Url) -> Check {
         Err(error) => Check::fail(
             "name resolution",
             format!("{host}:{port} could not be resolved: {error}"),
-            "Fix DNS on this host, add the Server to /etc/hosts, or use its IP \
-             address in server.url.",
+            format!(
+                "Fix DNS on this host, add the Server to {hosts}, or use its IP \
+                 address in server.url.",
+                hosts = hosts_file(),
+            ),
         ),
+    }
+}
+
+fn hosts_file() -> &'static str {
+    if cfg!(windows) {
+        r"%SystemRoot%\System32\drivers\etc\hosts"
+    } else {
+        "/etc/hosts"
+    }
+}
+
+/// How to give the service account write access to its state directory. The two
+/// platforms have nothing in common here: one is a mode, the other an ACL.
+fn state_directory_remedy(state_dir: &Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "Create the directory and restrict it to SYSTEM and Administrators: \
+             mkdir \"{path}\"; icacls \"{path}\" /inheritance:r \
+             /grant:r \"SYSTEM:(OI)(CI)(F)\" \"Administrators:(OI)(CI)(F)\"",
+            path = state_dir.display(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "Create the directory and grant the Agent service account write \
+             access with mode 0700: sudo install -d -m 0700 \
+             -o {SERVICE_ACCOUNT} -g {SERVICE_ACCOUNT} {path}",
+            path = state_dir.display(),
+        )
     }
 }
 
 /// The service account the packaged unit runs the Agent as. The diagnosis is
 /// usually run with sudo, so "I can read it" says nothing about whether the
 /// service can - and that difference is exactly the failure being diagnosed.
+#[cfg(not(windows))]
 const SERVICE_ACCOUNT: &str = "invenqor-agent";
+#[cfg(windows)]
+const SERVICE_ACCOUNT: &str = "LocalSystem";
 
 fn config_file_check(
     config_path: &Path,
@@ -579,10 +615,6 @@ fn config_file_check(
     // built-in defaults is the report that sends an operator looking in the
     // wrong place.
     match service_account_can_read(config_path) {
-        ServiceAccess::Readable | ServiceAccess::Unknown => Check::pass(
-            "configuration file",
-            format!("read {}", config_path.display()),
-        ),
         ServiceAccess::Denied { detail } => Check::fail(
             "configuration file",
             format!(
@@ -593,27 +625,60 @@ fn config_file_check(
             ),
             config_permission_remedy(config_path),
         ),
+        ServiceAccess::TooPermissive => Check::fail(
+            "configuration file",
+            format!(
+                "{} can be read by ordinary users; it may contain a device or \
+                 enrollment token",
+                config_path.display()
+            ),
+            config_permission_remedy(config_path),
+        ),
+        ServiceAccess::Readable | ServiceAccess::Unknown => Check::pass(
+            "configuration file",
+            format!("read {}", config_path.display()),
+        ),
     }
 }
 
 fn config_permission_remedy(config_path: &Path) -> String {
+    #[cfg(not(windows))]
     let parent = config_path
         .parent()
         .map(|value| value.display().to_string())
-        .unwrap_or_else(|| "/etc/invenqor-agent".to_string());
-    format!(
-        "Grant the service account read access, then restart the service: \
-         sudo chown root:{SERVICE_ACCOUNT} {parent} {path}; \
-         sudo chmod 0750 {parent}; sudo chmod 0640 {path}",
-        path = config_path.display(),
-    )
+        .unwrap_or_else(|| crate::platform::default_config_path().display().to_string());
+    #[cfg(windows)]
+    {
+        format!(
+            "Restrict the file to SYSTEM and Administrators, then restart the \
+             service: icacls \"{path}\" /inheritance:r /grant:r \
+             \"SYSTEM:(R)\" \"Administrators:(F)\"; {restart}",
+            path = config_path.display(),
+            restart = crate::platform::restart_command(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "Grant the service account read access, then restart the service: \
+             sudo chown root:{SERVICE_ACCOUNT} {parent} {path}; \
+             sudo chmod 0750 {parent}; sudo chmod 0640 {path}",
+            path = config_path.display(),
+        )
+    }
 }
 
 enum ServiceAccess {
     Readable,
+    #[cfg_attr(windows, allow(dead_code))]
     Denied {
         detail: String,
     },
+    /// Anyone who can log in can read the file. The Windows failure mode is the
+    /// mirror of the Linux one: the service can always read it, and the danger is
+    /// that everyone else can too.
+    #[cfg_attr(unix, allow(dead_code))]
+    TooPermissive,
     /// The service account does not exist on this host, or the platform does not
     /// expose what is needed to judge. Nothing to report either way.
     Unknown,
@@ -629,7 +694,17 @@ fn service_account_can_read(config_path: &Path) -> ServiceAccess {
             None => ServiceAccess::Unknown,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // The service runs as LocalSystem, so it can always read the file. What
+        // is worth reporting is the opposite: whether anyone else can.
+        match crate::windows_sys::readable_by_ordinary_users(config_path) {
+            Some(true) => ServiceAccess::TooPermissive,
+            Some(false) => ServiceAccess::Readable,
+            None => ServiceAccess::Unknown,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = config_path;
         ServiceAccess::Unknown
@@ -828,6 +903,7 @@ mod tests {
     /// invenqor-agent. A PASS earned by root's own access, for a file the
     /// service cannot read, sends the operator looking in the wrong place - the
     /// service is on built-in defaults and the diagnosis says the config is fine.
+    #[cfg(unix)]
     #[test]
     fn a_config_the_service_account_cannot_read_is_a_failure_not_a_pass() {
         let directory = std::env::temp_dir().join(format!("iq-cfg-{}", unix_time()));
@@ -896,6 +972,7 @@ mod tests {
 
     /// Present-but-denied and absent are different problems with different
     /// fixes, and Path::exists() reports both as absent.
+    #[cfg(unix)]
     #[test]
     fn a_denied_config_is_not_reported_as_missing() {
         let directory = std::env::temp_dir().join(format!("iq-deny-{}", unix_time()));
@@ -932,11 +1009,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    #[cfg(unix)]
     fn set_mode(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    #[cfg(unix)]
     fn own_gid() -> u32 {
         std::fs::read_to_string("/proc/self/status")
             .ok()
@@ -949,6 +1028,7 @@ mod tests {
             .unwrap_or(u32::MAX)
     }
 
+    #[cfg(unix)]
     fn own_uid() -> u32 {
         std::fs::read_to_string("/proc/self/status")
             .ok()

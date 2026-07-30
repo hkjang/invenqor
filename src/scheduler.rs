@@ -497,12 +497,7 @@ fn log_failure(stage: &str, error: &anyhow::Error) {
 }
 
 pub fn host_name() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map(|value| value.trim().to_string())
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    crate::platform::hostname()
 }
 
 async fn wait_or_shutdown(duration: Duration) -> bool {
@@ -521,7 +516,28 @@ async fn wait_or_shutdown(duration: Duration) -> bool {
             } => true,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // The Service Control Manager does not send a signal: it calls the
+        // control handler, which sets a flag. Polling it keeps a stop prompt
+        // rather than waiting out a fifteen-minute collection sleep, which the
+        // SCM would treat as a hung service and kill.
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            if crate::windows_service::stop_requested() {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(remaining.min(Duration::from_secs(1))) => {}
+                _ = tokio::signal::ctrl_c() => return true,
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         tokio::select! {
             _ = tokio::time::sleep(duration) => false,

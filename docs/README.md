@@ -1,6 +1,6 @@
 # Invenqor Agent 문서
 
-이 디렉터리는 Invenqor Server v0.2.9와 Agent v0.2.9의 역할별 공식 가이드를 제공합니다.
+이 디렉터리는 Invenqor Server v0.2.10와 Agent v0.2.10의 역할별 공식 가이드를 제공합니다.
 
 | 문서 | 대상 | Markdown | PDF |
 |---|---|---|---|
@@ -10,10 +10,10 @@
 | Server 설치·오프라인·K8s 운영 | 플랫폼 운영자 | [SERVER_INSTALLATION.md](SERVER_INSTALLATION.md) | [SERVER_INSTALLATION.pdf](SERVER_INSTALLATION.pdf) |
 | 자산 API·MCP·키 관리 | 연계·AI·보안 담당자 | [API_MCP_GUIDE.md](API_MCP_GUIDE.md) | [API_MCP_GUIDE.pdf](API_MCP_GUIDE.pdf) |
 
-변경 요약과 검증 증적은 [Server v0.2.9 릴리즈 노트](RELEASE_NOTES_v0.2.9.md)를
+변경 요약과 검증 증적은 [Server v0.2.10 릴리즈 노트](RELEASE_NOTES_v0.2.10.md)를
 참조하십시오.
 
-문서의 기준 릴리즈는 Server `v0.2.9`, Agent `v0.2.9`, 기준일은
+문서의 기준 릴리즈는 Server `v0.2.10`, Agent `v0.2.10`, 기준일은
 2026-07-30입니다. 제품 동작과
 문서가 다를 경우 해당 버전의 소스 코드와 설정 검증 결과를 우선하며, 문서 오류는
 저장소 이슈로 보고해 주십시오.

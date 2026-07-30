@@ -2,13 +2,12 @@ use anyhow::Result;
 use invenqor_agent::config::{Config, ConfigAvailability};
 use invenqor_agent::diagnose;
 use invenqor_agent::identity;
+use invenqor_agent::platform;
 use invenqor_agent::scheduler::Agent;
 use invenqor_agent::storage::StateStore;
 use invenqor_agent::updater;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
-
-const DEFAULT_CONFIG: &str = "/etc/invenqor-agent/config.toml";
 
 /// The flags the help text documents. Kept beside the parser so the two cannot
 /// drift: a documented flag that the parser rejects is a bug a user meets first.
@@ -24,17 +23,57 @@ const HELP_FLAGS: &[&str] = &[
     "--print-default-config",
     "--help",
     "--version",
+    // Windows only: the Service Control Manager starts the installed service
+    // with this flag. It is accepted everywhere so the parser and the help text
+    // never disagree by platform.
+    "--service",
 ];
 
-#[tokio::main]
-async fn main() {
-    match run().await {
-        Ok(code) => std::process::exit(code),
+fn main() {
+    // The Service Control Manager expects the process to hand itself to the
+    // dispatcher before doing anything else, and it will kill a service that
+    // does not report RUNNING within its timeout. Everything else - including a
+    // service binary invoked from a console - runs the ordinary path.
+    #[cfg(windows)]
+    if std::env::args().any(|value| value == "--service") {
+        if invenqor_agent::windows_service::dispatch(service_body) {
+            return;
+        }
+        // Not actually started by the SCM: fall through and run in the
+        // foreground so `--service` from a console is debuggable rather than
+        // silently doing nothing.
+        eprintln!(
+            "invenqor-agent: not started by the service control manager; \
+             running in the foreground"
+        );
+    }
+    std::process::exit(blocking_run());
+}
+
+/// Runs the agent on its own runtime and returns a process exit code.
+fn blocking_run() -> i32 {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("invenqor-agent: start runtime: {error}");
+            return 1;
+        }
+    };
+    match runtime.block_on(run()) {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("invenqor-agent: {error:#}");
-            std::process::exit(1);
+            1
         }
     }
+}
+
+#[cfg(windows)]
+fn service_body() -> i32 {
+    blocking_run()
 }
 
 async fn run() -> Result<i32> {
@@ -60,9 +99,10 @@ async fn run() -> Result<i32> {
     let diagnose_flag = args.iter().any(|v| v == "--diagnose");
     let status_flag = args.iter().any(|v| v == "--status");
     let json = args.iter().any(|v| v == "--json");
+    let default_config = platform::default_config_path();
     let config_path = argument_value(&args, "--config")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
+        .unwrap_or_else(|| default_config.clone());
     reject_unknown_arguments(&args)?;
 
     let availability = ConfigAvailability::inspect(&config_path);
@@ -106,13 +146,11 @@ async fn run() -> Result<i32> {
             path = config_path.display(),
             parent = config_path
                 .parent()
-                .unwrap_or_else(|| Path::new("/etc/invenqor-agent"))
-                .display(),
+                .map(|value| value.display().to_string())
+                .unwrap_or_else(|| default_config.display().to_string()),
             account = current_account(),
         ),
-        ConfigAvailability::Missing if config_path == Path::new(DEFAULT_CONFIG) => {
-            Config::default()
-        }
+        ConfigAvailability::Missing if config_path == default_config => Config::default(),
         ConfigAvailability::Missing => {
             anyhow::bail!("config file does not exist: {}", config_path.display())
         }
@@ -152,7 +190,7 @@ async fn run() -> Result<i32> {
     }
 
     init_logging();
-    if !config_present && config_path == Path::new(DEFAULT_CONFIG) {
+    if !config_present && config_path == default_config {
         tracing::warn!(
             config = %config_path.display(),
             "no configuration file was found; built-in defaults are in use and no Server is configured"
@@ -252,7 +290,7 @@ async fn update_in_one_step(config: &Config, agent_id: &str) -> Result<i32> {
 
 fn config_path_hint(config: &Config) -> String {
     let _ = config;
-    DEFAULT_CONFIG.to_string()
+    platform::default_config_path().display().to_string()
 }
 
 /// Records the applied version in the status report so an operator can confirm
@@ -410,13 +448,22 @@ fn init_logging() {
 }
 
 fn print_help() {
+    let default_config = platform::default_config_path().display().to_string();
+    // The flag exists on every build so the parser never disagrees with the help
+    // text, but it only means anything where there is a service manager to be
+    // dispatched to.
+    let service_help = if cfg!(windows) {
+        "\n  --service               Run under the Windows Service Control Manager"
+    } else {
+        ""
+    };
     println!(
-        "Portable Linux asset inventory agent
+        "Portable Linux and Windows asset inventory agent
 
 Usage: invenqor-agent [OPTIONS]
 
 Options:
-  --config PATH           Configuration file (default: {DEFAULT_CONFIG})
+  --config PATH           Configuration file (default: {default_config})
   --once                  Collect once, attempt delivery, and print JSON
                           (exit 2 when delivery to a configured Server fails)
   --diagnose              Check registration and connectivity without changing
@@ -431,7 +478,7 @@ Options:
                           untouched if the new binary fails its self-test)
   --print-default-config  Print a complete default configuration
   -V, --version           Print version
-  -h, --help              Print help"
+  -h, --help              Print help{service_help}"
     );
 }
 

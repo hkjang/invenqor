@@ -1,8 +1,8 @@
+use crate::platform;
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -14,10 +14,8 @@ pub struct HostIdentity {
 }
 
 pub fn load_or_create(state_dir: &Path) -> Result<HostIdentity> {
-    fs::create_dir_all(state_dir)
-        .with_context(|| format!("create state directory {}", state_dir.display()))?;
-    fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("secure state directory {}", state_dir.display()))?;
+    platform::create_private_dir(state_dir)
+        .with_context(|| format!("prepare state directory {}", state_dir.display()))?;
 
     let id_path = state_dir.join("agent-id");
     let agent_id = match read_trimmed(&id_path) {
@@ -28,23 +26,18 @@ pub fn load_or_create(state_dir: &Path) -> Result<HostIdentity> {
         None => create_id(&id_path)?,
     };
 
+    let identifiers = platform::machine_identifiers();
     Ok(HostIdentity {
         agent_id,
-        machine_id: read_trimmed(Path::new("/etc/machine-id"))
-            .or_else(|| read_trimmed(Path::new("/var/lib/dbus/machine-id"))),
-        dmi_product_uuid: read_trimmed(Path::new("/sys/class/dmi/id/product_uuid")),
+        machine_id: identifiers.machine_id,
+        dmi_product_uuid: identifiers.firmware_uuid,
     })
 }
 
 fn create_id(path: &Path) -> Result<String> {
     let id = Uuid::new_v4().to_string();
     let tmp = temp_path(path);
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&tmp)
-        .with_context(|| format!("create {}", tmp.display()))?;
+    let mut file = platform::create_private_file(&tmp)?;
     writeln!(file, "{id}")?;
     file.sync_all()?;
     fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;

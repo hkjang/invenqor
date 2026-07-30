@@ -324,3 +324,92 @@ func TestParsePublicKeyRejectsTheWrongLength(t *testing.T) {
 		t.Fatalf("an empty key must mean 'not configured': %v %v", key, err)
 	}
 }
+
+// A mixed estate publishes a Windows and a Linux build of the same version, and
+// each must be offered only to the hosts it can run on. Handing a Linux artifact
+// to a Windows agent would pass the signature and the hash and then fail its
+// self-test on every host, which is a confusing way to find a mis-published
+// release.
+func TestWindowsAndLinuxReleasesOfOneVersionCoexist(t *testing.T) {
+	store := newStore(t)
+	private, publicKey := signingPair(t)
+	parsed, err := ParsePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetSigningKey(parsed)
+
+	publish := func(osName, architecture, artifact string) (Manifest, error) {
+		signature := base64.StdEncoding.EncodeToString(
+			ed25519.Sign(private, []byte(artifact)),
+		)
+		return store.Publish(Manifest{
+			Version: "1.2.3", Channel: "stable", OS: osName,
+			Architecture: architecture, Signature: signature, Rollout: 100,
+		}, strings.NewReader(artifact))
+	}
+
+	linux, err := publish("linux", "x86_64", "linux-agent")
+	if err != nil {
+		t.Fatalf("publish linux: %v", err)
+	}
+	windows, err := publish("windows", "x86_64", "windows-agent.exe")
+	if err != nil {
+		t.Fatalf("publish windows: %v", err)
+	}
+	if linux.SHA256 == windows.SHA256 {
+		t.Fatal("the two releases must be distinct artifacts")
+	}
+
+	agent := uuid.NewString()
+	offered, err := store.Latest("stable", "windows", "x86_64", agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offered == nil || offered.OS != "windows" {
+		t.Fatalf("a Windows agent was offered %+v", offered)
+	}
+	offered, err = store.Latest("stable", "linux", "x86_64", agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offered == nil || offered.OS != "linux" {
+		t.Fatalf("a Linux agent was offered %+v", offered)
+	}
+
+	// Retiring one platform must leave the other in place.
+	if err := store.Retire("1.2.3-windows-x86_64"); err != nil {
+		t.Fatal(err)
+	}
+	offered, err = store.Latest("stable", "linux", "x86_64", agent)
+	if err != nil || offered == nil {
+		t.Fatalf("retiring the Windows release removed the Linux one: %+v %v", offered, err)
+	}
+	offered, err = store.Latest("stable", "windows", "x86_64", agent)
+	if err != nil || offered != nil {
+		t.Fatalf("the retired Windows release was still offered: %+v", offered)
+	}
+}
+
+func TestPublishRejectsAnUnsupportedPlatform(t *testing.T) {
+	store := newStore(t)
+	private, _ := signingPair(t)
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte("x")))
+	for _, testCase := range []struct{ os, architecture, contains string }{
+		{"darwin", "x86_64", "os"},
+		// Windows on ARM is not built, and accepting the publication would leave
+		// an artifact no agent ever asks for.
+		{"windows", "aarch64", "windows"},
+	} {
+		candidate := manifest(signature)
+		candidate.OS = testCase.os
+		candidate.Architecture = testCase.architecture
+		_, err := store.Publish(candidate, strings.NewReader("x"))
+		if err == nil {
+			t.Fatalf("%s/%s was accepted", testCase.os, testCase.architecture)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), testCase.contains) {
+			t.Fatalf("%s/%s error %q does not explain why", testCase.os, testCase.architecture, err)
+		}
+	}
+}

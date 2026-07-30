@@ -73,12 +73,21 @@ func (s *Store) Publish(manifest Manifest, source io.Reader) (Manifest, error) {
 	if manifest.Channel != "stable" && manifest.Channel != "beta" {
 		return Manifest{}, errors.New("the channel must be stable or beta")
 	}
-	if manifest.OS != "linux" {
-		return Manifest{}, errors.New("only linux updates are supported")
+	if manifest.OS != "linux" && manifest.OS != "windows" {
+		return Manifest{}, errors.New("the os must be linux or windows")
 	}
 	if manifest.Architecture != "x86_64" && manifest.Architecture != "aarch64" {
 		return Manifest{}, errors.New(
 			"the architecture must be x86_64 or aarch64",
+		)
+	}
+	// A release is identified by version, os and architecture together, so a
+	// Windows build and a Linux build of the same version can coexist. Publishing
+	// a Windows artifact where a Linux one is expected would otherwise be
+	// indistinguishable until it failed its self-test on every host.
+	if manifest.OS == "windows" && manifest.Architecture != "x86_64" {
+		return Manifest{}, errors.New(
+			"windows releases are published for x86_64",
 		)
 	}
 	if manifest.Rollout < 0 || manifest.Rollout > 100 {

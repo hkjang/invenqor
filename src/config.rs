@@ -13,7 +13,11 @@ fn default_timeout() -> u64 {
     30
 }
 fn default_state_dir() -> PathBuf {
-    PathBuf::from("/var/lib/invenqor-agent")
+    crate::platform::default_state_dir()
+}
+
+fn default_install_path() -> PathBuf {
+    crate::platform::default_install_path()
 }
 fn default_true() -> bool {
     true
@@ -118,7 +122,7 @@ impl Default for UpdateConfig {
             channel: "stable".to_string(),
             check_interval_seconds: 21_600,
             public_key: None,
-            install_path: PathBuf::from("/opt/invenqor-agent/bin/invenqor-agent"),
+            install_path: default_install_path(),
         }
     }
 }

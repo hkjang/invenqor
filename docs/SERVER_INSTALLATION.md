@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.9 · Agent 버전: v0.2.9 · 기준일: 2026-07-30
+대상 Server 버전: v0.2.10 · Agent 버전: v0.2.10 · 기준일: 2026-07-30
 
 ## 1. 운영 구조와 단일 포트
 
@@ -66,17 +66,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.9.tar.gz`
-- `invenqor-0.2.9.tar.gz.sha256`
+- `invenqor-0.2.10.tar.gz`
+- `invenqor-0.2.10.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.9.tar.gz.sha256
-gzip -t invenqor-0.2.9.tar.gz
-docker load < invenqor-0.2.9.tar.gz
-docker image inspect invenqor-server:0.2.9 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.10.tar.gz.sha256
+gzip -t invenqor-0.2.10.tar.gz
+docker load < invenqor-0.2.10.tar.gz
+docker image inspect invenqor-server:0.2.10 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -96,7 +96,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.9
+./scripts/build-offline-images.sh 0.2.10
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -111,7 +111,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.9
+  invenqor-server:0.2.10
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -207,8 +207,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.9/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.10/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -220,6 +220,58 @@ sudo systemctl status invenqor-agent --no-pager
 
 SysV와 OpenRC 정의도 패키지에 포함됩니다. 상태 디렉터리와 `agent-id`는
 재설치·업데이트 중 보존해야 같은 장비로 계속 인식됩니다.
+
+## 6.1 Windows Agent 설치
+
+Windows용 Agent는 별도 배포본이며 같은 Server·같은 등록 절차를 사용합니다.
+릴리즈에서 `invenqor-agent-windows-x86_64.zip`을 받아 체크섬을 확인한 뒤 관리자
+PowerShell에서 설치합니다.
+
+```powershell
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.10'
+Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile agent.zip
+Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile agent.zip.sha256
+# 게시된 값과 일치하는지 확인합니다.
+(Get-FileHash agent.zip -Algorithm SHA256).Hash.ToLower()
+Get-Content agent.zip.sha256
+
+Expand-Archive agent.zip -DestinationPath .
+Set-Location invenqor-agent-windows-x86_64
+.\scripts\install.ps1
+```
+
+설치 후 Server URL을 설정하고 재시작합니다.
+
+```powershell
+notepad "$env:ProgramData\Invenqor\config.toml"
+Restart-Service invenqor-agent
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
+  --config "$env:ProgramData\Invenqor\config.toml" --diagnose
+```
+
+| 경로 | 내용 |
+|---|---|
+| `%ProgramFiles%\Invenqor\invenqor-agent.exe` | 서비스 실행 파일 |
+| `%ProgramData%\Invenqor\config.toml` | 설정 |
+| `%ProgramData%\Invenqor\state\` | 식별자, 인벤토리 해시, 미전송 큐 |
+
+두 디렉터리는 SYSTEM과 Administrators로 제한됩니다. 서비스는 LocalSystem으로
+지연 자동 시작하며 수신 포트를 열지 않습니다. .NET이나 VC++ 재배포 패키지는
+필요하지 않습니다.
+
+대량 배포는 `install.ps1`을 그대로 사용하십시오. 멱등이므로 구성 관리 도구에서
+반복 실행해도 안전하며, 이미지에 넣을 때는 `-NoStart`로 서비스 시작을 미룰 수
+있습니다. **상태 디렉터리를 이미지에 포함하면 모든 복제 호스트가 같은 `agent-id`를
+사용합니다.** 이미지화 전에 삭제하십시오.
+
+```powershell
+# 골든 이미지 준비
+.\scripts\install.ps1 -NoStart
+Remove-Item -Recurse -Force "$env:ProgramData\Invenqor\state"
+```
+
+제거는 `.\scripts\uninstall.ps1`이며, 설정과 미전송 큐는 기본으로 보존합니다.
+완전 삭제는 `-RemoveData`를 사용합니다.
 
 ## 7. 관리 부담을 줄이는 자동 동작
 
@@ -345,7 +397,7 @@ sudo /opt/invenqor-agent/bin/invenqor-agent \
 
 ```bash
 invenqor-agent --config /etc/invenqor-agent/config.toml --status
-#   updates       자동 · 실행 0.2.8 · 대기 0.2.9
+#   updates       자동 · 실행 0.2.8 · 대기 0.2.10
 invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
 #   [WARN] automatic updates  a verified update is staged and is waiting to be installed
 ```
@@ -430,7 +482,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.9`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.10`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -439,7 +491,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.9 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.10 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -523,7 +575,7 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
   파일은 있지만 서비스 계정이 읽지 못하는 상태입니다. 설정 디렉터리나 파일의
   소유·권한이 `invenqor-agent` 그룹에 읽기를 주지 않으면 발생하고, 이 경우 Agent는
   내장 기본값으로 동작하므로 등록하지 않고 큐만 늘어납니다. `sudo`로 실행한
-  `--diagnose`는 root가 읽을 수 있으므로 이 항목을 통과시킬 수 있어, v0.2.9부터는
+  `--diagnose`는 root가 읽을 수 있으므로 이 항목을 통과시킬 수 있어, v0.2.10부터는
   **서비스 계정이 읽을 수 있는지**까지 판정합니다.
 
   ```bash
@@ -535,7 +587,7 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
   ```
 
   `enrollment.token`, `ca.pem`, `device.pem`을 손으로 설치했다면 같은 소유·권한이
-  필요합니다. v0.2.9 이후의 `install.sh`는 설치·업그레이드 시 이 권한을 맞추고,
+  필요합니다. v0.2.10 이후의 `install.sh`는 설치·업그레이드 시 이 권한을 맞추고,
   Agent는 읽을 수 없는 설정 파일을 발견하면 기본값으로 조용히 넘어가지 않고 조치
   명령과 함께 기동을 거부합니다.
 - `SQLITE_FALLBACK`: PostgreSQL DSN/DNS/TLS/인증을 수정하고 운영 전
@@ -651,7 +703,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.9
+  invenqor-server:0.2.10
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
