@@ -3,6 +3,7 @@ pub mod config;
 pub mod diagnose;
 pub mod health;
 pub mod identity;
+pub mod logfile;
 pub mod model;
 pub mod platform;
 pub mod scheduler;

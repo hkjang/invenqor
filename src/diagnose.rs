@@ -428,7 +428,115 @@ pub async fn run(
     // Automatic updates are the other thing an operator cannot see from outside.
     checks.push(update_check(config));
 
+    // Everything above answers "can this host reach and register with the Server".
+    // None of it answers "is the Agent actually running", and every one of those
+    // checks passed on a host whose service was being killed at start-up: the
+    // report said OK while nothing had ever been collected. These two say so.
+    if let Some(check) = service_check() {
+        checks.push(check);
+    }
+    checks.push(collection_check(config, config_path, now));
+
     finish(config, config_path, agent_id, now, checks)
+}
+
+/// The state the platform's service manager reports for the Agent.
+///
+/// None on platforms where the Agent is not registered as a service by the
+/// packaged installer, so nothing is claimed that cannot be checked.
+fn service_check() -> Option<Check> {
+    #[cfg(windows)]
+    {
+        use crate::windows_service::{installed_service_state, ServiceQuery};
+        Some(match installed_service_state() {
+            ServiceQuery::Known {
+                state: "running", ..
+            } => Check::pass("service", "the invenqor-agent service is running"),
+            ServiceQuery::Known { state, exit_code } => Check::fail(
+                "service",
+                format!(
+                    "the invenqor-agent service is {state} (last exit code {exit_code}); \
+                     nothing is being collected while it is not running"
+                ),
+                "Start-Service invenqor-agent, then read the Agent log at \
+                 %ProgramData%\\Invenqor\\state\\agent.log and the Windows \
+                 System event log for the service control manager's own entry.",
+            ),
+            ServiceQuery::NotInstalled => Check::fail(
+                "service",
+                "the invenqor-agent service is not installed, so nothing collects \
+                 on a schedule",
+                "Run scripts\\install.ps1 from the package in an elevated PowerShell \
+                 session.",
+            ),
+            ServiceQuery::Unknown => Check::skip(
+                "service",
+                "the service control manager could not be queried from this account; \
+                 run this from an elevated PowerShell session to include it",
+            ),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Whether a collection cycle has ever finished, and how long ago.
+///
+/// A reachable Server and a writable queue say nothing about whether the Agent is
+/// doing its work. An Agent that has never completed a cycle has never enrolled
+/// and never will, and until now the report had no way to say so.
+fn collection_check(config: &Config, config_path: &Path, now: u64) -> Check {
+    let Ok(store) = StateStore::open(&config.agent.state_dir, config.agent.max_queue_bytes) else {
+        // The state directory check above already reported why.
+        return Check::skip("collection activity", "the state directory is unreadable");
+    };
+    let status = store.read_status();
+    let last = status.as_ref().and_then(|status| status.collection.last_at);
+    match last {
+        None => Check::fail(
+            "collection activity",
+            "no collection cycle has ever completed on this host",
+            format!(
+                "The Agent is installed but not running its schedule. Confirm the \
+                 service is running, then collect once by hand to see the reason: \
+                 {binary} --config {config} --once",
+                binary = config.updates.install_path.display(),
+                config = config_path.display(),
+            ),
+        ),
+        Some(completed) => {
+            let age = now.saturating_sub(completed);
+            // Two intervals of silence is not a slow cycle, it is a stopped one.
+            let stale = age > config.agent.interval_seconds.saturating_mul(2).max(120);
+            let detail = format!(
+                "last completed {age}s ago at {}, {} record(s)",
+                format_unix_utc(completed),
+                status
+                    .as_ref()
+                    .map(|status| status.collection.records)
+                    .unwrap_or(0)
+            );
+            if stale {
+                Check::fail(
+                    "collection activity",
+                    format!(
+                        "{detail}, which is more than two collection intervals \
+                         ({}s) ago",
+                        config.agent.interval_seconds
+                    ),
+                    format!(
+                        "Check that the service is running and read the Agent log: \
+                         {}",
+                        crate::platform::restart_command()
+                    ),
+                )
+            } else {
+                Check::pass("collection activity", detail)
+            }
+        }
+    }
 }
 
 /// Reports whether this host can actually take a signed release. The three ways

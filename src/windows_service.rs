@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 pub const SERVICE_NAME: &str = "invenqor-agent";
 
@@ -25,7 +25,13 @@ pub const EXIT_CODE_RESTART_FOR_UPDATE: u32 = 0x2A;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static EXIT_CODE: AtomicU32 = AtomicU32::new(0);
-static SERVICE_HANDLE: AtomicU32 = AtomicU32::new(0);
+/// SERVICE_STATUS_HANDLE is a handle - pointer-sized. Declaring it as a 32-bit
+/// value truncated it on x64, so SetServiceStatus was called with a corrupted
+/// handle, every status report failed, the Service Control Manager never saw
+/// RUNNING, and it terminated the service as having failed to start. The agent
+/// never reached its first collection, which is why nothing was queued and
+/// nothing registered while --diagnose reported a clear path to the Server.
+static SERVICE_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
 const SERVICE_WIN32_OWN_PROCESS: u32 = 0x0000_0010;
 const SERVICE_ACCEPT_STOP: u32 = 0x0000_0001;
@@ -61,8 +67,8 @@ extern "system" {
     fn RegisterServiceCtrlHandlerW(
         name: *const u16,
         handler: unsafe extern "system" fn(u32),
-    ) -> u32;
-    fn SetServiceStatus(handle: u32, status: *mut ServiceStatus) -> i32;
+    ) -> isize;
+    fn SetServiceStatus(handle: isize, status: *mut ServiceStatus) -> i32;
     fn OpenSCManagerW(machine: *const u16, database: *const u16, access: u32) -> isize;
     fn OpenServiceW(manager: isize, name: *const u16, access: u32) -> isize;
     fn CloseServiceHandle(handle: isize) -> i32;
@@ -122,8 +128,14 @@ fn report(state: u32, exit_code: u32, wait_hint: u32) {
         check_point: 0,
         wait_hint,
     };
-    unsafe {
-        SetServiceStatus(handle, &mut status);
+    if unsafe { SetServiceStatus(handle, &mut status) } == 0 {
+        // Nothing can be done about it here, but it must not pass unrecorded:
+        // this is the failure that makes a service look like it never started.
+        tracing::error!(
+            state,
+            handle,
+            "SetServiceStatus was rejected by the service control manager"
+        );
     }
 }
 
@@ -143,6 +155,7 @@ static BODY: std::sync::OnceLock<ServiceBody> = std::sync::OnceLock::new();
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     let handle = RegisterServiceCtrlHandlerW(wide(SERVICE_NAME).as_ptr(), control_handler);
     if handle == 0 {
+        tracing::error!("RegisterServiceCtrlHandlerW failed; the service cannot report its state");
         return;
     }
     SERVICE_HANDLE.store(handle, Ordering::SeqCst);
@@ -243,4 +256,75 @@ fn blank_status() -> ServiceStatus {
         check_point: 0,
         wait_hint: 0,
     }
+}
+
+/// The state the Service Control Manager reports for the installed service.
+///
+/// `--diagnose` needs this because everything it checked before was about the
+/// path from this host to the Server - and all of it can pass while the service
+/// itself is stopped, which is exactly the case that looked healthy and was not.
+pub fn installed_service_state() -> ServiceQuery {
+    const SC_MANAGER_CONNECT: u32 = 0x0001;
+    const SERVICE_QUERY_STATUS: u32 = 0x0004;
+    const ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
+
+    let manager = unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT) };
+    if manager == 0 {
+        return ServiceQuery::Unknown;
+    }
+    let service =
+        unsafe { OpenServiceW(manager, wide(SERVICE_NAME).as_ptr(), SERVICE_QUERY_STATUS) };
+    if service == 0 {
+        let missing = unsafe { GetLastError() } == ERROR_SERVICE_DOES_NOT_EXIST;
+        unsafe { CloseServiceHandle(manager) };
+        return if missing {
+            ServiceQuery::NotInstalled
+        } else {
+            ServiceQuery::Unknown
+        };
+    }
+    let mut status = blank_status();
+    let queried = unsafe { QueryServiceStatus(service, &mut status) } != 0;
+    unsafe {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+    }
+    if !queried {
+        return ServiceQuery::Unknown;
+    }
+    ServiceQuery::Known {
+        state: match status.current_state {
+            1 => "stopped",
+            2 => "start_pending",
+            3 => "stop_pending",
+            4 => "running",
+            5 => "continue_pending",
+            6 => "pause_pending",
+            7 => "paused",
+            _ => "unknown",
+        },
+        // A service that failed to start leaves its reason here, and it is the
+        // first thing worth reporting when nothing is being collected.
+        exit_code: if status.win32_exit_code == ERROR_SERVICE_SPECIFIC_ERROR {
+            status.service_specific_exit_code
+        } else {
+            status.win32_exit_code
+        },
+    }
+}
+
+pub enum ServiceQuery {
+    Known {
+        state: &'static str,
+        exit_code: u32,
+    },
+    NotInstalled,
+    /// The SCM could not be asked - not running as a privileged account, most
+    /// likely. Reporting that as "stopped" would be worse than saying nothing.
+    Unknown,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLastError() -> u32;
 }

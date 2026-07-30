@@ -1131,8 +1131,13 @@ pub fn services() -> Vec<Service> {
         return Vec::new();
     }
     let mut result = Vec::new();
-    let mut buffer = vec![0u8; 64 * 1024];
+    // Roughly 250 services on a typical host, 56 bytes each plus their name and
+    // display name, so this usually holds the whole answer in one call.
+    let mut buffer = vec![0u8; 256 * 1024];
     let mut resume = 0u32;
+    // A bound on the retries, so a driver that keeps asking for more room cannot
+    // turn this into an unbounded loop.
+    let mut attempts = 0u32;
     loop {
         let mut needed = 0u32;
         let mut returned = 0u32;
@@ -1150,14 +1155,28 @@ pub fn services() -> Vec<Service> {
                 std::ptr::null(),
             )
         };
-        let more = !ok != 0 && unsafe { last_error() } == ERROR_MORE_DATA_LOCAL;
-        if ok == 0 && !more {
-            break;
-        }
-        if ok == 0 && more && needed as usize > buffer.len() {
-            // Grow once to the size the SCM asked for and retry the same page.
+        // `!ok` is a bitwise complement, not a logical negation: for any i32 it
+        // is non-zero, so the previous form said "more data" on every outcome and
+        // an unexpected error fell through to a loop that never terminated - the
+        // collector would hang, and a hung collector stops the whole cycle, so
+        // nothing is ever queued or delivered.
+        let failed = ok == 0;
+        let needs_room = failed
+            && unsafe { last_error() } == ERROR_MORE_DATA_LOCAL
+            && needed as usize > buffer.len();
+        if needs_room {
+            // Grow to the size the SCM asked for and retry the same page.
             buffer = vec![0u8; needed as usize];
+            attempts += 1;
+            if attempts > 8 {
+                break;
+            }
             continue;
+        }
+        if failed {
+            // Any other failure - and a "more data" answer that does not ask for
+            // a larger buffer - ends the enumeration with what was collected.
+            break;
         }
         unsafe {
             let items = std::slice::from_raw_parts(

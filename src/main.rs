@@ -6,7 +6,7 @@ use invenqor_agent::platform;
 use invenqor_agent::scheduler::Agent;
 use invenqor_agent::storage::StateStore;
 use invenqor_agent::updater;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 /// The flags the help text documents. Kept beside the parser so the two cannot
@@ -189,7 +189,7 @@ async fn run() -> Result<i32> {
         return Ok(if report.failed() { 1 } else { 0 });
     }
 
-    init_logging();
+    init_logging(&config.agent.state_dir);
     if !config_present && config_path == default_config {
         tracing::warn!(
             config = %config_path.display(),
@@ -438,9 +438,37 @@ fn reject_unknown_arguments(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn init_logging() {
+/// Starts logging, and on Windows also writes to a file beside the state.
+///
+/// A Windows service's standard error leads nowhere, so everything logged while
+/// running as a service used to be discarded - which is how a service that never
+/// completed a collection could look healthy from the outside. The file is the
+/// only place that failure is visible.
+fn init_logging(state_dir: &Path) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("invenqor_agent=info"));
+    #[cfg(windows)]
+    {
+        if let Some(file) = invenqor_agent::logfile::LogFile::open(state_dir) {
+            let path = file.path().to_path_buf();
+            // Leaked deliberately: the writer must outlive every span for the
+            // lifetime of the process, and the process owns exactly one.
+            let writer: &'static invenqor_agent::logfile::LogFile = Box::leak(Box::new(file));
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(move || writer)
+                .init();
+            tracing::info!(log = %path.display(), "agent log file opened");
+            return;
+        }
+        eprintln!(
+            "invenqor-agent: could not open a log file under {}; logging to stderr only, \
+             which a Windows service discards",
+            state_dir.display()
+        );
+    }
+    let _ = state_dir;
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
