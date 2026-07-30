@@ -611,32 +611,39 @@ pub fn volumes() -> Vec<Volume> {
         let mut total = 0u64;
         let mut free = 0u64;
         let mut free_to_caller = 0u64;
-        let sized = unsafe {
-            GetDiskFreeSpaceExW(
-                root_wide.as_ptr(),
-                &mut free_to_caller,
-                &mut total,
-                &mut free,
-            )
-        } != 0;
-        if !sized && drive_type != "fixed" {
+        // A network drive is someone else's storage, and asking for its size or its
+        // label means a round trip that waits out the SMB timeout when the share is
+        // gone. That parks the collector, and a parked collector used to stop the
+        // whole cycle. It is still reported, just not measured.
+        let remote = drive_type == "network";
+        let sized = !remote
+            && unsafe {
+                GetDiskFreeSpaceExW(
+                    root_wide.as_ptr(),
+                    &mut free_to_caller,
+                    &mut total,
+                    &mut free,
+                )
+            } != 0;
+        if !sized && drive_type != "fixed" && !remote {
             continue;
         }
         let mut label = [0u16; 256];
         let mut filesystem = [0u16; 64];
         let mut flags = 0u32;
-        let described = unsafe {
-            GetVolumeInformationW(
-                root_wide.as_ptr(),
-                label.as_mut_ptr(),
-                label.len() as u32,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut flags,
-                filesystem.as_mut_ptr(),
-                filesystem.len() as u32,
-            )
-        } != 0;
+        let described = !remote
+            && unsafe {
+                GetVolumeInformationW(
+                    root_wide.as_ptr(),
+                    label.as_mut_ptr(),
+                    label.len() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut flags,
+                    filesystem.as_mut_ptr(),
+                    filesystem.len() as u32,
+                )
+            } != 0;
         result.push(Volume {
             root: root_text,
             drive_type,
@@ -981,6 +988,17 @@ pub fn local_users() -> Vec<LocalUser> {
 /// Which local groups each account belongs to. Group membership is what decides
 /// whether an account is an administrator, so an inventory that omits it cannot
 /// answer the question anyone asks of it.
+/// The local groups whose membership decides whether an account is privileged.
+/// A localised Windows installation names them differently; those are simply not
+/// queried rather than guessed at, so the field is absent instead of wrong.
+const PRIVILEGED_GROUPS: &[&str] = &[
+    "Administrators",
+    "Remote Desktop Users",
+    "Backup Operators",
+    "Power Users",
+    "Remote Management Users",
+];
+
 fn local_group_memberships() -> BTreeMap<String, Vec<String>> {
     const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
     let mut memberships: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1011,6 +1029,17 @@ fn local_group_memberships() -> BTreeMap<String, Vec<String>> {
             let Some(group_name) = from_wide_ptr(group.name) else {
                 continue;
             };
+            // Level 3 translates every member SID to a DOMAIN\name, and on a
+            // domain-joined host that is a call to a domain controller. Doing it
+            // for all of the built-in groups multiplies the exposure to a slow or
+            // unreachable DC for no gain: what an inventory is asked is which
+            // accounts are privileged.
+            if !PRIVILEGED_GROUPS
+                .iter()
+                .any(|candidate| group_name.eq_ignore_ascii_case(candidate))
+            {
+                continue;
+            }
             let mut member_buffer: *mut u8 = std::ptr::null_mut();
             let mut member_count = 0u32;
             let mut member_total = 0u32;

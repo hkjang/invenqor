@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.12 · Server v0.2.12</p>
+    <p><strong>대상 버전</strong> Agent v0.2.13 · Server v0.2.13</p>
     <p><strong>문서 버전</strong> 1.0</p>
     <p><strong>기준일</strong> 2026-07-30</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.12 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.13 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -31,7 +31,7 @@
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.12를 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.13를 운영 환경에 배포하는 Linux, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +40,7 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.12에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.13에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -165,13 +165,13 @@ WMI는 사용하지 않습니다. 통상적인 방법이지만 COM 아파트먼�
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.12/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.12/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.12는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.13는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -468,7 +468,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.12 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.13 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -534,7 +534,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.12에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.13에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -548,7 +548,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.12의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.13의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -724,7 +724,7 @@ Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 �
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.12
+User-Agent: invenqor-agent/0.2.13
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -754,7 +754,7 @@ Authorization: Bearer <token>   # 구성한 경우
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.12는 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.13는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -924,7 +924,7 @@ DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉
 
 ### 12.2 업그레이드
 
-v0.2.12는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
+v0.2.13는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에 배포하지 않고
 오프라인 환경에서 보관합니다. Agent는 더 높은 버전(또는 `allow_downgrade`가
 지정된 릴리즈), 일치하는 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이
@@ -1051,7 +1051,7 @@ sudo chmod 0640 /etc/invenqor-agent/config.toml
 sudo systemctl restart invenqor-agent
 ```
 
-v0.2.12 이후 Agent는 이 상태에서 기본값으로 넘어가지 않고 조치 명령과 함께 기동을
+v0.2.13 이후 Agent는 이 상태에서 기본값으로 넘어가지 않고 조치 명령과 함께 기동을
 거부하며, `--diagnose`는 서비스 계정이 읽을 수 있는지까지 판정합니다.
 
 ### 13.2 전송 실패
