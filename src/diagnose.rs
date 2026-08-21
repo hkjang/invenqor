@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreachable_server_is_reported_with_its_cause_and_remedy() {
+    async fn unavailable_server_is_reported_with_its_cause_and_remedy() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
@@ -975,11 +975,28 @@ mod tests {
         )
         .await;
         assert!(report.failed());
+        let reachability = report
+            .checks
+            .iter()
+            .find(|check| check.name == "server reachability")
+            .expect("server reachability check");
+        assert_eq!(reachability.outcome, Outcome::Fail);
+        assert!(matches!(
+            reachability.code.as_deref(),
+            Some("SERVER_UNREACHABLE" | "SERVER_TIMEOUT")
+        ));
+        assert!(!reachability.detail.trim().is_empty());
+        assert!(reachability
+            .remediation
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()));
         let rendered = report.render();
         assert!(rendered.contains("[PASS] name resolution"));
         assert!(rendered.contains("[FAIL] server reachability"));
-        assert!(rendered.contains("SERVER_UNREACHABLE"));
-        assert!(rendered.to_ascii_lowercase().contains("refused"));
+        assert!(
+            rendered.contains("SERVER_UNREACHABLE") || rendered.contains("SERVER_TIMEOUT"),
+            "unexpected report: {rendered}"
+        );
         let _ = std::fs::remove_dir_all(config.agent.state_dir);
     }
 

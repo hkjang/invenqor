@@ -31,8 +31,9 @@ impl ExchangeFailure {
                  DNS, routing and that TCP 7070 is open outbound."
             }
             "SERVER_TIMEOUT" => {
-                "The Server accepted the connection but did not answer in time. \
-                 Raise server.timeout_seconds or inspect the proxy in between."
+                "The connection to the Server or its response timed out. Verify \
+                 routing and firewalls, then raise server.timeout_seconds or \
+                 inspect the proxy in between."
             }
             "TLS_REJECTED" => {
                 "TLS verification failed. Point server.ca_file at the private CA \
@@ -711,8 +712,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreachable_server_reports_the_operating_system_cause() {
-        // Binding and dropping yields a port nothing listens on.
+    async fn unavailable_server_reports_the_operating_system_cause() {
+        // Binding and dropping yields a port nothing listens on. Most systems
+        // reject the connection immediately, while Windows network filtering
+        // can silently drop it until the client deadline. Both classifications
+        // describe a real transport failure and carry an actionable remedy.
         let address = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -728,12 +732,20 @@ mod tests {
             .await
             .unwrap_err();
         let failure = failure_of(&error).expect("classified failure");
-        assert_eq!(failure.code, "SERVER_UNREACHABLE");
+        assert!(
+            matches!(
+                failure.code.as_str(),
+                "SERVER_UNREACHABLE" | "SERVER_TIMEOUT"
+            ),
+            "unexpected failure: {failure}"
+        );
         let cause = failure.cause.clone().unwrap_or_default();
         assert!(
-            cause.to_ascii_lowercase().contains("refused"),
-            "expected the operating system cause, got {cause}"
+            !cause.trim().is_empty(),
+            "expected the operating system cause, got {failure}"
         );
+        assert!(error.to_string().contains(&cause));
+        assert!(!failure.remediation().trim().is_empty());
     }
 
     #[tokio::test]

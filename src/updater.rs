@@ -336,6 +336,19 @@ fn stage(config: &Config, manifest: UpdateManifest, bytes: &[u8]) -> Result<()> 
 }
 
 fn atomic_install(target: &Path, bytes: &[u8], version: &str) -> Result<()> {
+    atomic_install_with_suffix(target, bytes, version, std::env::consts::EXE_SUFFIX)
+}
+
+/// Installs an artifact using the platform's executable suffix for the
+/// pre-activation self-test. Keeping the suffix explicit also lets the tests
+/// exercise the real command execution and rename sequence with a `.cmd`
+/// fixture on Windows instead of pretending batch-file bytes are a PE image.
+fn atomic_install_with_suffix(
+    target: &Path,
+    bytes: &[u8],
+    version: &str,
+    executable_suffix: &str,
+) -> Result<()> {
     let parent = target
         .parent()
         .context("update install path has no parent")?;
@@ -346,7 +359,7 @@ fn atomic_install(target: &Path, bytes: &[u8], version: &str) -> Result<()> {
     let temporary = parent.join(format!(
         ".invenqor-agent.update-{}{}",
         std::process::id(),
-        std::env::consts::EXE_SUFFIX
+        executable_suffix
     ));
     atomic_write(&temporary, bytes)?;
     crate::platform::make_executable(&temporary)?;
@@ -494,6 +507,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use tempfile::tempdir;
 
+    const FIXTURE_EXECUTABLE_SUFFIX: &str = if cfg!(windows) { ".cmd" } else { "" };
+
     /// Writes a stand-in agent binary: a script that behaves like the real one
     /// for `--version`, which is all the self-test needs.
     fn executable(path: &Path, version: &str, exit_code: i32) -> Vec<u8> {
@@ -533,7 +548,7 @@ mod tests {
         .unwrap();
         let target = root.path().join("agent");
         fs::write(&target, b"old").unwrap();
-        atomic_install(&target, &bytes, "9.0.0").unwrap();
+        atomic_install_with_suffix(&target, &bytes, "9.0.0", FIXTURE_EXECUTABLE_SUFFIX).unwrap();
         assert_eq!(fs::read(&target).unwrap(), bytes);
         assert_eq!(fs::read(target.with_extension("previous")).unwrap(), b"old");
     }
@@ -565,7 +580,8 @@ mod tests {
         let bytes = executable(&staged, "1.0.0", 0);
         let target = root.path().join("agent");
         fs::write(&target, b"working-agent").unwrap();
-        let error = atomic_install(&target, &bytes, "2.0.0").unwrap_err();
+        let error = atomic_install_with_suffix(&target, &bytes, "2.0.0", FIXTURE_EXECUTABLE_SUFFIX)
+            .unwrap_err();
         assert!(format!("{error:#}").contains("promised 2.0.0"));
         assert_eq!(fs::read(&target).unwrap(), b"working-agent");
     }
@@ -577,7 +593,10 @@ mod tests {
         let bytes = executable(&staged, "3.0.0", 3);
         let target = root.path().join("agent");
         fs::write(&target, b"working-agent").unwrap();
-        assert!(atomic_install(&target, &bytes, "3.0.0").is_err());
+        assert!(
+            atomic_install_with_suffix(&target, &bytes, "3.0.0", FIXTURE_EXECUTABLE_SUFFIX)
+                .is_err()
+        );
         assert_eq!(fs::read(&target).unwrap(), b"working-agent");
     }
 
