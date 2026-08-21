@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.13 · Agent 버전: v0.2.13 · 기준일: 2026-07-30
+대상 Server 버전: v0.2.14 · Agent 버전: v0.2.14 · 기준일: 2026-08-21
 
 ## 1. 운영 구조와 단일 포트
 
@@ -26,7 +26,7 @@ Agent ────┼─ HTTPS :443 ─ Ingress/Reverse Proxy ─ HTTP :7070 Ser
 
 | 영역 | 주요 항목 | 기본 원천 |
 |---|---|---|
-| 시스템 | 호스트명, 배포판, Kernel, Architecture, Boot time, Timezone | `/etc/os-release`, `/proc` |
+| 시스템 | 호스트명, 배포판/Windows 에디션·build, Kernel, Architecture, Boot time, Timezone | Linux `/etc/os-release`·`/proc`, Windows 레지스트리·Win32 |
 | CPU·메모리 | 모델, 논리 CPU, load, 메모리·swap 지표 | `/proc/cpuinfo`, `/proc/meminfo` |
 | 파일시스템 | 장치, Mount, 유형, 옵션, 용량, inode | `/proc/self/mounts`, `statvfs` |
 | 네트워크 | Interface, MAC/IP, MTU, 상태, Route, DNS, 로컬 포트 | `/sys/class/net`, `/proc/net` |
@@ -43,6 +43,8 @@ Server는 `Agent UUID + category + asset_id`를 원천 키로 보관합니다. �
 전체 Snapshot, 이후에는 added/updated/removed 변경분만 전송합니다. Collector
 오류가 발생한 주기에는 누락을 삭제로 오판하지 않습니다. 원본 이벤트, 현재
 Snapshot, 변경 이력과 오류를 함께 보존해 화면 값의 출처를 추적할 수 있습니다.
+같은 host의 프로세스·서비스·패키지는 내장 카탈로그로 주요 소프트웨어 제품에
+자동 결합하고 `runs_on` 관계, 설치·실행 상태와 판별 근거를 함께 저장합니다.
 
 ## 3. 온라인 Docker Compose 설치
 
@@ -66,17 +68,17 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
 반입합니다.
 
-- `invenqor-0.2.13.tar.gz`
-- `invenqor-0.2.13.tar.gz.sha256`
+- `invenqor-0.2.14.tar.gz`
+- `invenqor-0.2.14.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.13.tar.gz.sha256
-gzip -t invenqor-0.2.13.tar.gz
-docker load < invenqor-0.2.13.tar.gz
-docker image inspect invenqor-server:0.2.13 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.14.tar.gz.sha256
+gzip -t invenqor-0.2.14.tar.gz
+docker load < invenqor-0.2.14.tar.gz
+docker image inspect invenqor-server:0.2.14 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -96,7 +98,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.13
+./scripts/build-offline-images.sh 0.2.14
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -111,7 +113,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.13
+  invenqor-server:0.2.14
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -207,8 +209,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -228,7 +230,7 @@ Windows용 Agent는 별도 배포본이며 같은 Server·같은 등록 절차�
 PowerShell에서 설치합니다.
 
 ```powershell
-$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.13'
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.14'
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile agent.zip
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile agent.zip.sha256
 # 게시된 값과 일치하는지 확인합니다.
@@ -397,7 +399,7 @@ sudo /opt/invenqor-agent/bin/invenqor-agent \
 
 ```bash
 invenqor-agent --config /etc/invenqor-agent/config.toml --status
-#   updates       자동 · 실행 0.2.8 · 대기 0.2.13
+#   updates       자동 · 실행 0.2.13 · 대기 0.2.14
 invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
 #   [WARN] automatic updates  a verified update is staged and is waiting to be installed
 ```
@@ -423,6 +425,13 @@ helm upgrade --install invenqor deploy/helm/invenqor \
   --set bootstrapAdmin.passwordSecret.name=invenqor-bootstrap-admin \
   --set updates.storageClassName='YOUR-RWX-STORAGE-CLASS'
 ```
+
+Chart의 기본 Server 이미지는 공개 GHCR 이미지
+`ghcr.io/hkjang/invenqor-server:0.2.14`이며 `linux/amd64`와 `linux/arm64`를
+지원합니다. 인터넷 연결이 제한되었거나 사내 레지스트리를 사용하는 경우에는 먼저
+오프라인 이미지 번들을 레지스트리에 적재한 뒤
+`--set image.repository=REGISTRY/PROJECT/invenqor-server`와
+`--set image.tag=0.2.14`로 명시하십시오.
 
 Chart는 StatefulSet parallel 기동, readiness/liveness/startup probe, Pod
 anti-affinity, rolling update와 PDB `minAvailable: 1`을 포함합니다. 세션,
@@ -482,7 +491,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
 | `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.13`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 버전 `0.2.14`, 포트 `7070`, DB 모드 |
 
 백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
 Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
@@ -491,7 +500,7 @@ Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시�
 
 ## 11. 검증된 호환성
 
-v0.2.13 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+v0.2.14 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인했습니다.
 
@@ -507,6 +516,25 @@ v0.2.13 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동�
 별도 E2E에서 Server 두 Pod를 동시에 시작해 migration, readiness, 교차 Pod
 로그인 세션을 확인했습니다. 재현 명령은 `./scripts/e2e-client-server.sh`와
 `./scripts/e2e-multipod.sh`입니다.
+
+Windows Agent 실행 파일은 CI에서 `x86_64-pc-windows-gnu` release target으로
+매 커밋 교차 빌드합니다. 그 산출물을 artifact로 Windows GitHub runner에 전달해
+실제 릴리즈 ZIP과 동일한 GNU Agent와 Server를 함께 기동하고 자동 등록, 네이티브
+수집, 전송과 조회까지 `scripts/e2e-windows.ps1`로 검증합니다. Linux CI의
+PostgreSQL 계약 E2E도 Windows
+형식 `system`, Service Control Manager 서비스, process와 Uninstall 패키지 이벤트를
+Server에 전송해 다음 계약을 독립적으로 검증합니다.
+
+- Agent 목록의 `Windows 11 Enterprise` 운영체제·아키텍처 반영
+- Microsoft SQL Server와 IIS의 host별 자동 식별
+- SQL Server의 서비스·프로세스·패키지 3종 evidence, 설치·실행 상태와 버전
+- `scope=managed` 자산 목록에서 원시 process 기본 제외
+- 기존 등록 Agent의 저장된 `system` 원천을 heartbeat에서 재투영하고, 후속 delta도
+  처리해 운영체제 메타데이터 자동 복구
+
+두 검증의 역할은 다릅니다. Windows runner E2E는 실제 Windows API와 레지스트리를
+사용한 배포용 GNU Agent 실행을 보증하고, PostgreSQL 계약 E2E는 Windows 이벤트의
+저장·정규화와 멀티 플랫폼 wire 호환성을 재현 가능하게 보증합니다.
 
 ## 12. 장애 판단
 
@@ -563,6 +591,12 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
 - Agent는 있으나 자산이 없음: 등록은 됐고 수집 이벤트가 없는 상태입니다.
   **등록 진단**의 *첫 수집 대기* 목록과 Agent의 `--status` 큐 깊이를 함께
   확인합니다.
+- Windows Agent의 첫 inventory 시각은 있는데 **운영체제 확인 전**: Server와
+  Agent 버전을 확인합니다. v0.2.14는 기존 최상위 `os_name`과 새 `os_release`
+  형식을 모두 읽고 snapshot·후속 `system` delta뿐 아니라 저장된 기존 원천을 첫
+  heartbeat에서 다시 투영합니다. Server를 올리면 자동 복구되며 Agent를 삭제·
+  재등록하거나 `%ProgramData%\Invenqor\state`를 지우면 안 됩니다. Agent는 이후
+  순차 업데이트해 양방향 호환 형식을 적용하십시오.
 - `401`: Agent UUID와 장비별 Token, 차단 여부를 확인합니다.
 - `403 AGENT_SOURCE_NOT_ALLOWED`: IP/CIDR allowlist, 신뢰 프록시와
   `X-Forwarded-For` 판정을 확인합니다.
@@ -703,7 +737,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.13
+  invenqor-server:0.2.14
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
@@ -886,7 +920,60 @@ GET   /api/v1/assets/relations/proposed                # relations.read
 POST  /api/v1/assets/relations/{id}/approve|reject     # relations.write
 ```
 
-## 17. 사용자 관리
+## 17. 주요 소프트웨어 자동 관리
+
+Server는 inventory를 처리할 때 현재 활성 `process`, `service`,
+`software.package` 원천을 내장 카탈로그와 대조합니다. PostgreSQL, SQL Server,
+IIS, NGINX, Docker, Kubernetes, 관측·보안 도구와 Office/Microsoft 365, 주요
+브라우저·협업 도구, Java·.NET, MECM·Tanium·BigFix 등 51개 운영상 중요한 제품만
+host별 `software_product`로 만듭니다. 카탈로그에 없는 일반 프로세스는 억지로
+승격하지 않으므로 운영자가 프로세스명 매핑표를 별도로 만들고 유지할 필요가
+없습니다. Chrome·Java처럼 범용 process 단독 신호는 제품으로 승격하지 않아
+PC의 자산 수를 과대 계산하지 않습니다.
+
+정규화는 Agent 이벤트와 **같은 DB 트랜잭션**에서 수행합니다. 따라서 다중 Pod
+중 어느 Pod가 event를 처리해도 다른 Pod는 원시 증거만 새롭고 제품 상태는 오래된
+중간 시점을 보지 않습니다. 제품 자산에는 다음 정보가 함께 저장됩니다.
+
+- 제품 key·이름·제조사·역할과 카탈로그 버전
+- 패키지 기반 버전과 설치 상태(`installed`/`observed`)
+- 프로세스·서비스 기반 실행 상태(`running`/`stopped`/`unknown`)
+- host `runs_on` 관계와 host에서 상속한 environment
+- 서비스명, 프로세스명, 패키지명, 인자를 제거한 실행 경로와 원천 자산 ID
+- 근거별 신뢰도를 결합한 0~0.99 확신도와 변경 이력
+
+증거가 제거되면 다음 inventory에서 즉시 다시 계산합니다. 실행 프로세스만
+사라지면 설치 상태는 유지하고 runtime을 `unknown`으로 바꾸며, 모든 증거가
+사라지면 제품과 자동 관계를 논리 종료합니다. 다시 나타나면 같은 안정 자산을
+재활성화합니다. 같은 event 재처리는 멱등입니다.
+
+운영자는 **주요 소프트웨어** 화면에서 제품·인스턴스·host·실행 상태·식별 품질
+요약, 역할/상태/확신도 필터와 각 evidence를 확인합니다. **운영 현황**과 기본
+**자산** 화면은 원시 process를 제외한 관리 범위를 사용합니다. 보안 조사에서
+PID가 필요하면 **프로세스 관찰 포함**을 켭니다. 이는 데이터 삭제가 아니라 조회
+범위 전환입니다.
+
+```bash
+# 주요 제품과 host·evidence (assets.read)
+curl -fsS -b cookies.txt \
+  'https://invenqor.example.com/api/v1/assets/software-products?runtime_state=running&confidence=high&limit=50' |
+  jq '.summary, (.items[] | {product_name,host,runtime_state,confidence,evidence})'
+
+# 원시 process를 제외한 일상 운영 자산
+curl -fsS -b cookies.txt \
+  'https://invenqor.example.com/api/v1/assets?scope=managed&limit=50' |
+  jq '.total, .items[] | {name,type,status}'
+```
+
+업그레이드 후 별도 backfill 명령은 필요 없습니다. 각 Agent의 첫 heartbeat 또는
+inventory가 현재 저장 증거를 자동 조정하고 `software_catalog_reconciliations`에
+카탈로그 버전 완료 마커를 기록합니다. 제품이 없는 장비도 마커가 있으므로 이후
+heartbeat에서 반복 스캔하지 않으며, 카탈로그 버전이 바뀔 때만 한 번 다시
+조정합니다. 즉시 확인하려면 Server v0.2.14 기동 후 한 heartbeat 주기를 기다리고,
+주요 소프트웨어 API의 `hosts`, `high_confidence`, `needs_review`를 운영 기준선으로
+기록하십시오.
+
+## 18. 사용자 관리
 
 **사용자** 화면은 계정 생성, 검색, 프로필 수정, 활성/비활성, 잠금 해제,
 로컬 비밀번호 초기화, 역할 부여와 삭제를 제공합니다.
@@ -907,9 +994,9 @@ POST  /api/v1/assets/relations/{id}/approve|reject     # relations.write
   같은 ID로 새 계정을 만들 수 있습니다.
 - 모든 관리 변경은 행위자, 대상, 결과와 사유를 감사 로그에 기록합니다.
 
-## 18. 조사와 추출
+## 19. 조사와 추출
 
-### 18.1 감사 로그
+### 19.1 감사 로그
 
 **감사 로그** 화면의 검색과 조건은 모두 Server 질의로 실행되므로 화면에 표시된
 건수와 무관하게 전체 기록을 대상으로 합니다.
@@ -936,13 +1023,13 @@ curl -fsS -b cookies.txt \
   -o audit-failures.csv
 ```
 
-### 18.2 Server 진단 로그
+### 19.2 Server 진단 로그
 
 구성요소·Pod·오류 코드 목록은 이 설치에 실제로 기록된 값에서 만들어집니다.
 Server가 새 구성요소를 기록하기 시작하면 콘솔 수정 없이 바로 선택할 수 있습니다.
 조건 일치 건수가 표시 건수보다 많으면 잘렸다는 사실을 화면에 알립니다.
 
-### 18.3 자산 인벤토리 추출
+### 19.3 자산 인벤토리 추출
 
 **자산** 화면은 환경·중요도·상태·정렬 조건을 지원하고, 총 건수와 표시 구간을
 함께 보여줍니다. **CSV 내려받기**는 현재 조건과 동일한 결과를 저장합니다.
@@ -953,14 +1040,14 @@ curl -fsS -b cookies.txt \
   -o production-critical.csv
 ```
 
-### 18.4 Query DSL
+### 19.4 Query DSL
 
 **Query DSL** 화면은 Server가 제공하는 필드·연산자 목록을 그대로 표시합니다.
 필드를 누르면 편집기에 조건이 추가되고, 자주 쓰는 질의는 한 번에 불러올 수
 있습니다. 목록은 파서의 허용 목록에서 만들어지므로 화면에 있는 필드가 거부되는
 일은 없습니다.
 
-## 19. 내 계정 보안
+## 20. 내 계정 보안
 
 - **다중요소 인증 상태를 화면에서 확인**할 수 있습니다. 켜져 있으면 등록 시각과
   남은 복구 코드 수를 표시하고, 꺼져 있으면 설정을 권고합니다.
@@ -977,7 +1064,7 @@ curl -fsS -b cookies.txt \
 - 비밀번호가 맞아도 2차 코드가 틀리면 로그인 실패로 계산되어 계정 잠금과 IP
   속도 제한이 함께 적용됩니다.
 
-## 20. 시각 표기
+## 21. 시각 표기
 
 모든 API 시각은 UTC 오프셋을 포함한 RFC 3339로 반환하며, PostgreSQL과 SQLite
 대체 모드에서 동일합니다. 콘솔은 이를 브라우저 시간대로 표시합니다.

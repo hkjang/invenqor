@@ -118,10 +118,40 @@ curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -d '{"mode":"open","reason":"URL-only enrollment E2E"}' \
   "http://127.0.0.1:$port_b/api/v1/admin/settings/agent-enrollment" |
   jq -e '.mode == "open"' >/dev/null
+multipod_agent_id=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
 curl -fsS -H 'Content-Type: application/json' \
-  -d "{\"agent_id\":\"$(cat /proc/sys/kernel/random/uuid)\",\"hostname\":\"multipod-open\",\"claim_token\":\"ivq_ec_$(printf 'b%.0s' {1..64})\"}" \
-  "http://127.0.0.1:$port_a/v1/agent/enroll" |
-  jq -e '.token | startswith("ivq_at_")' >/dev/null
+  -d "{\"agent_id\":\"$multipod_agent_id\",\"hostname\":\"multipod-open\",\"claim_token\":\"ivq_ec_$(printf 'b%.0s' {1..64})\"}" \
+  "http://127.0.0.1:$port_a/v1/agent/enroll" > "$work/open-enrollment.json"
+multipod_agent_token=$(jq -r .token "$work/open-enrollment.json")
+test "${multipod_agent_token#ivq_at_}" != "$multipod_agent_token"
+
+# An inventory written through one pod must be immediately readable as the
+# same normalized software product through another pod. This covers both the
+# shared PostgreSQL transaction and the host-scoped runs_on relationship.
+multipod_event_id=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
+multipod_now=$(date +%s)
+jq -n --arg agent "$multipod_agent_id" --arg event "$multipod_event_id" \
+  --argjson now "$multipod_now" \
+  '{schema_version:1,event_id:$event,agent_id:$agent,created_at:$now,
+    kind:"inventory",snapshot_hash:"multipod-software-e2e",changes:[],collection_errors:[],
+    snapshot:{schema_version:1,agent_id:$agent,collected_at:$now,duration_ms:10,errors:[],records:[
+      {asset_id:"multipod-host",category:"system",source:"e2e",collected_at:$now,
+       payload:{hostname:"multipod-open",os_family:"linux",architecture:"x86_64",os_release:{pretty_name:"E2E Linux"}}},
+      {asset_id:"multipod-nginx-service",category:"service",source:"e2e",collected_at:$now,
+       payload:{name:"nginx.service",active_state:"active",sub_state:"running"}},
+      {asset_id:"multipod-nginx-package",category:"software.package",source:"e2e",collected_at:$now,
+       payload:{name:"nginx",version:"1.26.2"}}
+    ]}}' > "$work/multipod-event.json"
+curl -fsS -H "Authorization: Bearer $multipod_agent_token" \
+  -H "X-Invenqor-Agent-Id: $multipod_agent_id" \
+  -H "X-Invenqor-Event-Id: $multipod_event_id" \
+  -H 'Content-Type: application/json' --data-binary "@$work/multipod-event.json" \
+  "http://127.0.0.1:$port_a/v1/agent/events" |
+  jq -e '.accepted == true' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port_b/api/v1/assets/software-products?q=NGINX" |
+  jq -e '.items[] | select(.product_key == "nginx") |
+    .host.name == "multipod-open" and .runtime_state == "running"' >/dev/null
 curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port_b/api/v1/admin/diagnostics/logs" |
   jq -e '(.instances | length) >= 2 and

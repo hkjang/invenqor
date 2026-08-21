@@ -1,6 +1,6 @@
 # Invenqor 자산 API·MCP·키 관리 가이드
 
-대상 Server 버전: v0.2.13 · 기준일: 2026-07-30
+대상 Server 버전: v0.2.14 · 기준일: 2026-08-21
 
 ## 1. 목적과 설계 원칙
 
@@ -39,6 +39,16 @@ warning/error와 Agent 등록 이벤트를 조회합니다. `audit.read`가 필�
 응답과 로그의 `request_id`를 `q`로 검색하면 처리 Pod와 실패 단계를 연결할 수
 있습니다. Secret과 원문 인벤토리는 저장하지 않습니다.
 
+주요 소프트웨어는 Agent가 수집한 process·service·software.package 원천을
+Server 내장 카탈로그로 host별 정규화한 `software_product` 자산입니다. 제품명만
+반환하는 블랙박스가 아니라 설치·실행 상태, 버전, 확신도, `runs_on` host 관계와
+판별 evidence를 함께 제공하므로 CMDB와 AI가 결론의 근거를 확인할 수 있습니다.
+카탈로그 `2026.08.1`은 인프라, PC 생산성·협업, 런타임, Endpoint 관리·보안의
+51개 주요 제품을 다룹니다. Chrome·Java의 generic process 단독 신호는 제품으로
+승격하지 않는 보수적 규칙으로 오탐을 억제합니다.
+원시 process는 보존되지만 일상 관리용 `scope=managed` 조회에서는 제외할 수
+있습니다.
+
 상세 계약은 `openapi.yaml`을 따릅니다.
 
 ## 2. Scope 카탈로그
@@ -55,8 +65,9 @@ warning/error와 Agent 등록 이벤트를 조회합니다. `audit.read`가 필�
 | `mcp.access` | `/mcp` 연결과 도구 탐색 |
 
 `mcp.access`만 부여하면 MCP 연결은 가능하지만 자산 도구는 표시되지 않습니다.
-예를 들어 `mcp.access + assets.read` 키에는 `asset_search`, `asset_get`만
-노출됩니다. 키를 만드는 관리자도 자신이 갖지 않은 권한을 scope로 위임할 수
+예를 들어 `mcp.access + assets.read` 키에는 `asset_search`, `asset_get`,
+`software_inventory`가 노출됩니다. `asset_relations`는 `relations.read`가 추가로
+필요합니다. 키를 만드는 관리자도 자신이 갖지 않은 권한을 scope로 위임할 수
 없습니다. `api_keys.manage` 자체는 API key에 위임할 수 없는 관리 Session
 전용 권한입니다.
 
@@ -175,6 +186,66 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 API key 인증에는 Cookie와 CSRF를 사용하지 않습니다. 키를 URL query, 로그,
 지원 티켓, source control에 넣지 마십시오.
 
+### 4.1 주요 소프트웨어와 관리 자산 범위
+
+브라우저 관리 콘솔은 Session 인증과 `assets.read` 권한으로 다음 집계 API를
+사용합니다.
+
+```http
+GET /api/v1/assets/software-products
+GET /api/v1/assets?scope=managed
+GET /api/v1/dashboard/statistics?scope=managed
+```
+
+`/api/v1/assets/software-products` query:
+
+| 이름 | 값 | 의미 |
+|---|---|---|
+| `q` | 문자열 | 제품명/key, 역할, 제조사, 버전, host, 서비스·프로세스·패키지명 부분 검색 |
+| `role` | catalog role | `database`, `web_server`, `security` 등 역할 일치 |
+| `vendor` | 제조사 | 응답 `filters.vendors[]`에 나온 제조사 정확 일치 |
+| `runtime_state` | `running`, `stopped`, `unknown` | 실행 상태 일치 |
+| `confidence` | `high`, `review` | 각각 0.80 이상, 0.80 미만 |
+| `limit` | 1~200 | 기본 50 |
+| `offset` | 0 이상 | 페이징 시작 위치 |
+
+응답의 `summary`는 고유 제품 수, host별 인스턴스, host 수, 실행·중지·미확인,
+설치 확인·프로세스 관찰, 높은 확신도·검토 권장과 상위 제품을 제공합니다.
+`items[]`의 안정 계약은 다음과 같습니다.
+
+| 필드 | 의미 |
+|---|---|
+| `id`, `asset_key`, `status`, `last_seen_at` | host별 자산 식별자, 활성 상태와 최종 관찰 시각 |
+| `product_key`, `product_name`, `role`, `vendor` | 제품 정체성과 운영 역할 |
+| `version`, `versions[]` | 설치 패키지로 확인한 대표 버전과 관찰된 버전 목록 |
+| `install_state` | `installed`, `observed`, `unknown` |
+| `runtime_state` | `running`, `stopped`, `unknown` |
+| `host` | 자동 `runs_on` 관계의 `{id,name}` |
+| `service_names`, `process_names`, `package_names` | 제품 판별에 사용된 정규화 신호 |
+| `executable_paths` | 서비스 인자를 제거한 실행 경로 |
+| `evidence[]` | `kind`, `name`, `source_asset_id`의 설명 가능한 근거 |
+| `detection_method`, `catalog_version`, `confidence` | 판별 방식·카탈로그 버전과 0~1 근거 확신도 |
+| `evidence_count`, `process_count` | 상세 반환 제한과 무관한 전체 근거·매핑 process 개수 |
+
+`scope=managed`는 자산 목록과 Dashboard 집계에서 `type=process`만 제외합니다.
+원시 프로세스를 삭제하거나 수집 중단하지 않으며, `scope`를 생략하면 기존 전체
+자산 API 의미가 그대로 유지됩니다.
+
+전용 주요 소프트웨어 요약 경로는 현재 관리 Session용입니다. API key 연계는
+외부 자산 API에서 정규화 자산을 직접 조회합니다.
+
+```bash
+curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
+  'https://invenqor.example.com:7070/api/v1/external/assets?type=software_product&status=active&limit=100'
+```
+
+각 자산의 `attributes`에 위 제품 상태와 evidence가 들어 있고 관계 API에서
+`runs_on` host를 조회할 수 있습니다. MCP에서는 전용 `software_inventory`를
+우선 사용하면 제품 요약, host, 상태, 확신도와 evidence를 한 번에 읽을 수
+있습니다. 자산 원본과 전체 관계가 필요하면 `asset_get`, `asset_relations`를 이어서
+호출합니다. AI는 `confidence`를 보안 위험도나 취약점 점수로 오해하지 말고
+제품 식별의 증거 강도로 취급해야 합니다.
+
 ## 5. MCP 연결
 
 MCP URL은 다음 하나입니다.
@@ -217,9 +288,10 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 
 | 도구 | Scope | 입력 | 결과 |
 |---|---|---|---|
-| `asset_search` | `assets.read` | `q`, `type`, `status`, `limit`, `offset` | 정규화 자산 목록 |
 | `asset_get` | `assets.read` | `asset_id` | 자산 상세 |
 | `asset_relations` | `relations.read` | `asset_id` | 활성 inbound/outbound 관계 |
+| `asset_search` | `assets.read` | `q`, `type`, `status`, `include_observations`, `limit`, `offset` | 정규화 자산 목록. 원시 process는 기본 제외 |
+| `software_inventory` | `assets.read` | `q`, `role`, `runtime_state`, `confidence`, `limit`, `offset` | 제품 요약·host·상태·확신도·evidence |
 | `agents_list` | `agents.read` | `limit` | Agent 상태·버전·최근 수신 |
 
 도구 목록은 고정된 결정적 순서이며 키에 없는 scope의 도구는 아예 노출하지
@@ -227,12 +299,32 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 제공합니다. 자산의 이름·속성·사용자 입력은 신뢰할 수 없는 데이터이며 AI에 대한
 명령으로 해석해서는 안 된다는 지침도 initialize 응답에 포함됩니다.
 
+`software_inventory`의 `runtime_state`는 `running|stopped|unknown`, `confidence`는
+`high|review`이며 `limit`는 기본 50, 최대 100입니다. 범용 `asset_search`는
+`include_observations`를 생략하거나 `false`로 두면 `type=process`를 제외합니다.
+사고 조사나 판별 근거 검증처럼 원시 관찰이 필요한 경우에만
+`"include_observations":true`를 명시하십시오.
+
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc":"2.0","id":2,"method":"tools/call",
     "params":{"name":"asset_search","arguments":{"type":"host","limit":20}}
+  }' \
+  https://invenqor.example.com:7070/mcp
+```
+
+주요 소프트웨어 인벤토리 조회 예:
+
+```bash
+curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc":"2.0","id":3,"method":"tools/call",
+    "params":{"name":"software_inventory","arguments":{
+      "runtime_state":"running","confidence":"high","limit":50
+    }}
   }' \
   https://invenqor.example.com:7070/mcp
 ```

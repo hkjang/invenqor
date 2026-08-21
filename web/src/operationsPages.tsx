@@ -32,6 +32,7 @@ import {
 } from "./format";
 import {consoleHashQuery} from "./navigationState";
 import type {SystemInfo} from "./productVersion";
+import {SoftwareOverview, type SoftwareSummary} from "./softwareProductsPage";
 
 export type Asset = {
   id: string;
@@ -178,16 +179,20 @@ export function OperationsDashboard({
   const [statistics, setStatistics] = React.useState<Statistics|null>(null);
   const [recent, setRecent] = React.useState<Asset[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
+  const [software, setSoftware] = React.useState<SoftwareSummary|null>(null);
   const [error, setError] = React.useState("");
   const load = React.useCallback(async () => {
     setError("");
     try {
-      const [stats, assets, fleet] = await Promise.all([
-        api<Statistics>("/api/v1/dashboard/statistics"),
-        api<{items: Asset[]}>("/api/v1/assets?limit=6"),
+      const [stats, assets, fleet, softwareInventory] = await Promise.all([
+        api<Statistics>("/api/v1/dashboard/statistics?scope=managed"),
+        api<{items: Asset[]}>("/api/v1/assets?scope=managed&limit=6"),
         api<{agents: Agent[]}>("/api/v1/admin/agents").catch(() => ({agents: []})),
+        api<{summary: SoftwareSummary}>("/api/v1/assets/software-products?limit=1")
+          .catch(() => ({summary: null})),
       ]);
       setStatistics(stats); setRecent(assets.items); setAgents(fleet.agents);
+      setSoftware(softwareInventory.summary);
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -213,7 +218,7 @@ export function OperationsDashboard({
     {error && <div className="error">{error}</div>}
     <div className="metrics executive">
       <Metric label="관리 자산" value={number(statistics?.assets.total)}
-        note={`24시간 내 확인 ${number(statistics?.assets.seen_24h)}`} icon={Boxes}/>
+        note={`24시간 내 확인 ${number(statistics?.assets.seen_24h)} · 프로세스 제외`} icon={Boxes}/>
       <Metric label="자산 최신성" value={freshRate}
         note={`점검 필요 ${number(statistics?.assets.stale)}`} icon={CheckCircle2}/>
       <Metric label="정상 Agent" value={`${number(statistics?.agents.healthy)} / ${number(statistics?.agents.total)}`}
@@ -228,6 +233,7 @@ export function OperationsDashboard({
       <Panel title="운영 주의 항목" action="우선순위">
         <RiskSummary statistics={statistics}/>
       </Panel>
+      <SoftwareOverview summary={software}/>
       <Panel title="자산 유형" action="구성 비중">
         <Breakdown items={statistics?.assets.by_type || []}/>
       </Panel>
@@ -268,6 +274,7 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
   const [criticality, setCriticality] = React.useState("");
   const [sort, setSort] = React.useState("recent");
   const [includeDeleted, setIncludeDeleted] = React.useState(false);
+  const [includeObservations, setIncludeObservations] = React.useState(false);
   const [offset, setOffset] = React.useState(0);
   const [hasMore, setHasMore] = React.useState(false);
   const [selected, setSelected] = React.useState<string[]>([]);
@@ -284,8 +291,9 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
     if (criticality) values.set("criticality", criticality);
     if (sort) values.set("sort", sort);
     if (includeDeleted) values.set("include_deleted", "true");
+    if (!includeObservations) values.set("scope", "managed");
     return values;
-  }, [criticality, environment, includeDeleted, query, sort, status, type]);
+  }, [criticality, environment, includeDeleted, includeObservations, query, sort, status, type]);
   const load = React.useCallback(async () => {
     const values = new URLSearchParams(parameters);
     values.set("limit", String(assetPageSize));
@@ -329,7 +337,10 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
       <div className="search"><Search size={18}/><input placeholder="이름 또는 자산 키" value={query}
         onChange={event => changeFilter(setQuery)(event.target.value)}/></div>
       <input placeholder="유형" value={type}
-        onChange={event => changeFilter(setType)(event.target.value)}/>
+        onChange={event => {
+          changeFilter(setType)(event.target.value);
+          if (event.target.value === "process") setIncludeObservations(true);
+        }}/>
       {/* Environment and criticality are what classification sets, so the
           inventory has to be filterable by them. */}
       <select value={environment}
@@ -355,8 +366,12 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
       </select>
       <label><input type="checkbox" checked={includeDeleted}
         onChange={event => changeFilter(setIncludeDeleted)(event.target.checked)}/>삭제 포함</label>
+      <label title="원시 프로세스는 주요 소프트웨어 자동 식별의 근거로 보존됩니다."><input type="checkbox"
+        checked={includeObservations} onChange={event => changeFilter(setIncludeObservations)(event.target.checked)}/>
+        프로세스 관찰 포함</label>
       <button className="secondary" onClick={load}><RefreshCw size={15}/></button>
     </div>
+    {!includeObservations && <p className="inventory-scope-note">관리 가능한 구성 항목 중심으로 표시합니다. 원시 프로세스는 삭제하지 않고 주요 소프트웨어의 식별 근거로 보존합니다.</p>}
     {error && <div className="error action-message">{error}</div>}
     {/* "50개 자산 · offset 0" said nothing about the size of the result. */}
     <Panel title={`자산 ${number(total)}건`}

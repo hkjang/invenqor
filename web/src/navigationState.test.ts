@@ -11,6 +11,7 @@ describe("console navigation state", () => {
       page: "settings",
       settingsTab: "keycloak",
     });
+    expect(parseConsoleHash(consoleHash("software")).page).toBe("software");
   });
 
   it("ignores unknown routes and invalid settings tabs", () => {

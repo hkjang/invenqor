@@ -12,7 +12,7 @@ use super::{record, Collector};
 use crate::config::CollectorConfig;
 use crate::model::AssetRecord;
 use crate::platform;
-use crate::windows_inventory::{edition_name, interface_type_name, percent, UninstallEntry};
+use crate::windows_inventory::{interface_type_name, os_release_metadata, percent, UninstallEntry};
 use crate::windows_sys as sys;
 use anyhow::Result;
 use serde_json::json;
@@ -74,13 +74,24 @@ impl Collector for SystemCollector {
             (Some(build), None) => Some(build.clone()),
             _ => None,
         };
+        let os_release = os_release_metadata(
+            product.as_deref(),
+            build.as_deref(),
+            display_version.as_deref(),
+            full_build.as_deref(),
+        );
+        let os_name = os_release.name.clone();
         let identifiers = platform::machine_identifiers();
         let payload = json!({
             "hostname": platform::hostname(),
             "os_family": "windows",
-            "os_name": edition_name(product.as_deref(), build.as_deref()),
+            // Keep the explicit Windows fields for current Servers and expose
+            // the same os_release shape Linux uses for rolling upgrades where
+            // an older Server receives inventory from a newer Windows Agent.
+            "os_name": os_name,
+            "os_release": os_release,
             "os_product_name": product,
-            "os_version": display_version,
+            "os_version": display_version.or_else(|| full_build.clone()),
             "os_build": full_build,
             "kernel_version": build,
             "architecture": sys::processor().architecture,

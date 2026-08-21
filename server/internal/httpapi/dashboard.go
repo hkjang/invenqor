@@ -21,9 +21,13 @@ type dailyStatistic struct {
 func (s *Server) dashboardStatistics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now().UTC()
+	assetScope := ""
+	if r.URL.Query().Get("scope") == "managed" {
+		assetScope = " AND type <> 'process'"
+	}
 	assetTotal, err := scalarCount(
 		ctx, s.database.DB(),
-		`SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL`,
+		`SELECT COUNT(*) FROM assets WHERE deleted_at IS NULL`+assetScope,
 	)
 	if err != nil {
 		s.internalError(w, r, err)
@@ -32,7 +36,7 @@ func (s *Server) dashboardStatistics(w http.ResponseWriter, r *http.Request) {
 	seen24h, err := scalarCount(
 		ctx, s.database.DB(),
 		`SELECT COUNT(*) FROM assets
-		 WHERE deleted_at IS NULL AND last_seen_at >= $1`,
+		 WHERE deleted_at IS NULL AND last_seen_at >= $1`+assetScope,
 		now.Add(-24*time.Hour),
 	)
 	if err != nil {
@@ -86,7 +90,7 @@ func (s *Server) dashboardStatistics(w http.ResponseWriter, r *http.Request) {
 			ctx,
 			s.database.DB(),
 			`SELECT COALESCE(NULLIF(`+column+`, ''), 'unknown'), COUNT(*)
-			 FROM assets WHERE deleted_at IS NULL
+			 FROM assets WHERE deleted_at IS NULL`+assetScope+`
 			 GROUP BY `+column+` ORDER BY COUNT(*) DESC, `+column+` LIMIT 12`,
 		)
 		if err != nil {

@@ -1,9 +1,9 @@
 [package]
 name = "invenqor-agent"
-version = "0.2.13"
+version = "0.2.14"
 edition = "2021"
 rust-version = "1.85"
-description = "Portable, progressively degrading Linux asset inventory agent"
+description = "Portable, progressively degrading Linux and Windows asset inventory agent"
 license = "Apache-2.0"
 
 [[bin]]

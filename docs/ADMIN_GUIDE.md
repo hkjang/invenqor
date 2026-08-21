@@ -3,14 +3,14 @@
   <h1>관리자 가이드</h1>
   <p class="subtitle">수집 데이터 사전, 배포, 인증, 운영 통제, 모니터링과 장애 대응 기준서</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.13 · Server v0.2.13</p>
+    <p><strong>대상 버전</strong> Agent v0.2.14 · Server v0.2.14</p>
     <p><strong>문서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-07-30</p>
+    <p><strong>기준일</strong> 2026-08-21</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
-> Server v0.2.13 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
+> Server v0.2.14 운영자는 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를
 > 먼저 확인하십시오. 문서에는 PostgreSQL/SQLite 선택, 최초 관리자, Agent
 > Bearer·mTLS 등록, 장애 spool과 Kubernetes 배포가 포함됩니다.
 
@@ -25,13 +25,16 @@
   Authorization Code+PKCE, State, Nonce와 Role/Group Mapping을 검증합니다.
 - Event ID는 Agent별 멱등 키입니다. Collector 오류로 삭제를 추론하지 않고
   `removed` 변경만 논리 삭제합니다.
+- 원시 process·service·software.package 증거는 내장 카탈로그가 host별
+  `software_product`로 자동 정규화합니다. 운영자는 수동 프로세스 매핑표 대신
+  제품의 설치·실행 상태, 확신도와 원천 근거를 관리합니다.
 - CMDB 자동화와 AI Agent는 사람 Session을 공유하지 않고 scope 기반 API key와
   stateless `/mcp`를 사용합니다. 자세한 수명주기는
   [자산 API·MCP·키 관리 가이드](API_MCP_GUIDE.md)를 따릅니다.
 
 ## 문서 범위와 독자
 
-이 문서는 Invenqor Agent v0.2.13를 운영 환경에 배포하는 Linux, 보안, 네트워크,
+이 문서는 Invenqor Agent v0.2.14를 운영 환경에 배포하는 Linux·Windows, 보안, 네트워크,
 CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 다룹니다.
 
 - 지원 환경, 패키지 무결성 검증과 init 시스템별 설치
@@ -40,7 +43,8 @@ CMDB/게이트웨이 관리자를 위한 기준서입니다. 다음 범위를 �
 - 스냅샷, 변경 이벤트, 하트비트, 로컬 큐와 재시도 동작
 - 게이트웨이 계약, 파일 권한, 모니터링, 업그레이드, 롤백과 장애 대응
 
-v0.2.13에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP가 포함됩니다.
+v0.2.14에는 중앙 Server·대시보드·서명 자동 업데이트·자산 API·MCP와 주요
+소프트웨어 자동 식별이 포함됩니다.
 CVE 매핑, 자동 시정 정책 엔진과 원격 명령은 포함되지 않습니다.
 
 ## 1. 운영 아키텍처
@@ -165,13 +169,13 @@ WMI는 사용하지 않습니다. 통상적인 방법이지만 COM 아파트먼�
 x86_64 예시:
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
 검증 결과가 `OK`가 아니면 배포를 중단합니다. SHA-256은 전송 오류와 변조 탐지에
-사용하지만, v0.2.13는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
+사용하지만, v0.2.14는 별도 서명 파일이나 공급망 증명(attestation)을 제공하지
 않습니다. 고통제 환경에서는 승인된 내부 저장소로 반입한 뒤 조직 서명을
 추가하십시오.
 
@@ -468,7 +472,7 @@ sudo systemctl restart invenqor-agent
 
 제한: DMI 제조사·시리얼, BIOS, 메인보드 정보는 수집하지 않습니다. 에이전트는
 로컬 ID 초기화 시 machine-id와 DMI product UUID를 읽어 info 로그에 기록할 수
-있지만 v0.2.13 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
+있지만 v0.2.14 인벤토리 레코드나 전송 envelope에는 포함하지 않습니다.
 
 ### 6.2 CPU (`hardware.cpu`)
 
@@ -534,7 +538,7 @@ sudo systemctl restart invenqor-agent
 | `addresses` | IPv4/IPv6 주소 문자열 배열 |
 
 네트워크 네임스페이스 기준으로 보이는 인터페이스만 수집합니다. 프리픽스 길이,
-브로드캐스트, VLAN/본딩 관계는 v0.2.13에 포함되지 않습니다.
+브로드캐스트, VLAN/본딩 관계는 v0.2.14에 포함되지 않습니다.
 
 ### 6.6 네트워크 구성 (`network.configuration`)
 
@@ -548,7 +552,7 @@ sudo systemctl restart invenqor-agent
 | `listening[]` | protocol, local address, local port |
 
 TCP는 상태 `LISTEN`만 포함합니다. UDP는 연결 상태 개념 차이로 `/proc/net/udp*`의
-로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.13의 기본 경로 수집은
+로컬 endpoint를 포함합니다. IPv6 주소는 수집하지만 v0.2.14의 기본 경로 수집은
 IPv4 `/proc/net/route`만 사용합니다. 소켓과 프로세스의 연결 관계는 제공하지
 않습니다.
 
@@ -641,7 +645,7 @@ Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 �
 
 | 카테고리 | Windows 원천 | Linux와 다른 필드 |
 |---|---|---|
-| `system` | `CurrentVersion` 레지스트리, SMBIOS | `os_build`(UBR 포함), `edition_id`, `install_type`, `domain_role`, `firmware_uuid` |
+| `system` | `CurrentVersion` 레지스트리, SMBIOS | `os_name`, Linux 호환 `os_release`, `os_build`(UBR 포함), `edition_id`, `install_type`, `domain_role`, `firmware_uuid` |
 | `hardware.cpu` | `CentralProcessor\0` 레지스트리, `GetNativeSystemInfo` | `megahertz` |
 | `hardware.memory` | `GlobalMemoryStatusEx` | `page_file_total_bytes`, `page_file_available_bytes` |
 | `hardware.filesystem` | `GetLogicalDriveStringsW`, `GetVolumeInformationW` | `mountpoint`은 `C:\` 형태, `drive_type`, `label` |
@@ -658,7 +662,11 @@ Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 �
   "Windows 10 …"을 보고합니다. Microsoft가 값을 갱신하지 않았기 때문이며, 이
   값을 그대로 쓰는 인벤토리는 Windows 11 전체를 Windows 10으로 집계합니다.
   Agent는 빌드 번호 22000 이상에서 이름을 교정합니다. Server 계열은 빌드 번호
-  체계를 공유하므로 교정 대상이 아닙니다.
+  체계를 공유하므로 교정 대상이 아닙니다. v0.2.14 Agent는 최상위 `os_name`과
+  `os_release.{id,name,pretty_name,version_id,build_id}`를 함께 보내고, Server는
+  두 형식을 모두 읽습니다. v0.2.13 이하에서 이미 등록된 장비는 저장된 `system`
+  원천을 첫 heartbeat에서 다시 투영하거나 다음 `system` delta를 처리해 자동
+  복구하므로 Agent 상태 파일을 삭제하지 마십시오.
 - **설치 소프트웨어 범위**: 64비트 machine 뷰만 읽으면 32비트 제품(WOW6432Node)
   과 사용자별 설치가 모두 누락됩니다. 세 범위를 모두 읽고 `scope` 필드로
   구분합니다. Windows가 프로그램 목록에서 숨기는 항목 — `SystemComponent`,
@@ -669,6 +677,59 @@ Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 �
 
 프로세스 명령행은 Windows에서도 기본 비수집입니다. 서비스와 예약 작업의 명령행에
 자격 증명이 들어가는 경우가 흔합니다.
+
+## 6.13 주요 소프트웨어 자동 식별 (`software_product`)
+
+원시 `process`는 시점 관찰이고 `service`와 `software.package`는 설치·구성
+증거입니다. 어느 하나만 CMDB 소프트웨어로 사용하면 다중 PID를 중복 집계하거나,
+설치됐지만 실행되지 않는 제품과 실행됐지만 패키지 관리자를 거치지 않은 제품을
+놓칩니다. v0.2.14 Server는 매 inventory에서 세 원천을 host 단위로 다시 결합해
+`software_product` 대표 자산을 만듭니다.
+
+| 출력 필드 | 의미 |
+|---|---|
+| `product_key`, `product_name`, `vendor`, `role` | 카탈로그의 안정 ID, 표시명, 제조사와 운영 역할 |
+| `version`, `versions` | 패키지 증거에서 확인된 대표/전체 버전 |
+| `install_state` | 패키지·서비스가 있으면 `installed`, 프로세스만 있으면 `observed` |
+| `runtime_state` | `running`, `stopped`, 현재 상태를 확인할 수 없는 `unknown` |
+| `service_names`, `process_names`, `package_names` | 정규화에 사용한 host별 신호 |
+| `executable_paths` | 인자를 제거한 실행 파일 경로. 서비스 비밀번호·Token을 복제하지 않음 |
+| `evidence[]` | `kind`, 이름, 원시 `source_asset_id`로 구성된 설명 가능한 근거 |
+| `confidence`, `detection_method`, `catalog_version` | 근거 강도, `builtin_catalog`, 규칙 집합 버전 |
+
+내장 카탈로그 `2026.08.1`은 51개 제품을 보수적으로 식별합니다. DB, 검색,
+웹·proxy, 애플리케이션 서버, 컨테이너·오케스트레이션, 메시지 브로커, 관측·보안,
+백업, CI/CD, 원격 접속, guest tools와 Invenqor Agent에 더해 Office/Microsoft 365,
+Chrome·Edge·Firefox, Teams·Zoom, Java·.NET, MECM·Tanium·BigFix, Elastic Agent·Wazuh를
+포함합니다. 카탈로그에
+없는 프로세스는 제품으로 만들지 않으므로 운영자가 일반 PID를 수동 분류할 필요가
+없고, 알 수 없는 이름 때문에 오탐 자산이 늘어나지 않습니다. Chrome·Java 같은 범용
+process는 단독 신호로 제품에 승격하지 않고 패키지·서비스·고유 경로 등 강한
+증거를 요구합니다.
+
+판별 기본 강도는 서비스명 0.95, 패키지명 0.90, 실행 파일 basename 0.86,
+제품 고유 경로 0.84, 프로세스명 0.82입니다. 서로 다른 증거 종류가 일치하면
+가산하되 0.99를 넘지 않습니다. PostgreSQL client/common/libs/devel처럼 서버
+설치를 뜻하지 않는 패키지는 제외합니다. 일반 부분 문자열이 아니라 정확 이름과
+제한된 glob, 실행 경로를 사용합니다. 화면에서 0.80 미만은 **검토 권장**으로
+분리하지만 자동 제거하거나 사용자가 매핑을 보정하도록 강제하지 않습니다.
+
+제품 자산은 다음 운영 계약을 따릅니다.
+
+1. Agent ID와 `product_key`로 host별 안정 자산 키를 만들고 여러 PID를 하나로
+   합칩니다.
+2. 실제 host와 자동 `runs_on` 관계를 만들고 host 환경을 상속합니다.
+3. Agent inventory와 같은 DB 트랜잭션에서 갱신하므로 멀티 Pod에서도 원시 증거와
+   정규화 상태가 어긋난 중간 결과를 노출하지 않습니다.
+4. 증거가 바뀌면 상태·버전·확신도를 다시 계산하고 변경 이력 사유
+   `automatic_software_catalog`를 기록합니다.
+5. 마지막 증거가 사라지면 제품과 자동 관계를 논리 종료하고, 다시 나타나면 기존
+   제품을 재활성화합니다. 같은 inventory 재처리는 중복을 만들지 않습니다.
+
+일반 자산 화면과 운영 Dashboard는 `scope=managed`를 사용해 process 자산을 기본
+제외합니다. 이는 표시·집계 범위일 뿐 원시 evidence를 삭제하지 않습니다. 사고
+조사에는 **프로세스 관찰 포함**을 켜고, 일상 운영에는 **주요 소프트웨어** 화면에서
+제품·호스트·버전·설치/실행 상태와 상세 근거를 사용하십시오.
 
 ## 7. 수집 실패와 변경 판정
 
@@ -724,7 +785,7 @@ Windows에서도 같은 카테고리를 만들되, 원천과 몇몇 필드가 �
 ```http
 POST {server.url}/v1/agent/events
 Content-Type: application/json
-User-Agent: invenqor-agent/0.2.13
+User-Agent: invenqor-agent/0.2.14
 X-Invenqor-Agent-Id: <agent UUID>
 X-Invenqor-Event-Id: <event UUID>
 Authorization: Bearer <token>   # 구성한 경우
@@ -749,12 +810,12 @@ Authorization: Bearer <token>   # 구성한 경우
 ```json
 {
   "accepted": true,
-  "policy_version": "2026-07-30.1"
+  "policy_version": "2026-08-21.1"
 }
 ```
 
 HTTP 2xx와 `accepted: true`가 모두 충족돼야 성공입니다. `policy_version`은
-로그에 관찰만 하며 v0.2.13는 원격 정책이나 명령을 실행하지 않습니다.
+로그에 관찰만 하며 v0.2.14는 원격 정책이나 명령을 실행하지 않습니다.
 
 게이트웨이는 `event_id`에 대해 멱등 처리해야 합니다. 네트워크 단절로 서버가
 처리 후 응답을 보내지 못하면 같은 event가 재전송될 수 있습니다.
@@ -924,7 +985,7 @@ DB에 저장되고 등록 요청마다 읽으므로 Kubernetes 모든 Pod에 즉
 
 ### 12.2 업그레이드
 
-v0.2.13는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
+v0.2.14는 관리자가 승인한 Ed25519 서명 artifact의 자동 스테이징과 권한 분리
 기반 원자 교체를 지원합니다. 서명 개인키는 Server와 Agent에 배포하지 않고
 오프라인 환경에서 보관합니다. Agent는 더 높은 버전(또는 `allow_downgrade`가
 지정된 릴리즈), 일치하는 OS/Architecture, 128 MiB 이하 크기, SHA-256과 서명이
@@ -1205,8 +1266,15 @@ Session과 CSRF Cookie는 `SameSite=Lax`로 발급됩니다. Keycloak Callback�
 ## 17. 운영 통계와 관리 콘솔 API 연결
 
 **운영 현황**은 브라우저에서 임의 합산하지 않고
-`GET /api/v1/dashboard/statistics`의 PostgreSQL 집계를 사용합니다. 이 API는
-`assets.read` 권한이 필요하며 삭제되지 않은 자산만 집계합니다.
+`GET /api/v1/dashboard/statistics?scope=managed`의 PostgreSQL 집계를 사용합니다.
+이 API는 `assets.read` 권한이 필요하며 삭제되지 않은 자산 중 원시 process를
+제외합니다. 전체 관찰 자산 집계가 필요한 외부 연계는 `scope`를 생략하십시오.
+
+**주요 소프트웨어**는
+`GET /api/v1/assets/software-products`를 사용합니다. `q`, `role`, `vendor`,
+`runtime_state`, `confidence`, `limit`, `offset` 필터를 지원하고 제품·인스턴스·
+호스트·실행 상태·식별 품질 summary와 host별 evidence를 같은 응답에 제공합니다.
+카탈로그 결과는 공용 PostgreSQL에 저장되므로 어느 Pod에서 조회해도 동일합니다.
 
 | 지표 | 판정 기준 |
 |---|---|

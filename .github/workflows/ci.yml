@@ -25,6 +25,8 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+      - name: Verify the checked-in Server UI matches the React build
+        run: git diff --exit-code -- server/internal/webui/dist
       - run: go test ./...
         working-directory: server
       - run: go vet ./...
@@ -50,8 +52,13 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             cpu: x86-64
+            artifact: invenqor-agent
           - target: aarch64-unknown-linux-musl
             cpu: generic
+            artifact: invenqor-agent
+          - target: x86_64-pc-windows-gnu
+            cpu: x86-64
+            artifact: invenqor-agent.exe
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -62,4 +69,37 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           args: --locked --release
-      - run: file target/${{ matrix.target }}/release/invenqor-agent
+      - run: file target/${{ matrix.target }}/release/${{ matrix.artifact }}
+      - name: Publish the Windows GNU release binary for native E2E
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: invenqor-agent-windows-gnu
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-native-e2e:
+    needs: static-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets
+      - name: Download the exact GNU binary shipped in the Windows release ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: invenqor-agent-windows-gnu
+          path: target/release
+      - name: Verify the release binary starts on native Windows
+        run: ./target/release/invenqor-agent.exe --version
+        shell: pwsh
+      - run: go build -o invenqor-server.exe ./cmd/invenqor-server
+        working-directory: server
+      - run: ./scripts/e2e-windows.ps1
+        shell: pwsh

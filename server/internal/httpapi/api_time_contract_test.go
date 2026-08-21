@@ -74,6 +74,7 @@ func TestAPIResponsesAlwaysCarryZonedTimestamps(t *testing.T) {
 		"/api/v1/admin/settings/agent-enrollment",
 		"/api/v1/admin/settings/classification",
 		"/api/v1/assets?limit=50",
+		"/api/v1/assets/software-products?limit=50",
 		"/api/v1/dashboard/statistics",
 		"/api/v1/auth/me",
 	}

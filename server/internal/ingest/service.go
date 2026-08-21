@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/agents"
 	"github.com/hkjang/invenqor/server/internal/classify"
+	"github.com/hkjang/invenqor/server/internal/softwarecatalog"
 )
 
 var ErrInProgress = errors.New("event is already being processed")
@@ -180,6 +181,37 @@ func (s *Service) Process(
 		}
 		assetIDs = append(assetIDs, assetID)
 	}
+	// Raw processes are useful evidence but poor CMDB assets: one database may
+	// expose dozens of PIDs and a Windows workstation may expose hundreds. Build
+	// one host-scoped, explainable software product from all active process,
+	// service, and package evidence. The reconciliation is part of this event's
+	// transaction, so another Server pod can never see stale runtime state.
+	reconcileSoftware, err := softwarecatalog.ReconciliationRequired(
+		ctx, tx, agent.ID,
+	)
+	if err != nil {
+		return s.failEvent(
+			ctx, tx, eventInternalID, agent, envelope, raw, err,
+		)
+	}
+	// Inventory changes always rebuild the view. A heartbeat does so only once
+	// per catalogue version, which upgrades dormant v0.2.13 Agents without
+	// repeatedly scanning unchanged raw evidence.
+	reconcileSoftware = envelope.Kind == "inventory" || reconcileSoftware
+	if reconcileSoftware {
+		if err := softwarecatalog.Reconcile(
+			ctx,
+			tx,
+			agent.ID,
+			agent.AgentID,
+			eventInternalID,
+			s.now(),
+		); err != nil {
+			return s.failEvent(
+				ctx, tx, eventInternalID, agent, envelope, raw, err,
+			)
+		}
+	}
 	errorsToStore := append(
 		append([]CollectionError{}, envelope.CollectionErrors...),
 		snapshotErrors(envelope.Snapshot)...,
@@ -210,7 +242,14 @@ func (s *Service) Process(
 	if envelope.Kind == "inventory" {
 		inventoryAt = now
 	}
-	hostname, osName, architecture := agentMetadata(envelope)
+	hostname, osName, architecture, err := agentMetadataWithStoredFallback(
+		ctx, tx, agent, envelope,
+	)
+	if err != nil {
+		return s.failEvent(
+			ctx, tx, eventInternalID, agent, envelope, raw, err,
+		)
+	}
 	_, err = tx.ExecContext(
 		ctx,
 		`UPDATE agents SET
@@ -695,29 +734,126 @@ func (s *Service) proposeDuplicates(
 }
 
 func agentMetadata(envelope Envelope) (string, string, string) {
-	if envelope.Snapshot == nil {
-		return "", "", ""
-	}
-	for _, record := range envelope.Snapshot.Records {
-		if record.Category != "system" {
-			continue
-		}
-		var payload map[string]any
-		if json.Unmarshal(record.Payload, &payload) != nil {
-			continue
-		}
-		hostname, _ := payload["hostname"].(string)
-		architecture, _ := payload["architecture"].(string)
-		osName := ""
-		if release, ok := payload["os_release"].(map[string]any); ok {
-			osName, _ = release["pretty_name"].(string)
-			if osName == "" {
-				osName, _ = release["name"].(string)
+	if envelope.Snapshot != nil {
+		for _, record := range envelope.Snapshot.Records {
+			if hostname, osName, architecture, found := systemMetadata(record); found {
+				return hostname, osName, architecture
 			}
 		}
-		return hostname, osName, architecture
+	}
+	// An upgraded Agent normally sends the newly expanded Windows system payload
+	// as a delta, not another full snapshot. Reading only Snapshot left Agents
+	// registered before v0.2.14 stuck with an empty os_name even though the new
+	// payload had arrived successfully.
+	for _, change := range envelope.Changes {
+		if change.Record == nil || (change.Kind != "added" && change.Kind != "updated") {
+			continue
+		}
+		if hostname, osName, architecture, found := systemMetadata(*change.Record); found {
+			return hostname, osName, architecture
+		}
 	}
 	return "", "", ""
+}
+
+// agentMetadataWithStoredFallback repairs agents created by older Servers.
+// Their Windows system source already contains useful top-level metadata, but
+// the denormalized agents row may still be blank. Heartbeats carry no records,
+// so use the latest active system source only when the event has no metadata
+// and the authenticated row is incomplete. Fully populated agents stay on the
+// query-free hot path.
+func agentMetadataWithStoredFallback(
+	ctx context.Context,
+	transaction *sql.Tx,
+	agent agents.Agent,
+	envelope Envelope,
+) (string, string, string, error) {
+	hostname, osName, architecture := agentMetadata(envelope)
+	if hostname != "" || osName != "" || architecture != "" {
+		return hostname, osName, architecture, nil
+	}
+	if strings.TrimSpace(agent.Hostname) != "" &&
+		strings.TrimSpace(agent.OSName) != "" &&
+		strings.TrimSpace(agent.Architecture) != "" {
+		return "", "", "", nil
+	}
+	var raw any
+	err := transaction.QueryRowContext(
+		ctx,
+		`SELECT payload_json FROM asset_sources
+		  WHERE agent_id = $1 AND category = 'system' AND deleted_at IS NULL
+		  ORDER BY last_seen_at DESC, id LIMIT 1`,
+		agent.ID,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", nil
+	}
+	if err != nil {
+		return "", "", "", fmt.Errorf("read stored agent system metadata: %w", err)
+	}
+	var payload json.RawMessage
+	switch value := raw.(type) {
+	case string:
+		payload = json.RawMessage(value)
+	case []byte:
+		payload = json.RawMessage(value)
+	default:
+		payload = json.RawMessage(fmt.Sprint(value))
+	}
+	fallbackHostname, fallbackOSName, fallbackArchitecture, found := systemMetadata(
+		AssetRecord{Category: "system", Payload: payload},
+	)
+	if !found {
+		return "", "", "", nil
+	}
+	if strings.TrimSpace(agent.Hostname) == "" {
+		hostname = fallbackHostname
+	}
+	if strings.TrimSpace(agent.OSName) == "" {
+		osName = fallbackOSName
+	}
+	if strings.TrimSpace(agent.Architecture) == "" {
+		architecture = fallbackArchitecture
+	}
+	return hostname, osName, architecture, nil
+}
+
+func systemMetadata(record AssetRecord) (string, string, string, bool) {
+	if record.Category != "system" {
+		return "", "", "", false
+	}
+	var payload map[string]any
+	if json.Unmarshal(record.Payload, &payload) != nil {
+		return "", "", "", false
+	}
+	hostname, _ := payload["hostname"].(string)
+	architecture, _ := payload["architecture"].(string)
+	// Windows sends a canonical top-level os_name (for example
+	// "Windows 11 Enterprise"), while Linux sends os_release. The old
+	// Linux-only lookup silently discarded a perfectly valid Windows system
+	// record, leaving an active and fully inventoried Agent displayed as
+	// "operating system pending" forever.
+	osName, _ := payload["os_name"].(string)
+	osName = strings.TrimSpace(osName)
+	if release, ok := payload["os_release"].(map[string]any); ok {
+		if osName == "" {
+			osName, _ = release["pretty_name"].(string)
+		}
+		if strings.TrimSpace(osName) == "" {
+			osName, _ = release["name"].(string)
+		}
+	}
+	if strings.TrimSpace(osName) == "" {
+		// A partially readable Windows registry should still identify the
+		// platform honestly instead of looking like inventory never arrived.
+		if family, _ := payload["os_family"].(string); strings.EqualFold(
+			strings.TrimSpace(family), "windows",
+		) {
+			osName = "Windows"
+		}
+	}
+	return strings.TrimSpace(hostname), strings.TrimSpace(osName),
+		strings.TrimSpace(architecture), true
 }
 
 func assetType(category string) string {

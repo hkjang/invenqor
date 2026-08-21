@@ -67,6 +67,7 @@ type assetListFilter struct {
 	Criticality    string
 	Owner          string
 	IncludeDeleted bool
+	ManagedOnly    bool
 	Sort           string
 	Limit          int
 	Offset         int
@@ -86,6 +87,7 @@ func parseAssetListFilter(request *http.Request) assetListFilter {
 		Criticality:    strings.TrimSpace(values.Get("criticality")),
 		Owner:          strings.TrimSpace(values.Get("owner_department")),
 		IncludeDeleted: values.Get("include_deleted") == "true",
+		ManagedOnly:    values.Get("scope") == "managed",
 		Sort:           strings.TrimSpace(values.Get("sort")),
 		Limit:          queryInt(request, "limit", 50, 1, 200),
 		Offset:         queryInt(request, "offset", 0, 0, 1_000_000),
@@ -125,6 +127,11 @@ func (filter assetListFilter) where() (string, []any) {
 	}
 	if !filter.IncludeDeleted {
 		statement += " AND deleted_at IS NULL"
+	}
+	if filter.ManagedOnly {
+		// Process rows are valuable forensic evidence, but they are observations,
+		// not configuration items an operator should have to manage one by one.
+		statement += " AND type <> 'process'"
 	}
 	return statement, arguments
 }

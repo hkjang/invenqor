@@ -105,9 +105,11 @@ func TestIngestClassifiesInventoryAndBuildsAReadableGraph(t *testing.T) {
 		t.Fatalf("account = %+v", account)
 	}
 
-	// The graph: two interfaces, one volume, and the two curated services. The
-	// eight remaining records - packages, the account, the ordinary units - stay
-	// out of it, which is what keeps a topology view readable.
+	// The graph keeps the component relationships and now adds one stable,
+	// normalized product per recognizable service family. Raw packages,
+	// processes, accounts and ordinary units still stay out; nginx/postgresql
+	// service observations remain as evidence while the product nodes give the
+	// CMDB a lifecycle identity that does not change with a PID or unit name.
 	type edge struct {
 		source     string
 		relation   string
@@ -140,8 +142,8 @@ func TestIngestClassifiesInventoryAndBuildsAReadableGraph(t *testing.T) {
 	if err := edgeRows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(edges) != 5 {
-		t.Fatalf("edges = %+v, want exactly the curated five", edges)
+	if len(edges) != 8 {
+		t.Fatalf("edges = %+v, want the curated components and three products", edges)
 	}
 	expected := map[string]string{
 		"eth0": "part_of",
@@ -149,6 +151,9 @@ func TestIngestClassifiesInventoryAndBuildsAReadableGraph(t *testing.T) {
 		// A filesystem record is named after its device by the collector naming
 		// order, so the volume edge carries that name.
 		"/dev/sda1":                  "attached_to",
+		"NGINX":                      "runs_on",
+		"OpenSSH Server":             "runs_on",
+		"PostgreSQL":                 "runs_on",
 		"nginx.service":              "runs_on",
 		"postgresql@14-main.service": "runs_on",
 	}
@@ -167,7 +172,7 @@ func TestIngestClassifiesInventoryAndBuildsAReadableGraph(t *testing.T) {
 	// Re-processing must be idempotent: no duplicate edges, no drift.
 	second := inventoryEnvelope(agent.AgentID, records)
 	processEnvelope(t, service, agent, second)
-	assertCount(t, runtime, "asset_relations", 5)
+	assertCount(t, runtime, "asset_relations", 8)
 }
 
 // A field an operator has taken over must survive every later automatic pass,

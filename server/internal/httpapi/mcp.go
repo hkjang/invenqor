@@ -51,13 +51,29 @@ var mcpTools = []mcpTool{
 	},
 	{
 		Name: "asset_search", Title: "Search IT assets",
-		Description: "Search normalized IT assets by name/key, type, and status.",
+		Description: "Search normalized IT assets by name/key, type, and status. Raw process observations are excluded unless explicitly requested.",
 		InputSchema: objectSchema(map[string]any{
-			"q":      map[string]any{"type": "string", "maxLength": 200},
-			"type":   map[string]any{"type": "string", "maxLength": 100},
-			"status": map[string]any{"type": "string", "maxLength": 50},
-			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
-			"offset": map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
+			"q":                    map[string]any{"type": "string", "maxLength": 200},
+			"type":                 map[string]any{"type": "string", "maxLength": 100},
+			"status":               map[string]any{"type": "string", "maxLength": 50},
+			"include_observations": map[string]any{"type": "boolean", "default": false, "description": "Include raw process observations used as product-detection evidence."},
+			"limit":                map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"offset":               map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
+		}, nil),
+		Annotations: map[string]any{"readOnlyHint": true, "idempotentHint": true},
+		Scope:       "assets.read",
+	},
+	{
+		Name: "software_inventory", Title: "Inspect managed software",
+		Description: "List host-scoped major software products automatically correlated from package, service, and process evidence, including lifecycle state and explainable confidence.",
+		InputSchema: objectSchema(map[string]any{
+			"q":             map[string]any{"type": "string", "maxLength": 200},
+			"role":          map[string]any{"type": "string", "maxLength": 100},
+			"vendor":        map[string]any{"type": "string", "maxLength": 200},
+			"runtime_state": map[string]any{"type": "string", "enum": []string{"running", "stopped", "unknown"}},
+			"confidence":    map[string]any{"type": "string", "enum": []string{"high", "review"}},
+			"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"offset":        map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
 		}, nil),
 		Annotations: map[string]any{"readOnlyHint": true, "idempotentHint": true},
 		Scope:       "assets.read",
@@ -189,6 +205,8 @@ func (s *Server) mcpCallTool(w http.ResponseWriter, r *http.Request, request mcp
 	switch call.Name {
 	case "asset_search":
 		result, err = s.mcpAssetSearch(r, call.Arguments)
+	case "software_inventory":
+		result, err = s.mcpSoftwareInventory(r, call.Arguments)
 	case "asset_get":
 		result, err = s.mcpAssetGet(r, call.Arguments)
 	case "asset_relations":
@@ -210,11 +228,12 @@ func (s *Server) mcpCallTool(w http.ResponseWriter, r *http.Request, request mcp
 
 func (s *Server) mcpAssetSearch(r *http.Request, raw json.RawMessage) (any, error) {
 	var input struct {
-		Q      string `json:"q"`
-		Type   string `json:"type"`
-		Status string `json:"status"`
-		Limit  int    `json:"limit"`
-		Offset int    `json:"offset"`
+		Q                   string `json:"q"`
+		Type                string `json:"type"`
+		Status              string `json:"status"`
+		IncludeObservations bool   `json:"include_observations"`
+		Limit               int    `json:"limit"`
+		Offset              int    `json:"offset"`
 	}
 	if len(raw) > 0 && strictJSON(raw, &input) != nil {
 		return nil, errors.New("asset_search arguments are invalid")
@@ -229,10 +248,11 @@ func (s *Server) mcpAssetSearch(r *http.Request, raw json.RawMessage) (any, erro
 		`SELECT `+assetColumns+` FROM assets
 		 WHERE ($1='' OR LOWER(name) LIKE LOWER($2) OR LOWER(asset_key) LIKE LOWER($2))
 		 AND ($3='' OR type=$3) AND ($4='' OR status=$4)
-		 AND deleted_at IS NULL ORDER BY last_seen_at DESC, id LIMIT $5 OFFSET $6`,
+		 AND deleted_at IS NULL AND ($7 OR type <> 'process')
+		 ORDER BY last_seen_at DESC, id LIMIT $5 OFFSET $6`,
 		strings.TrimSpace(input.Q), "%"+strings.TrimSpace(input.Q)+"%",
 		strings.TrimSpace(input.Type), strings.TrimSpace(input.Status),
-		input.Limit, input.Offset,
+		input.Limit, input.Offset, input.IncludeObservations,
 	)
 	if err != nil {
 		return nil, err
@@ -247,6 +267,43 @@ func (s *Server) mcpAssetSearch(r *http.Request, raw json.RawMessage) (any, erro
 		items = append(items, item)
 	}
 	return map[string]any{"items": items, "limit": input.Limit, "offset": input.Offset}, rows.Err()
+}
+
+func (s *Server) mcpSoftwareInventory(r *http.Request, raw json.RawMessage) (any, error) {
+	var input struct {
+		Q          string `json:"q"`
+		Role       string `json:"role"`
+		Vendor     string `json:"vendor"`
+		Runtime    string `json:"runtime_state"`
+		Confidence string `json:"confidence"`
+		Limit      int    `json:"limit"`
+		Offset     int    `json:"offset"`
+	}
+	if len(raw) > 0 && strictJSON(raw, &input) != nil {
+		return nil, errors.New("software_inventory arguments are invalid")
+	}
+	if input.Limit == 0 {
+		input.Limit = 50
+	}
+	if input.Limit < 1 || input.Limit > 100 || input.Offset < 0 || input.Offset > 1_000_000 {
+		return nil, errors.New("software_inventory pagination is out of range")
+	}
+	if input.Runtime != "" && input.Runtime != "running" &&
+		input.Runtime != "stopped" && input.Runtime != "unknown" {
+		return nil, errors.New("software_inventory runtime_state is invalid")
+	}
+	if input.Confidence != "" && input.Confidence != "high" && input.Confidence != "review" {
+		return nil, errors.New("software_inventory confidence is invalid")
+	}
+	return s.querySoftwareInventory(r.Context(), softwareInventoryQuery{
+		Query:        input.Q,
+		Role:         input.Role,
+		Vendor:       input.Vendor,
+		RuntimeState: input.Runtime,
+		Confidence:   input.Confidence,
+		Limit:        input.Limit,
+		Offset:       input.Offset,
+	})
 }
 
 func (s *Server) mcpAssetGet(r *http.Request, raw json.RawMessage) (any, error) {

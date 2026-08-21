@@ -103,6 +103,132 @@ func TestInventoryIsIdempotentAndPreservesRawEvent(t *testing.T) {
 	}
 }
 
+func TestWindowsSystemMetadataUpdatesRegisteredAgent(t *testing.T) {
+	t.Parallel()
+	runtime, agent, service := testService(t)
+	envelope := inventoryEnvelope(agent.AgentID, []AssetRecord{
+		record(
+			"windows-host",
+			"system",
+			`{"hostname":"win-ops-01","os_family":"windows","os_name":"Windows 11 Enterprise","os_version":"24H2","os_build":"26100.4652","architecture":"x86_64"}`,
+		),
+	})
+	processEnvelope(t, service, agent, envelope)
+
+	var hostname, osName, architecture string
+	if err := runtime.DB().QueryRow(
+		"SELECT hostname, os_name, architecture FROM agents WHERE id = $1",
+		agent.ID,
+	).Scan(&hostname, &osName, &architecture); err != nil {
+		t.Fatal(err)
+	}
+	if hostname != "win-ops-01" || osName != "Windows 11 Enterprise" ||
+		architecture != "x86_64" {
+		t.Fatalf(
+			"Windows metadata = %q/%q/%q",
+			hostname, osName, architecture,
+		)
+	}
+}
+
+func TestWindowsFamilyIsSafeMetadataFallback(t *testing.T) {
+	t.Parallel()
+	agentID := uuid.NewString()
+	envelope := inventoryEnvelope(agentID, []AssetRecord{
+		record(
+			"windows-host",
+			"system",
+			`{"hostname":"win-core","os_family":"Windows","architecture":"aarch64"}`,
+		),
+	})
+	hostname, osName, architecture := agentMetadata(envelope)
+	if hostname != "win-core" || osName != "Windows" || architecture != "aarch64" {
+		t.Fatalf("fallback metadata = %q/%q/%q", hostname, osName, architecture)
+	}
+}
+
+func TestWindowsMetadataRecoversFromDeltaAfterAgentUpgrade(t *testing.T) {
+	t.Parallel()
+	runtime, agent, service := testService(t)
+	system := record(
+		"windows-host",
+		"system",
+		`{"hostname":"win-upgraded","os_family":"windows","os_name":"Windows Server 2022 Datacenter","architecture":"x86_64"}`,
+	)
+	envelope := inventoryEnvelope(agent.AgentID, nil)
+	envelope.Changes = []AssetChange{{
+		Kind: "updated", AssetID: system.AssetID,
+		Category: system.Category, Record: &system,
+	}}
+	processEnvelope(t, service, agent, envelope)
+
+	var hostname, osName string
+	if err := runtime.DB().QueryRow(
+		"SELECT hostname, os_name FROM agents WHERE id = $1", agent.ID,
+	).Scan(&hostname, &osName); err != nil {
+		t.Fatal(err)
+	}
+	if hostname != "win-upgraded" || osName != "Windows Server 2022 Datacenter" {
+		t.Fatalf("delta metadata = %q/%q", hostname, osName)
+	}
+}
+
+func TestWindowsMetadataRecoversFromStoredSystemSourceOnHeartbeat(t *testing.T) {
+	t.Parallel()
+	runtime, agent, service := testService(t)
+	processEnvelope(t, service, agent, inventoryEnvelope(agent.AgentID, []AssetRecord{
+		record(
+			"windows-host",
+			"system",
+			`{"hostname":"win-existing","os_family":"windows","os_name":"Windows Server 2019 Datacenter","architecture":"x86_64"}`,
+		),
+	}))
+	// v0.2.13 retained the raw source but failed to project these Windows fields
+	// onto the agents row. The next heartbeat must repair that existing state.
+	if _, err := runtime.DB().Exec(
+		`UPDATE agents SET hostname = '', os_name = '', architecture = ''
+		  WHERE id = $1`,
+		agent.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	legacyAgent := agent
+	legacyAgent.Hostname = ""
+	legacyAgent.OSName = ""
+	legacyAgent.Architecture = ""
+	processEnvelope(t, service, legacyAgent, heartbeatEnvelope(agent.AgentID))
+
+	var hostname, osName, architecture string
+	if err := runtime.DB().QueryRow(
+		"SELECT hostname, os_name, architecture FROM agents WHERE id = $1",
+		agent.ID,
+	).Scan(&hostname, &osName, &architecture); err != nil {
+		t.Fatal(err)
+	}
+	if hostname != "win-existing" || osName != "Windows Server 2019 Datacenter" ||
+		architecture != "x86_64" {
+		t.Fatalf("heartbeat metadata recovery = %q/%q/%q", hostname, osName, architecture)
+	}
+}
+
+func TestStoredMetadataFallbackSkipsLookupForCompleteAgent(t *testing.T) {
+	t.Parallel()
+	hostname, osName, architecture, err := agentMetadataWithStoredFallback(
+		context.Background(),
+		nil, // A complete agent must return before touching the transaction.
+		agents.Agent{
+			Hostname: "complete-host", OSName: "Windows 11", Architecture: "x86_64",
+		},
+		heartbeatEnvelope(uuid.NewString()),
+	)
+	if err != nil || hostname != "" || osName != "" || architecture != "" {
+		t.Fatalf(
+			"complete agent fallback = %q/%q/%q, error = %v",
+			hostname, osName, architecture, err,
+		)
+	}
+}
+
 func TestCollectorErrorNeverInfersRemovalAndExplicitRemovalIsLogical(t *testing.T) {
 	t.Parallel()
 	runtime, agent, service := testService(t)

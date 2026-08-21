@@ -5,6 +5,8 @@
 //! here, apart from the registry access, so they are tested on every platform
 //! rather than only where they run.
 
+use serde::Serialize;
+
 /// Corrects the operating system name.
 ///
 /// Every Windows 11 host reports `ProductName` as "Windows 10 …" - Microsoft never
@@ -12,12 +14,63 @@
 /// Windows 11 estate as Windows 10 because of it. Build 22000 is the first
 /// Windows 11 build, so the build number is what the name is corrected from.
 pub fn edition_name(product: Option<&str>, build: Option<&str>) -> String {
-    let product = product.unwrap_or("Windows");
-    let build_number: u32 = build.and_then(|value| value.parse().ok()).unwrap_or(0);
+    let product = product
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Windows");
+    let build_number: u32 = build
+        .map(str::trim)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     if build_number >= 22_000 && product.contains("Windows 10") {
         return product.replace("Windows 10", "Windows 11");
     }
     product.to_string()
+}
+
+/// The cross-platform release shape carried by a Windows `system` record.
+///
+/// Linux system records already carry the freedesktop `os-release` names, and
+/// older Servers use `pretty_name` from that object to populate the Agent list.
+/// The first Windows collector only emitted Windows-specific top-level fields,
+/// so those Servers successfully processed the inventory but left `os_name`
+/// empty and displayed "operating system not confirmed". Carrying both shapes
+/// makes a Windows record self-describing to old and new Servers without a
+/// platform-specific ingest contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OsReleaseMetadata {
+    pub id: &'static str,
+    pub name: String,
+    pub pretty_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
+}
+
+pub fn os_release_metadata(
+    product: Option<&str>,
+    build: Option<&str>,
+    display_version: Option<&str>,
+    full_build: Option<&str>,
+) -> OsReleaseMetadata {
+    let name = edition_name(product, build);
+    OsReleaseMetadata {
+        id: "windows",
+        pretty_name: name.clone(),
+        name,
+        // DisplayVersion (for example 23H2) is the human release when present.
+        // Older Windows Server releases may only expose the build; reporting it
+        // is more useful than an absent version and never invents a value.
+        version_id: display_version
+            .filter(|value| !value.trim().is_empty())
+            .or(build.filter(|value| !value.trim().is_empty()))
+            .map(str::to_string),
+        build_id: full_build
+            .filter(|value| !value.trim().is_empty())
+            .or(build.filter(|value| !value.trim().is_empty()))
+            .map(str::to_string),
+    }
 }
 
 /// A share of a whole, or None when there is no whole. An empty optical drive
@@ -121,6 +174,39 @@ mod tests {
         // An unreadable build must not invent a version.
         assert_eq!(edition_name(Some("Windows 10 Pro"), None), "Windows 10 Pro");
         assert_eq!(edition_name(None, Some("22631")), "Windows");
+        assert_eq!(edition_name(Some("  "), Some("22631")), "Windows");
+        assert_eq!(
+            edition_name(Some(" Windows 10 Enterprise "), Some(" 26100 ")),
+            "Windows 11 Enterprise"
+        );
+    }
+
+    #[test]
+    fn windows_release_is_compatible_with_the_cross_platform_system_contract() {
+        let release = os_release_metadata(
+            Some("Windows 10 Pro"),
+            Some("22631"),
+            Some("23H2"),
+            Some("22631.3155"),
+        );
+        assert_eq!(release.id, "windows");
+        assert_eq!(release.name, "Windows 11 Pro");
+        assert_eq!(release.pretty_name, "Windows 11 Pro");
+        assert_eq!(release.version_id.as_deref(), Some("23H2"));
+        assert_eq!(release.build_id.as_deref(), Some("22631.3155"));
+
+        let json = serde_json::to_value(release).unwrap();
+        assert_eq!(json["pretty_name"], "Windows 11 Pro");
+        assert_eq!(json["version_id"], "23H2");
+        assert_eq!(json["build_id"], "22631.3155");
+    }
+
+    #[test]
+    fn windows_release_falls_back_to_the_build_without_claiming_a_version() {
+        let release = os_release_metadata(None, Some("20348"), None, None);
+        assert_eq!(release.name, "Windows");
+        assert_eq!(release.version_id.as_deref(), Some("20348"));
+        assert_eq!(release.build_id.as_deref(), Some("20348"));
     }
 
     #[test]

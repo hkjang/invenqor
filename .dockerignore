@@ -15,4 +15,8 @@ web/node_modules
 web/dist
 server/invenqor-server
 *.tar.gz
+*.zip
 *.pdf
+dist
+.env
+.env.*

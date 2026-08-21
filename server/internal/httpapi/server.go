@@ -289,6 +289,9 @@ func (s *Server) routes() {
 			"/api/v1/assets.csv", s.exportAssets,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
+			"/api/v1/assets/software-products", s.listSoftwareProducts,
+		)
+		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/dashboard/statistics", s.dashboardStatistics,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(

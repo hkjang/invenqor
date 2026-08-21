@@ -1,18 +1,18 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · OFFICIAL GUIDE</p>
   <h1>사용자 가이드</h1>
-  <p class="subtitle">Linux 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
+  <p class="subtitle">Linux·Windows 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.13 · Server v0.2.13</p>
+    <p><strong>대상 버전</strong> Agent v0.2.14 · Server v0.2.14</p>
     <p><strong>문서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-07-30</p>
+    <p><strong>기준일</strong> 2026-08-21</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
 
 ## 이 문서의 목적
 
-이 가이드는 Invenqor Agent를 한 대의 Linux 서버에 설치하고 정상 동작을
+이 가이드는 Invenqor Agent를 한 대의 Linux 서버 또는 Windows PC·서버에 설치하고 정상 동작을
 확인해야 하는 사용자와 현장 운영자를 위한 문서입니다. 중앙 게이트웨이 설계,
 인증서 수명주기, 대량 배포와 상세 데이터 사전은
 [관리자 가이드](ADMIN_GUIDE.md)를 참조하십시오.
@@ -24,13 +24,13 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.13는 Server v0.2.13와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.14는 Server v0.2.14와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
 
-Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`에 있는 운영체제 정보를 읽어
-자산 스냅샷을 만듭니다. 수집은 외부에서 서버로 접속하는 방식이 아니라, 에이전트가
+Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`와 Windows 레지스트리·Win32·
+Service Control Manager에서 운영체제 정보를 읽어 자산 스냅샷을 만듭니다. 수집은 외부에서 서버로 접속하는 방식이 아니라, 에이전트가
 설정된 HTTPS 게이트웨이로 결과를 보내는 **outbound-only** 방식입니다.
 
 기본 수집 범위는 다음과 같습니다.
@@ -42,7 +42,7 @@ Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`에 있는 운영체제 정보
 | 파일시스템 | 장치, 마운트 지점, 파일시스템, 옵션, 용량과 inode 사용량 |
 | 네트워크 | 인터페이스, MAC/IP, 상태, MTU, 기본 경로, DNS, 로컬 포트 |
 | 프로세스 | PID, 이름, 상태, 부모 PID, UID/GID, 실행 파일 경로 |
-| 소프트웨어 | dpkg, apk 또는 rpm으로 확인한 설치 패키지 |
+| 소프트웨어 | dpkg, apk, rpm 또는 Windows Uninstall 레지스트리로 확인한 설치 제품 |
 | 서비스 | systemd, OpenRC 또는 SysV 서비스와 활성화 관련 상태 |
 | 계정 | 사용자명, UID/GID, 홈, 셸, 보조 그룹 |
 | 컨테이너 | 런타임 소켓, 컨테이너 내부 실행 여부, cgroup 버전 |
@@ -51,12 +51,17 @@ Invenqor Agent는 Linux의 `/proc`, `/sys`, `/etc`에 있는 운영체제 정보
 않습니다. 파일 내용, 사용자 비밀번호 해시, 프로세스 환경변수, 원격 명령 실행
 결과도 수집하지 않습니다.
 
+Server는 원시 프로세스·서비스·설치 패키지를 내장 카탈로그와 자동 대조해
+PostgreSQL, Microsoft SQL Server, IIS, NGINX, Docker, 보안 Agent 같은 주요
+제품으로 정규화합니다. 원시 프로세스는 판별 증거로 보존하되 기본 자산 화면에서는
+숨기므로, 사용자가 수백 PID를 하나씩 분류하거나 매핑표를 관리할 필요가 없습니다.
+
 ## 2. 설치 전 준비
 
 ### 2.1 지원 환경
 
-- CPU: `x86_64` 또는 `aarch64`
-- 운영체제: Linux
+- CPU: Linux `x86_64`/`aarch64`, Windows `x86_64`
+- 운영체제: Linux, Windows 10/11, Windows Server 2016 이상
 - 검증 기준: CentOS 7, Red Hat UBI 8/9, Ubuntu 22.04/24.04 LTS, Alpine
 - 권장 기준: Kernel 3.10 이상, RHEL 계열 7 이상, Ubuntu 22.04 이상,
   Debian 10 이상
@@ -105,8 +110,8 @@ GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이�
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
 ```bash
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor-agents/releases/download/v0.2.13/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -190,7 +195,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.13`입니다.
+예상 출력은 `invenqor-agent 0.2.14`입니다.
 
 ## 4.4 Windows에 설치하기
 
@@ -198,6 +203,9 @@ Windows는 별도 배포본을 사용합니다. `invenqor-agent-windows-x86_64.z
 체크섬을 확인하고, 압축을 푼 뒤 **관리자 권한 PowerShell**에서 설치합니다.
 
 ```powershell
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.14'
+Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile invenqor-agent-windows-x86_64.zip
+Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile invenqor-agent-windows-x86_64.zip.sha256
 (Get-FileHash invenqor-agent-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
 Get-Content invenqor-agent-windows-x86_64.zip.sha256   # 두 값이 같아야 합니다
 Expand-Archive invenqor-agent-windows-x86_64.zip -DestinationPath .
@@ -229,8 +237,10 @@ Get-Service invenqor-agent
   --config "$env:ProgramData\Invenqor\config.toml" --diagnose
 ```
 
-로그는 이벤트 로그가 아니라 서비스의 표준 오류로 나가므로, 서비스 상태와
-`--status`, `--diagnose`로 확인합니다.
+Windows 서비스에는 표준 오류를 볼 콘솔이 없으므로 Agent가
+`%ProgramData%\Invenqor\state\agent.log`에 로그를 기록합니다. 8 MiB에서
+`agent.log.1`로 회전하며, 서비스 기동 자체가 실패하면 Windows 시스템 이벤트
+로그의 Service Control Manager 항목도 확인합니다.
 
 ```powershell
 & "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
@@ -332,7 +342,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.13 registration diagnosis at 2026-07-30T09:12:44Z
+invenqor-agent 0.2.14 registration diagnosis at 2026-08-21T09:12:44Z
   host          app-web-01
   agent-id      d8d847a5-7a75-48bc-8ee8-c8e1af94f74c
   config        /etc/invenqor-agent/config.toml
@@ -346,7 +356,7 @@ invenqor-agent 0.2.13 registration diagnosis at 2026-07-30T09:12:44Z
   [PASS] transport encryption          HTTPS is configured
   [PASS] name resolution               inventory.example resolves to 10.10.4.20:7070
   [PASS] server reachability           GET /health/ready answered READY
-  [PASS] server identity               Invenqor Server 0.2.13 (pod invenqor-0, database POSTGRES)
+  [PASS] server identity               Invenqor Server 0.2.14 (pod invenqor-0, database POSTGRES)
   [PASS] observed source address       the Server sees this host as 10.20.7.31
   [PASS] registration policy           mode open, network any: this host may register
   [PASS] device credential             accepted by the Server as agent d8d847a5… (auto_bearer)
@@ -440,13 +450,13 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.13 on app-web-01
-  updated       2026-07-30T09:14:02Z
+invenqor-agent 0.2.14 on app-web-01
+  updated       2026-08-21T09:14:02Z
   server.url    https://inventory.example:7070
   registration  failed (the Server rejected or could not be reached for registration)
   queue         3 event(s), 41231 of 104857600 bytes
   delivered     0 event(s), last success never
-  last error    AGENT_SOURCE_NOT_ALLOWED during automatic enrollment at 2026-07-30T09:14:02Z
+  last error    AGENT_SOURCE_NOT_ALLOWED during automatic enrollment at 2026-08-21T09:14:02Z
                 The Agent source IP is not permitted by the enrollment policy.
                 server request_id invenqor-0/abc-000123
                 fix: The Server registration allowlist rejects this host's source IP…
@@ -551,7 +561,32 @@ grep -n '^\s*url' /etc/invenqor-agent/config.toml
 | `AGENT_ALREADY_CLAIMED` | 이미지 복제로 agent-id 중복 | 복제본의 `agent-id`, `enrollment-claim.json` 삭제 |
 | `AGENT_BLOCKED` | 관리자가 차단 | 콘솔에서 차단 해제 |
 
-### 8.1 서비스가 시작되지 않음
+### 8.1 Windows Agent가 “운영체제 확인 전”으로 표시됨
+
+먼저 **Agent** 화면의 `last_inventory_at`을 확인하십시오. 비어 있으면 운영체제
+판별 문제가 아니라 아직 첫 inventory가 도착하지 않은 것이므로 `--diagnose`,
+`--status`와 `agent.log`의 전송 오류부터 해결합니다.
+
+첫 inventory 시각은 있는데 운영체제만 비어 있다면 먼저 Server가 v0.2.14 이상인지
+확인하십시오. 이전 버전 Server는 Windows가 전송한 최상위 `os_name`을 읽지
+못했습니다. v0.2.14 Server는 기존 Agent 형식과 새 `os_release` 호환 형식을 모두
+이해하고, 이미 저장된 기존 `system` 원천도 다음 heartbeat에서 다시 투영합니다.
+따라서 Agent를 먼저 올리지 않아도 자동 복구되며, Agent v0.2.14로 순차 업데이트하면
+구 Server와의 양방향 wire 호환도 확보됩니다. `%ProgramData%\Invenqor\state`를
+삭제하거나 Agent를 재등록하지 마십시오.
+
+```powershell
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" --version
+& "$env:ProgramFiles\Invenqor\invenqor-agent.exe" `
+  --config "$env:ProgramData\Invenqor\config.toml" --status
+Get-Content "$env:ProgramData\Invenqor\state\agent.log" -Tail 80
+```
+
+다음 수집 주기를 기다리기 어렵다면 서비스를 중단한 뒤 `--once`를 한 번 실행하고
+다시 시작할 수 있습니다. 운영 서비스와 `--once`가 같은 상태 디렉터리를 동시에
+사용해서는 안 됩니다.
+
+### 8.2 서비스가 시작되지 않음
 
 ```bash
 sudo systemctl status invenqor-agent --no-pager
@@ -571,7 +606,7 @@ sudo -u invenqor-agent \
   `max_processes`가 0
 - release 바이너리에 `http://` URL 사용
 
-### 8.2 TLS 또는 인증 오류
+### 8.3 TLS 또는 인증 오류
 
 확인 순서:
 
@@ -600,14 +635,14 @@ WARN Server exchange failed stage="automatic enrollment" code=AGENT_SOURCE_NOT_A
 있습니다. Agent 로그나 문의 내용에 등록 Token, 장비 Token, Secret, 원문
 인벤토리를 붙이지 마십시오.
 
-### 8.3 수집기 오류
+### 8.4 수집기 오류
 
 에이전트는 한 수집기가 실패해도 나머지 수집을 계속합니다. 권한, 오래된
 배포판의 명령 차이, `/proc` 또는 `/sys` 마운트 제한을 확인하십시오. 수집기
 오류가 있는 주기에는 누락된 자산을 삭제로 판단하지 않아 잘못된 대량 삭제를
 방지합니다.
 
-### 8.4 큐가 계속 증가함
+### 8.5 큐가 계속 증가함
 
 ```bash
 sudo du -sh /var/lib/invenqor-agent/queue
@@ -692,13 +727,16 @@ Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO �
 자산 수, 최근 24시간 내 확인된 자산, 30분 내 연결된 Agent, 최근 24시간 수집
 이벤트와 실패 건수를 KPI로 표시합니다. 7일 수집 추이, 중요도·환경·유형·수집
 원천 분포와 점검 필요 자산/Agent를 함께 보고 수집 공백을 우선 처리하십시오.
+관리 자산 KPI와 기본 자산 목록은 원시 process 관찰을 제외해 PID 수가 자산 수를
+부풀리지 않으며, **주요 소프트웨어** 요약을 함께 표시합니다.
 
 주요 화면과 실제 동작은 다음과 같습니다.
 
 | 화면 | 사용할 수 있는 기능 |
 |---|---|
-| 자산 | 이름·유형·환경·중요도·상태 필터와 정렬, 총 건수 표시, CSV 내려받기, 등록·수정·삭제·복원, 상세·원천·이력·관계 조회 |
+| 자산 | 관리 가능한 구성 항목 중심 목록, 이름·유형·환경·중요도·상태 필터와 정렬, **프로세스 관찰 포함** 전환, CSV 내려받기, 등록·수정·삭제·복원, 상세·원천·이력·관계 조회 |
 | 자산 고급 작업 | 선택 자산 병합, 선택 수집 원천을 새 자산으로 분리, 관계 생성·삭제 |
+| 주요 소프트웨어 | 서비스·프로세스·설치 패키지를 자동 결합한 제품·호스트·버전·설치/실행 상태, 역할·상태·확신도 필터와 판별 근거 상세 |
 | Agent | 상태·최근 수집 시각 확인, 예외 장비 수동 등록, Token 회전, 차단·해제, mTLS 인증서 등록 |
 | 설정 → Agent 등록 | 신규 Agent의 URL-only/Token 모드, IP/CIDR allowlist와 신뢰 프록시를 즉시 전환 |
 | Query DSL | Server가 제공하는 필드·연산자 목록, 자주 쓰는 질의 불러오기, 구문과 AST 검증, 제한 건수 내 결과 조회 |
@@ -718,6 +756,33 @@ Invenqor 서비스로 돌아옵니다. Keycloak 계정의 이름, Email과 SSO �
 `#/settings/keycloak` 같은 URL과 사용자별 브라우저 상태에 함께 저장되어
 새로고침·뒤로가기·다시 로그인 후에도 유지됩니다. 권한이 회수된 메뉴나 잘못된
 URL은 접근 가능한 첫 화면으로 안전하게 복구됩니다.
+
+### 12.1 주요 소프트웨어 결과 읽기
+
+한 행은 전사 공통 제품 하나가 아니라 **제품이 한 호스트에 설치되거나 실행된
+인스턴스 하나**입니다. 같은 PostgreSQL 제품이 10개 호스트에서 확인되면 제품 수는
+1, 인스턴스와 관리 호스트는 각각 10으로 집계됩니다. 행을 누르면 다음 근거를
+확인할 수 있습니다.
+
+- `설치 확인`: 설치 패키지 또는 서비스 등록이 확인됨
+- `실행 관찰`: 프로세스만 확인돼 설치 방식은 특정할 수 없음
+- `실행 중`: 실행 프로세스 또는 활성 서비스가 확인됨
+- `중지`: 서비스가 존재하고 중지 상태임
+- `미확인`: 설치는 확인됐지만 현재 실행 여부를 판정할 증거가 없음
+
+신뢰도 80% 이상은 **높음**, 미만은 **검토 권장**입니다. 이는 보안 위험도가 아니라
+제품 식별 근거의 강도입니다. 상세 화면의 서비스·프로세스·패키지와 원천 ID를
+확인해 판단하십시오. v0.2.14 내장 카탈로그는 인프라와 보안 제품에 더해
+Office/Microsoft 365, Chrome·Edge·Firefox, Teams·Zoom, Java·.NET,
+MECM·Tanium·BigFix, Elastic Agent·Wazuh 등 51개 주요 제품을 식별합니다.
+카탈로그에 없는 일반 프로세스는 제품으로 추측하지 않으므로,
+목록에 없다는 사실만으로 해당 프로그램이 설치되지 않았다고 단정해서는 안 됩니다.
+Chrome·Java처럼 범용 process 단독 신호는 오탐 방지를 위해 제품으로 승격하지
+않으므로 패키지·서비스·고유 경로 근거를 함께 확인하십시오.
+
+원시 PID가 필요한 장애·보안 조사는 **자산 → 프로세스 관찰 포함**을 켜거나 유형을
+`process`로 검색합니다. 이 전환은 데이터를 새로 수집하거나 삭제하지 않고 화면
+범위만 변경합니다.
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·

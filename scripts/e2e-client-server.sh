@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+report_failure() {
+  status=$?
+  line=$1
+  echo "E2E FAIL: command at line $line exited with status $status" >&2
+  exit "$status"
+}
+trap 'report_failure "$LINENO"' ERR
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 suffix=$$
@@ -89,6 +97,81 @@ curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/admin/diagnostics/logs?q=$enrollment_only_agent_id" |
   jq -e '.items[] | select(.event_code == "AGENT_ENROLLMENT_SUCCEEDED")' >/dev/null
 
+# Exercise the Windows inventory contract against the real PostgreSQL-backed
+# Server. The native executable is cross-built in CI; this event fixes the
+# wire-level promise that Windows OS metadata and noisy process/service/package
+# evidence become a small set of host-scoped managed software products.
+windows_agent_id=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
+windows_event_id=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
+windows_now=$(date +%s)
+curl -fsS -H 'Content-Type: application/json' \
+  -d '{"agent_id":"'"$windows_agent_id"'","hostname":"windows-e2e-host","claim_token":"ivq_ec_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}' \
+  "http://127.0.0.1:$port/v1/agent/enroll" > "$work/windows-enrollment.json"
+windows_token=$(jq -r .token "$work/windows-enrollment.json")
+test "${windows_token#ivq_at_}" != "$windows_token"
+jq -n \
+  --arg agent "$windows_agent_id" --arg event "$windows_event_id" \
+  --argjson now "$windows_now" \
+  '{
+    schema_version: 1,
+    event_id: $event,
+    agent_id: $agent,
+    created_at: $now,
+    kind: "inventory",
+    snapshot_hash: "windows-managed-software-e2e",
+    snapshot: {
+      schema_version: 1,
+      agent_id: $agent,
+      collected_at: $now,
+      duration_ms: 125,
+      errors: [],
+      records: [
+        {asset_id:"windows-host", category:"system", source:"windows_system", collected_at:$now,
+         payload:{hostname:"windows-e2e-host", os_family:"windows", os_name:"Windows 11 Enterprise", os_version:"24H2", os_build:"26100.4652", architecture:"x86_64"}},
+        {asset_id:"mssql-service", category:"service", source:"windows_services", collected_at:$now,
+         payload:{name:"MSSQLSERVER", display_name:"SQL Server (MSSQLSERVER)", state:"running", active:true, enabled:true, image_path:"C:\\Program Files\\Microsoft SQL Server\\MSSQL\\Binn\\sqlservr.exe -sMSSQLSERVER"}},
+        {asset_id:"w3svc-service", category:"service", source:"windows_services", collected_at:$now,
+         payload:{name:"W3SVC", display_name:"World Wide Web Publishing Service", state:"running", active:true, enabled:true, image_path:"C:\\Windows\\system32\\svchost.exe -k iissvcs"}},
+        {asset_id:"sqlservr-process", category:"process", source:"windows_processes", collected_at:$now,
+         payload:{name:"sqlservr.exe", executable:"C:\\Program Files\\Microsoft SQL Server\\MSSQL\\Binn\\sqlservr.exe", pid:4120}},
+        {asset_id:"w3wp-process", category:"process", source:"windows_processes", collected_at:$now,
+         payload:{name:"w3wp.exe", executable:"C:\\Windows\\System32\\inetsrv\\w3wp.exe", pid:4288}},
+        {asset_id:"mssql-package", category:"software.package", source:"windows_registry", collected_at:$now,
+         payload:{name:"Microsoft SQL Server 2022 (64-bit)", version:"16.0.4135.4", publisher:"Microsoft Corporation"}}
+      ]
+    },
+    changes: [],
+    collection_errors: []
+  }' > "$work/windows-event.json"
+curl -fsS -H "Authorization: Bearer $windows_token" \
+  -H "X-Invenqor-Agent-Id: $windows_agent_id" \
+  -H "X-Invenqor-Event-Id: $windows_event_id" \
+  -H 'User-Agent: invenqor-agent/0.2.14' \
+  -H 'Content-Type: application/json' \
+  --data-binary "@$work/windows-event.json" \
+  "http://127.0.0.1:$port/v1/agent/events" |
+  jq -e '.accepted == true' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/agents" |
+  jq -e --arg id "$windows_agent_id" \
+    '.agents[] | select(.agent_id == $id) | .os_name == "Windows 11 Enterprise"' >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/assets/software-products?limit=200" \
+  > "$work/windows-software.json"
+jq -e '
+  [.items[] | select(.product_key == "microsoft-sql-server")][0] as $sql |
+  [.items[] | select(.product_key == "microsoft-iis")][0] as $iis |
+  ($sql.host.name == "windows-e2e-host" and
+   $sql.runtime_state == "running" and $sql.install_state == "installed" and
+   ($sql.evidence | map(.kind) | index("process") != null) and
+   ($sql.evidence | map(.kind) | index("service") != null) and
+   ($sql.evidence | map(.kind) | index("package") != null) and
+   $iis.host.name == "windows-e2e-host" and $iis.runtime_state == "running")
+' "$work/windows-software.json" >/dev/null
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/assets?scope=managed&q=sqlservr.exe&limit=200" |
+  jq -e '[.items[] | select(.type == "process")] | length == 0' >/dev/null
+
 # Verify that a rejected Agent request can be correlated from its response to
 # the shared Server diagnostics API without exposing credentials.
 rejected=$(curl -sS -H 'Content-Type: application/json' \
@@ -177,18 +260,32 @@ sed \
 chmod 0640 "$work/config/config.toml"
 chmod -R a+rX "$work/config"
 
-# The Agent's own self-test must agree with the Server before anything is sent.
-docker run --rm --network "$network" \
+# Before the first cycle, diagnosis must distinguish a registration path that
+# works from the expected fact that collection has never run. That is useful
+# failure information, not an overall healthy result yet.
+if docker run --rm --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
-  invenqor-agent:e2e --diagnose > "$work/diagnose.txt"
-grep -q 'result: OK' "$work/diagnose.txt"
-grep -q '\[PASS\] registration policy' "$work/diagnose.txt"
+  invenqor-agent:e2e --diagnose > "$work/diagnose-before.txt"; then
+  echo "E2E FAIL: a never-run Agent diagnosis unexpectedly reported healthy" >&2
+  exit 1
+fi
+grep -q '\[PASS\] registration policy' "$work/diagnose-before.txt"
+grep -q '\[FAIL\] collection activity' "$work/diagnose-before.txt"
 docker run --rm --network "$network" \
   -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
   -v "$agent_volume:/var/lib/invenqor-agent" \
   invenqor-agent:e2e --once > "$work/snapshot.json"
 jq -e '.records | length > 0' "$work/snapshot.json" >/dev/null
+# After the real cycle has enrolled, collected and delivered, the same
+# diagnosis must become fully healthy without any operator editing config.
+docker run --rm --network "$network" \
+  -v "$work/config/config.toml:/etc/invenqor-agent/config.toml:ro" \
+  -v "$agent_volume:/var/lib/invenqor-agent" \
+  invenqor-agent:e2e --diagnose > "$work/diagnose-after.txt"
+grep -q 'result: OK' "$work/diagnose-after.txt"
+grep -q '\[PASS\] registration policy' "$work/diagnose-after.txt"
+grep -q '\[PASS\] collection activity' "$work/diagnose-after.txt"
 docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
   sh -c 'test -s /state/device-credential.json && test -s /state/enrollment-claim.json'
 # status.json is the record that survives when no Server is reachable at all.
@@ -248,12 +345,20 @@ mcp_tools=$(curl -fsS -H "Authorization: Bearer $api_key_secret" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   "http://127.0.0.1:$port/mcp")
 printf '%s' "$mcp_tools" |
-  jq -e '[.result.tools[].name] | index("asset_search") != null and index("agents_list") != null' >/dev/null
+  jq -e '[.result.tools[].name] | index("asset_search") != null and index("software_inventory") != null and index("agents_list") != null' >/dev/null
 curl -fsS -H "Authorization: Bearer $api_key_secret" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"asset_search","arguments":{"limit":10}}}' \
   "http://127.0.0.1:$port/mcp" |
   jq -e '.result.isError == false and (.result.structuredContent.items | length > 0)' >/dev/null
+curl -fsS -H "Authorization: Bearer $api_key_secret" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"software_inventory","arguments":{"q":"SQL Server","runtime_state":"running","limit":10}}}' \
+  "http://127.0.0.1:$port/mcp" |
+  jq -e '.result.isError == false and
+         (.result.structuredContent.items[] |
+          select(.product_key == "microsoft-sql-server") |
+          .host.name == "windows-e2e-host" and .evidence_count >= 3)' >/dev/null
 curl -fsS -X DELETE -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   "http://127.0.0.1:$port/api/v1/admin/api-keys/$api_key_id/scopes/agents.read" |
   jq -e '.api_key.scopes | index("agents.read") == null' >/dev/null

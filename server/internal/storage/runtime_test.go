@@ -35,6 +35,8 @@ func TestOpenWithoutPostgresUsesSQLiteFallback(t *testing.T) {
 	assertTableExists(t, runtime, "assets")
 	assertTableExists(t, runtime, "audit_logs")
 	assertTableExists(t, runtime, "db_migration_jobs")
+	assertTableExists(t, runtime, "software_product_inventory")
+	assertTableExists(t, runtime, "software_catalog_reconciliations")
 }
 
 func TestMalformedPostgresDSNFallsBackWithoutLeakingSecret(t *testing.T) {
@@ -142,6 +144,87 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 	assertTableExists(t, second, "diagnostic_logs")
 	assertTableExists(t, second, "asset_classification_rules")
+	assertTableExists(t, second, "software_product_inventory")
+	assertTableExists(t, second, "software_catalog_reconciliations")
+}
+
+func TestSoftwareProductProjectionMigrationBackfillsExistingCatalogAssets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invenqor.db")
+	runtime, err := Open(context.Background(), Options{SQLitePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	database := runtime.DB()
+	if _, err := database.Exec(`DROP TABLE software_product_inventory`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DROP TABLE software_catalog_reconciliations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DELETE FROM schema_migrations WHERE version = 6`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO agents(id,agent_id,hostname,status)
+		 VALUES('agent-existing','external-existing','db-existing','active')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO assets(
+			id,asset_key,name,type,status,confidence,attributes_json,
+			classification_source
+		 ) VALUES(
+			'host-existing','host-existing','db-existing','host','active',1,'{}','agent'
+		 ),(
+			'product-existing','product-existing','PostgreSQL','software_product',
+			'active',0.94,
+			'{"product_key":"postgresql","product_name":"PostgreSQL","role":"database","vendor":"PostgreSQL Global Development Group","version":"16.4","install_state":"installed","runtime_state":"running","process_names":["postgres"],"process_count":3,"evidence_count":3,"catalog_version":"test-catalog"}',
+			'software_catalog'
+		 )`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO asset_sources(
+			id,asset_id,agent_id,category,source_asset_id,source_name,
+			payload_json,collected_at
+		 ) VALUES(
+			'source-existing','product-existing','agent-existing',
+			'software.product','postgresql','builtin_catalog','{}',CURRENT_TIMESTAMP
+		 )`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO asset_relations(
+			id,source_asset_id,relation_type,target_asset_id,source,
+			confidence,status
+		 ) VALUES(
+			'relation-existing','product-existing','runs_on','host-existing',
+			'automatic',0.94,'active'
+		 )`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyMigrations(context.Background(), database, "sqlite"); err != nil {
+		t.Fatal(err)
+	}
+	var role, runtimeState, searchText string
+	var processCount int
+	if err := database.QueryRow(
+		`SELECT role,runtime_state,process_count,search_text
+		   FROM software_product_inventory
+		  WHERE asset_id='product-existing' AND agent_id='agent-existing'`,
+	).Scan(&role, &runtimeState, &processCount, &searchText); err != nil {
+		t.Fatal(err)
+	}
+	if role != "database" || runtimeState != "running" || processCount != 3 ||
+		!strings.Contains(searchText, "db-existing") ||
+		!strings.Contains(searchText, "postgres") {
+		t.Fatalf("backfilled projection = %q/%q/%d/%q", role, runtimeState, processCount, searchText)
+	}
 }
 
 // migrationFileCount counts the shipped migrations for a dialect so the
