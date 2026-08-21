@@ -139,7 +139,8 @@ extern "system" {
         prefmaxlen: u32,
         entries: *mut u32,
         total: *mut u32,
-        handle: *mut u32,
+        // PDWORD_PTR is pointer-sized, unlike NetUserEnum's PDWORD handle.
+        handle: *mut usize,
     ) -> u32;
     fn NetLocalGroupGetMembers(
         server: *const u16,
@@ -149,7 +150,8 @@ extern "system" {
         prefmaxlen: u32,
         entries: *mut u32,
         total: *mut u32,
-        handle: *mut u32,
+        // PDWORD_PTR is pointer-sized, unlike NetUserEnum's PDWORD handle.
+        handle: *mut usize,
     ) -> u32;
 }
 
@@ -943,6 +945,7 @@ pub fn local_users() -> Vec<LocalUser> {
     let mut buffer: *mut u8 = std::ptr::null_mut();
     let mut entries = 0u32;
     let mut total = 0u32;
+    // NetUserEnum uses PDWORD, which remains 32-bit on 64-bit Windows.
     let mut handle = 0u32;
     let status = unsafe {
         NetUserEnum(
@@ -1005,7 +1008,10 @@ fn local_group_memberships() -> BTreeMap<String, Vec<String>> {
     let mut group_buffer: *mut u8 = std::ptr::null_mut();
     let mut group_count = 0u32;
     let mut total = 0u32;
-    let mut handle = 0u32;
+    // NetLocalGroupEnum uses PDWORD_PTR. Keeping this pointer-sized is an ABI
+    // requirement on 64-bit Windows: a u32 lets Netapi32 write eight bytes into
+    // a four-byte stack slot and corrupt the account collector's stack.
+    let mut handle = 0usize;
     let status = unsafe {
         NetLocalGroupEnum(
             std::ptr::null(),
@@ -1043,7 +1049,8 @@ fn local_group_memberships() -> BTreeMap<String, Vec<String>> {
             let mut member_buffer: *mut u8 = std::ptr::null_mut();
             let mut member_count = 0u32;
             let mut member_total = 0u32;
-            let mut member_handle = 0u32;
+            // NetLocalGroupGetMembers also uses PDWORD_PTR (not PDWORD).
+            let mut member_handle = 0usize;
             let status = NetLocalGroupGetMembers(
                 std::ptr::null(),
                 wide(&group_name).as_ptr(),
@@ -1390,4 +1397,54 @@ pub fn readable_by_ordinary_users(path: &std::path::Path) -> Option<bool> {
     }
     unsafe { LocalFree(descriptor) };
     known.then_some(permitted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The local-group APIs deliberately differ from NetUserEnum here:
+    /// Microsoft declares their resume handle as PDWORD_PTR, so changing either
+    /// declaration back to `*mut u32` corrupts the stack on 64-bit Windows.
+    #[test]
+    fn local_group_resume_handles_are_pointer_sized() {
+        type GroupEnum = unsafe extern "system" fn(
+            *const u16,
+            u32,
+            *mut *mut u8,
+            u32,
+            *mut u32,
+            *mut u32,
+            *mut usize,
+        ) -> u32;
+        type GroupMembers = unsafe extern "system" fn(
+            *const u16,
+            *const u16,
+            u32,
+            *mut *mut u8,
+            u32,
+            *mut u32,
+            *mut u32,
+            *mut usize,
+        ) -> u32;
+
+        let _: GroupEnum = NetLocalGroupEnum;
+        let _: GroupMembers = NetLocalGroupGetMembers;
+        assert_eq!(
+            std::mem::size_of::<usize>(),
+            std::mem::size_of::<*mut c_void>()
+        );
+    }
+
+    /// Exercises the complete native path, including both local-group calls.
+    /// The former ABI mismatch terminated this test with 0xC0000005 before an
+    /// assertion could run on a 64-bit Windows host.
+    #[test]
+    fn local_accounts_can_be_enumerated_without_corrupting_memory() {
+        let users = local_users();
+        // A locked-down caller may legitimately receive no level-3 records.
+        // The ABI regression is covered by the signature test above and, when
+        // records are available, this call still exercises both native APIs.
+        assert!(users.iter().all(|user| !user.name.trim().is_empty()));
+    }
 }

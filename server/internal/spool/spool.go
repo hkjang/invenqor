@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/hkjang/invenqor/server/internal/durablefs"
 )
 
 type Manager struct {
@@ -63,12 +65,7 @@ func (m *Manager) Append(
 	if err := file.Close(); err != nil {
 		return false, fmt.Errorf("close spool segment: %w", err)
 	}
-	directory, err := os.Open(m.directory)
-	if err != nil {
-		return false, err
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
+	if err := durablefs.SyncDirectory(m.directory); err != nil {
 		return false, fmt.Errorf("sync spool directory: %w", err)
 	}
 	failed = false

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hkjang/invenqor/server/internal/durablefs"
 )
 
 const (
@@ -259,10 +261,5 @@ func atomicWrite(path string, bytes []byte, mode os.FileMode) error {
 	if err := os.Rename(temporary, path); err != nil {
 		return err
 	}
-	directoryHandle, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	defer directoryHandle.Close()
-	return directoryHandle.Sync()
+	return durablefs.SyncDirectory(directory)
 }

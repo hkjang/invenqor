@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hkjang/invenqor/server/internal/durablefs"
 )
 
 type Manifest struct {
@@ -132,7 +134,7 @@ func (s *Store) Publish(manifest Manifest, source io.Reader) (Manifest, error) {
 	if err := os.Link(staged, artifact); err != nil {
 		return Manifest{}, err
 	}
-	if err := syncDirectory(s.root); err != nil {
+	if err := durablefs.SyncDirectory(s.root); err != nil {
 		return Manifest{}, err
 	}
 	manifest.SHA256 = hash
@@ -190,7 +192,7 @@ func (s *Store) Retire(base string) error {
 		return err
 	}
 	_ = os.Remove(filepath.Join(s.root, base+".bin"))
-	return syncDirectory(s.root)
+	return durablefs.SyncDirectory(s.root)
 }
 
 // Releases lists every published build, newest first.
@@ -300,7 +302,7 @@ func replaceFile(path string, bytes []byte, mode os.FileMode) error {
 	if err := os.Rename(temporary, path); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return durablefs.SyncDirectory(filepath.Dir(path))
 }
 
 func (s *Store) Latest(channel, osName, architecture, agentID string) (*Manifest, error) {
@@ -400,14 +402,5 @@ func atomicWrite(path string, bytes []byte, mode os.FileMode) error {
 	if err := os.Link(temporary, path); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return durablefs.SyncDirectory(filepath.Dir(path))
 }

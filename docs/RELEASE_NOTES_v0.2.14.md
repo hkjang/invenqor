@@ -62,6 +62,27 @@ Windows Agent의 최상위 필드와 저장된 원천을 이해하고, 새 Agent
 다음 `system` 변경이 처리되면 별도 재등록이나 상태 디렉터리 삭제 없이 운영체제
 정보가 갱신됩니다.
 
+### 1.1 Windows 네이티브 수집·기동 안정성
+
+릴리즈 전 실제 Windows 호스트 검증에서 계정 수집을 켠 GNU Agent가
+`0xC0000005` 접근 위반으로 종료되는 문제도 발견해 함께 수정했습니다.
+`NetLocalGroupEnum`과 `NetLocalGroupGetMembers`의 재개 핸들은 x64에서 64비트인
+`PDWORD_PTR`인데 32비트 포인터로 선언돼, 로컬 그룹을 읽을 때 네이티브 API가
+스택 경계를 넘겨 쓰는 것이 직접 원인이었습니다. 두 API만 pointer-sized 핸들로
+교정하고, 별도로 32비트 `PDWORD`가 맞는 `NetUserEnum` 계약은 유지했습니다.
+
+또한 네이티브 Windows Server가 bootstrap master key와 spool·Agent update
+메타데이터를 원자 저장한 뒤 디렉터리에 `File.Sync()`를 호출하면 Windows가
+`Access is denied`를 반환해 시작하지 못하던 문제를 플랫폼별 durable-write
+경계로 수정했습니다. Linux에서는 rename 후 디렉터리 `fsync`를 계속 수행하고,
+Windows에서는 디렉터리의 존재·타입·핸들 종료를 검증한 뒤 지원되지 않는 sync만
+생략합니다. 파일 본문의 flush와 원자 교체 규칙은 그대로 유지됩니다.
+
+CI는 Windows 배포 ZIP에 들어가는 것과 동일한 GNU Agent와 네이티브 Go Server를
+실제 Windows runner에서 함께 실행합니다. 로컬 계정·그룹 API의 ABI 회귀 테스트와
+Server 조기 종료 로그를 포함해, 자동 등록·전체 수집·전송·운영체제 저장·주요
+소프트웨어 정규화가 모두 끝나야 통과합니다.
+
 ## 2. 프로세스 나열을 주요 소프트웨어 관리로 전환
 
 원시 프로세스는 사고 조사 증거로 유용하지만 CMDB 구성 항목으로는 부적합합니다.
@@ -188,6 +209,8 @@ REST 관리 화면과 같은 요약·host·상태·확신도·evidence 계약을
   heartbeat 한 번으로 OS·주요 제품을 backfill하고, 두 번째 heartbeat에서는
   카탈로그 스캔을 반복하지 않는 업그레이드 회귀 테스트
 - `x86_64-pc-windows-gnu` Agent 교차 빌드를 GitHub Actions build matrix에 추가
+- Windows 로컬 그룹 API의 pointer-sized resume handle 시그니처와 실제 계정
+  열거를 네이티브 회귀 테스트로 고정
 - Ubuntu cross job이 Windows 배포 ZIP과 동일한 GNU 실행 파일을 만들고, 이를
   Windows GitHub runner로 전달해 Server와 함께 기동합니다. 자동 등록부터
   `system`·`process`·`service`·`software.package` 수집, 전송, 운영체제 표시와

@@ -4,7 +4,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$work = Join-Path $env:RUNNER_TEMP ('invenqor-windows-e2e-' + [Guid]::NewGuid().ToString('N'))
+$tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+    [IO.Path]::GetTempPath()
+} else {
+    $env:RUNNER_TEMP
+}
+$serverUri = [Uri]$ServerUrl
+if (-not $serverUri.IsLoopback -or $serverUri.Scheme -ne 'http') {
+    throw 'Windows E2E ServerUrl must be a loopback HTTP origin'
+}
+$work = Join-Path $tempRoot ('invenqor-windows-e2e-' + [Guid]::NewGuid().ToString('N'))
 $serverState = Join-Path $work 'server-state'
 $agentState = Join-Path $work 'agent-state'
 $configPath = Join-Path $work 'config.toml'
@@ -24,7 +33,7 @@ $template = $template -replace "(?m)^state_dir = '.+'$", ("state_dir = '" + $age
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($configPath, $template, $utf8NoBom)
 
-$env:INVENQOR_LISTEN_ADDRESS = '127.0.0.1:7070'
+$env:INVENQOR_LISTEN_ADDRESS = ('127.0.0.1:' + $serverUri.Port)
 $env:INVENQOR_STATE_DIR = $serverState
 $env:INVENQOR_SQLITE_PATH = (Join-Path $serverState 'invenqor.db')
 $env:INVENQOR_BOOTSTRAP_ADMIN = 'windows.e2e'
@@ -36,13 +45,17 @@ try {
     $server = Start-Process -FilePath $serverBinary -PassThru -NoNewWindow `
         -RedirectStandardOutput $serverOutput -RedirectStandardError $serverError
     $ready = $false
-    foreach ($attempt in 1..60) {
+    $readyDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    while ([DateTime]::UtcNow -lt $readyDeadline) {
+        $server.Refresh()
+        if ($server.HasExited) {
+            throw "Server exited before readiness with code $($server.ExitCode)"
+        }
         try {
             $health = Invoke-RestMethod -Uri ($ServerUrl + '/health/ready') -TimeoutSec 2
             if ($health.status -eq 'READY') { $ready = $true; break }
-        } catch {
-            Start-Sleep -Seconds 1
-        }
+        } catch {}
+        Start-Sleep -Seconds 1
     }
     if (-not $ready) { throw 'Server did not become ready within 60 seconds' }
 
@@ -91,6 +104,16 @@ try {
     }
     Write-Host ('E2E PASS: native Windows Agent collected {0} records, registered as {1}, and delivered managed software' -f @($snapshot.records).Count, $registered.os_name)
 } catch {
+    if ($null -ne $server) {
+        $server.Refresh()
+        if ($server.HasExited) {
+            Write-Host "Server process exit code: $($server.ExitCode)"
+        }
+    }
+    if (Test-Path $serverOutput) {
+        Write-Host 'Server stdout (last 40 lines):'
+        Get-Content $serverOutput -Tail 40
+    }
     if (Test-Path $serverError) {
         Write-Host 'Server stderr (last 40 lines):'
         Get-Content $serverError -Tail 40
