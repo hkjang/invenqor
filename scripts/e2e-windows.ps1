@@ -28,8 +28,15 @@ if (-not (Test-Path $serverBinary)) { throw "Server binary not found: $serverBin
 if (-not (Test-Path $agentBinary)) { throw "Agent binary not found: $agentBinary" }
 
 $template = Get-Content (Join-Path $root 'config\config.windows.toml') -Raw
-$template = $template -replace '(?m)^# url = .+$', ('url = "' + $ServerUrl + '"')
-$template = $template -replace "(?m)^state_dir = '.+'$", ("state_dir = '" + $agentState + "'")
+$serverLine = 'url = "' + $ServerUrl + '"'
+$stateLine = "state_dir = '" + $agentState + "'"
+# GitHub's Windows checkout uses CRLF. Consume the optional carriage return so
+# the closing quote remains matchable and the Agent never falls back to the
+# machine-wide ProgramData state during this isolated test.
+$template = $template -replace '(?m)^# url = [^\r\n]*\r?$', $serverLine
+$template = $template -replace "(?m)^state_dir = '[^\r\n]*'\r?$", $stateLine
+if (-not $template.Contains($serverLine)) { throw 'Failed to wire ServerUrl into the Agent config' }
+if (-not $template.Contains($stateLine)) { throw 'Failed to wire the isolated state_dir into the Agent config' }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($configPath, $template, $utf8NoBom)
 
