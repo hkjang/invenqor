@@ -1306,4 +1306,4 @@ rollback, 사용자 수명주기, API key scope/회전/폐기, 감사 상세 API
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·
 일반 사용 절차: <a href="USER_GUIDE.md">사용자 가이드</a> ·
-보안 취약점 보고 절차: <a href="../SECURITY.md">SECURITY.md</a></p>
+보안 취약점 보고 절차: <a href="https://github.com/hkjang/invenqor/blob/v0.2.14/SECURITY.md">SECURITY.md</a></p>

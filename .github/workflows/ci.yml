@@ -27,6 +27,12 @@ jobs:
         working-directory: web
       - name: Verify the checked-in Server UI matches the React build
         run: git diff --exit-code -- server/internal/webui/dist
+      - name: Verify release PDFs contain no local build links
+        run: |
+          if grep -a -l '/URI (file://' docs/*.pdf; then
+            echo 'A release PDF contains a local file:// link.' >&2
+            exit 1
+          fi
       - run: go test ./...
         working-directory: server
       - run: go vet ./...

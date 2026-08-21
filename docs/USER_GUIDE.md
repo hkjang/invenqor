@@ -786,4 +786,4 @@ Chrome·Java처럼 범용 process 단독 신호는 오탐 방지를 위해 제�
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·
-보안 취약점 보고 절차: <a href="../SECURITY.md">SECURITY.md</a></p>
+보안 취약점 보고 절차: <a href="https://github.com/hkjang/invenqor/blob/v0.2.14/SECURITY.md">SECURITY.md</a></p>
