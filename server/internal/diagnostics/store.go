@@ -21,8 +21,8 @@ const (
 )
 
 var (
-	invenqorSecret = regexp.MustCompile(`ivq_(?:at|et|ec)_[A-Za-z0-9_-]+`)
-	bearerSecret   = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/-]+`)
+	invenqorSecret = regexp.MustCompile(`ivq_(?:at|et|ec|sk)_[A-Za-z0-9_-]+`)
+	bearerSecret   = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+`)
 	urlPassword    = regexp.MustCompile(`(://[^:/\s]+:)[^@\s]+(@)`)
 )
 

@@ -204,12 +204,108 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 	if linkedIdentities != 1 {
 		t.Fatalf("external identity count = %d, want 1", linkedIdentities)
 	}
-	values, err := bootstrapStore.Load()
-	if err != nil {
-		t.Fatalf("bootstrapStore.Load() error = %v", err)
+	configured, err := service.ClientSecretConfigured(context.Background())
+	if err != nil || !configured {
+		t.Fatalf("ClientSecretConfigured() = %v, %v", configured, err)
 	}
-	if values.KeycloakClientSecret != clientSecret {
-		t.Fatal("Keycloak client secret was not stored in encrypted bootstrap settings")
+	var storedSecret any
+	if err := runtime.DB().QueryRow(
+		"SELECT value_json FROM settings WHERE key=$1 AND secret=TRUE",
+		keycloakClientSecretSettingKey,
+	).Scan(&storedSecret); err != nil {
+		t.Fatalf("read encrypted client secret setting: %v", err)
+	}
+	storedSecretJSON, err := jsonBytes(storedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(storedSecretJSON), clientSecret) {
+		t.Fatal("Keycloak client secret was stored as plaintext")
+	}
+}
+
+func TestOIDCClientSecretIsSharedAcrossPods(t *testing.T) {
+	runtime, admin := setupAuthUser(t)
+	defer runtime.Close()
+	primaryRoot := t.TempDir()
+	primaryStore, err := bootstrap.Open(primaryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondaryStore, err := bootstrap.OpenWithKey(
+		t.TempDir(),
+		filepath.Join(primaryRoot, "master.key"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localAuth, err := NewService(runtime.DB(), DefaultServiceOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := NewOIDCService(runtime.DB(), primaryStore, localAuth)
+	secondary := NewOIDCService(runtime.DB(), secondaryStore, localAuth)
+	secret := "shared-client-secret"
+	if err := primary.SaveSettings(
+		context.Background(),
+		DefaultOIDCSettings(),
+		&secret,
+		admin,
+		"multi-pod secret test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := secondary.ClientSecretConfigured(context.Background())
+	if err != nil || !configured {
+		t.Fatalf("secondary ClientSecretConfigured() = %v, %v", configured, err)
+	}
+	secondarySecret, err := secondary.clientSecret(context.Background())
+	if err != nil || secondarySecret != secret {
+		t.Fatalf("secondary clientSecret() = %q, %v", secondarySecret, err)
+	}
+	secondaryValues, err := secondaryStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondaryValues.KeycloakClientSecret != "" {
+		t.Fatal("secondary Pod unexpectedly required a local client secret")
+	}
+}
+
+func TestOIDCLegacyClientSecretMigratesToSharedSetting(t *testing.T) {
+	runtime, _ := setupAuthUser(t)
+	defer runtime.Close()
+	primaryRoot := t.TempDir()
+	primaryStore, err := bootstrap.Open(primaryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySecret := "legacy-pod-local-secret"
+	if err := primaryStore.Save(bootstrap.Values{
+		KeycloakClientSecret: legacySecret,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondaryStore, err := bootstrap.OpenWithKey(
+		t.TempDir(),
+		filepath.Join(primaryRoot, "master.key"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localAuth, err := NewService(runtime.DB(), DefaultServiceOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := NewOIDCService(runtime.DB(), primaryStore, localAuth)
+	secondary := NewOIDCService(runtime.DB(), secondaryStore, localAuth)
+	configured, err := primary.ClientSecretConfigured(context.Background())
+	if err != nil || !configured {
+		t.Fatalf("legacy migration = %v, %v", configured, err)
+	}
+	migrated, err := secondary.clientSecret(context.Background())
+	if err != nil || migrated != legacySecret {
+		t.Fatalf("secondary migrated secret = %q, %v", migrated, err)
 	}
 }
 
@@ -240,6 +336,59 @@ func TestOIDCSettingsValidationAndRoleMapping(t *testing.T) {
 	if !allowedEmail("user@example.test", []string{"example.test"}) ||
 		allowedEmail("user@other.test", []string{"example.test"}) {
 		t.Fatal("allowedEmail() domain policy mismatch")
+	}
+}
+
+func TestOIDCURLPolicyRejectsAmbiguousIssuerAndExternalPlaintext(t *testing.T) {
+	settings := DefaultOIDCSettings()
+	settings.Enabled = true
+	settings.ClientID = "invenqor"
+	settings.RedirectURI = "https://invenqor.example.test/callback"
+	for _, issuer := range []string{
+		"https://operator@keycloak.example.test/realms/inventory",
+		"https://keycloak.example.test/realms/inventory?tenant=other",
+		"https://keycloak.example.test/realms/inventory#other",
+	} {
+		settings.IssuerURL = issuer
+		if err := settings.Validate(); err == nil {
+			t.Fatalf("Validate() accepted ambiguous issuer %q", issuer)
+		}
+	}
+
+	settings.IssuerURL = "https://keycloak.example.test/realms/inventory"
+	settings.RedirectURI = "http://invenqor.example.test/callback"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("Validate() accepted a plaintext external redirect")
+	}
+	settings.RedirectURI = "https://invenqor.example.test/callback#fragment"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("Validate() accepted a redirect URI fragment")
+	}
+	settings.RedirectURI = "http://127.0.0.1:7070/callback"
+	settings.LogoutRedirectURI = "http://invenqor.example.test/"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("Validate() accepted a plaintext external logout redirect")
+	}
+	settings.LogoutRedirectURI = "http://[::1]:7070/"
+	if err := settings.Validate(); err != nil {
+		t.Fatalf("Validate() rejected loopback HTTP endpoints: %v", err)
+	}
+
+	for raw, want := range map[string]bool{
+		"https://inventory.example.test": true,
+		"http://localhost:7070":          true,
+		"http://127.0.0.1:7070":          true,
+		"http://[::1]:7070":              true,
+		"http://inventory.example.test":  false,
+		"https://user@inventory.example": false,
+	} {
+		endpoint, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := secureBrowserEndpoint(endpoint); got != want {
+			t.Fatalf("secureBrowserEndpoint(%q) = %v, want %v", raw, got, want)
+		}
 	}
 }
 

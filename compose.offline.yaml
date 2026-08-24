@@ -14,11 +14,14 @@ services:
       timeout: 3s
       retries: 20
   server:
-    image: invenqor-server:0.2.14
+    image: invenqor-server:0.2.15
     pull_policy: never
     environment:
       INVENQOR_LISTEN_ADDRESS: 0.0.0.0:7070
       INVENQOR_STATE_DIR: /var/lib/invenqor-server
+      # The inline form expects a URI-safe password (hex is recommended). If a
+      # password contains reserved characters, set POSTGRES_DSN explicitly with
+      # its userinfo password percent-encoded.
       INVENQOR_POSTGRES_DSN: ${POSTGRES_DSN:-postgres://invenqor:${POSTGRES_PASSWORD}@postgres:5432/invenqor?sslmode=disable}
       INVENQOR_BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-}
       INVENQOR_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}

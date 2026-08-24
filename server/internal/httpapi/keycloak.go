@@ -59,7 +59,7 @@ func (s *Server) authMethods(response http.ResponseWriter, request *http.Request
 		s.internalError(response, request, err)
 		return
 	}
-	secretConfigured, err := s.oidcService.ClientSecretConfigured()
+	secretConfigured, err := s.oidcService.ClientSecretConfigured(request.Context())
 	if err != nil {
 		s.internalError(response, request, err)
 		return
@@ -231,7 +231,7 @@ func (s *Server) getKeycloakSettings(response http.ResponseWriter, request *http
 		s.internalError(response, request, err)
 		return
 	}
-	secretConfigured, err := s.oidcService.ClientSecretConfigured()
+	secretConfigured, err := s.oidcService.ClientSecretConfigured(request.Context())
 	if err != nil {
 		s.internalError(response, request, err)
 		return
@@ -396,7 +396,7 @@ func (s *Server) autoConfigureKeycloak(
 	}
 	// Report the stored state rather than assuming it: the save above succeeds
 	// with a previously stored secret and no secret in this request.
-	secretConfigured, err := s.oidcService.ClientSecretConfigured()
+	secretConfigured, err := s.oidcService.ClientSecretConfigured(request.Context())
 	if err != nil {
 		s.internalError(response, request, err)
 		return

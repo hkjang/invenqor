@@ -19,10 +19,20 @@ type settingUpdate struct {
 	Reason    string          `json:"reason"`
 }
 
+const (
+	keycloakDedicatedSetting       = "auth.keycloak"
+	keycloakClientSecretSetting    = "auth.keycloak.client_secret"
+	dedicatedSettingEndpointDetail = "This setting is managed by its dedicated administrative endpoint."
+)
+
 func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT key,value_json,secret,apply_mode,pending_value_json,
-		 version,updated_by,updated_at FROM settings ORDER BY key`)
+		 version,updated_by,updated_at FROM settings
+		 WHERE key NOT IN ($1,$2) ORDER BY key`,
+		keycloakDedicatedSetting,
+		keycloakClientSecretSetting,
+	)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -76,6 +86,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	userID := principalFromContext(r.Context()).User.ID
 	for _, item := range input.Settings {
+		if dedicatedSetting(item.Key) {
+			writeAPIError(
+				w, r, http.StatusConflict, "DEDICATED_SETTING_ENDPOINT",
+				dedicatedSettingEndpointDetail,
+			)
+			return
+		}
 		if !validSettingKey(item.Key) || !json.Valid(item.Value) {
 			writeAPIError(w, r, 400, "INVALID_SETTING", "A setting key or value is invalid.")
 			return
@@ -165,8 +182,13 @@ func (s *Server) settingHistory(w http.ResponseWriter, r *http.Request) {
 		`SELECT v.id,v.setting_key,v.version,v.before_json,v.after_json,
 		 v.changed_by,v.reason,v.created_at,COALESCE(s.secret,FALSE)
 		 FROM setting_versions v LEFT JOIN settings s ON s.key=v.setting_key
-		 WHERE ($1='' OR v.setting_key=$1)
-		 ORDER BY v.created_at DESC LIMIT 500`, key)
+		 WHERE v.setting_key NOT IN ($1,$2)
+		   AND ($3='' OR v.setting_key=$3)
+		 ORDER BY v.created_at DESC LIMIT 500`,
+		keycloakDedicatedSetting,
+		keycloakClientSecretSetting,
+		key,
+	)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -203,6 +225,13 @@ func (s *Server) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	if decodeJSON(r, &input) != nil || input.Key == "" || input.Version <= 0 {
 		writeAPIError(w, r, 400, "INVALID_ROLLBACK", "key and version are required.")
+		return
+	}
+	if dedicatedSetting(input.Key) {
+		writeAPIError(
+			w, r, http.StatusConflict, "DEDICATED_SETTING_ENDPOINT",
+			dedicatedSettingEndpointDetail,
+		)
 		return
 	}
 	var target string
@@ -269,6 +298,11 @@ func validSettingKey(value string) bool {
 		return false
 	}
 	return true
+}
+
+func dedicatedSetting(key string) bool {
+	return key == keycloakDedicatedSetting ||
+		key == keycloakClientSecretSetting
 }
 
 func valueString(value any) string {

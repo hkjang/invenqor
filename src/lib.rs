@@ -7,6 +7,7 @@ pub mod logfile;
 pub mod model;
 pub mod platform;
 pub mod scheduler;
+pub mod service_identity;
 pub mod smbios;
 pub mod storage;
 pub mod transport;

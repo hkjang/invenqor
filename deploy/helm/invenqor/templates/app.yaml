@@ -1,18 +1,55 @@
+{{- $workloadName := printf "%s-invenqor" .Release.Name -}}
+{{- $serviceSelector := dict "app.kubernetes.io/name" "invenqor" "app.kubernetes.io/instance" .Release.Name -}}
+{{- $newStatefulSetSelector := dict "matchLabels" (dict "app" "invenqor" "app.kubernetes.io/name" "invenqor" "app.kubernetes.io/instance" .Release.Name) -}}
+{{- $statefulSetSelector := deepCopy $newStatefulSetSelector -}}
+{{- $podLabels := dict "app" "invenqor" "app.kubernetes.io/name" "invenqor" "app.kubernetes.io/instance" .Release.Name -}}
+{{- $existingStatefulSet := lookup "apps/v1" "StatefulSet" .Release.Namespace $workloadName -}}
+{{- if and $existingStatefulSet $existingStatefulSet.spec $existingStatefulSet.spec.selector -}}
+  {{- $existingUsesStateClaim := false -}}
+  {{- range $claim := ($existingStatefulSet.spec.volumeClaimTemplates | default list) -}}
+    {{- if eq $claim.metadata.name "state" -}}
+      {{- $existingUsesStateClaim = true -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if ne $existingUsesStateClaim .Values.persistence.enabled -}}
+    {{- fail (printf "persistence.enabled cannot be changed in place for existing StatefulSet %s because volumeClaimTemplates is immutable; recreate the StatefulSet using the documented migration procedure" $workloadName) -}}
+  {{- end -}}
+  {{- $statefulSetSelector = deepCopy $existingStatefulSet.spec.selector -}}
+  {{- if and $existingStatefulSet.spec.template $existingStatefulSet.spec.template.metadata $existingStatefulSet.spec.template.metadata.labels -}}
+    {{- range $key, $value := $existingStatefulSet.spec.template.metadata.labels -}}
+      {{- $_ := set $podLabels $key $value -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- $selectorLabels := get $statefulSetSelector "matchLabels" | default dict -}}
+{{- if and (hasKey $selectorLabels "app.kubernetes.io/name") (ne (toString (get $selectorLabels "app.kubernetes.io/name")) "invenqor") -}}
+  {{- fail (printf "existing StatefulSet %s has an incompatible app.kubernetes.io/name selector" $workloadName) -}}
+{{- end -}}
+{{- if and (hasKey $selectorLabels "app.kubernetes.io/instance") (ne (toString (get $selectorLabels "app.kubernetes.io/instance")) .Release.Name) -}}
+  {{- fail (printf "existing StatefulSet %s belongs to a different Helm release instance" $workloadName) -}}
+{{- end -}}
+{{- range $key, $value := $selectorLabels -}}
+  {{- $_ := set $podLabels $key $value -}}
+{{- end -}}
+{{- $_ := set $podLabels "app.kubernetes.io/name" "invenqor" -}}
+{{- $_ = set $podLabels "app.kubernetes.io/instance" .Release.Name -}}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ .Release.Name }}-invenqor-headless
+  labels: {{- toYaml $serviceSelector | nindent 4 }}
 spec:
   clusterIP: None
-  selector: {app: invenqor}
+  selector: {{- toYaml $serviceSelector | nindent 4 }}
   ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ .Release.Name }}-invenqor
+  labels: {{- toYaml $serviceSelector | nindent 4 }}
 spec:
-  selector: {app: invenqor}
+  selector: {{- toYaml $serviceSelector | nindent 4 }}
   ports: [{name: http, port: {{ .Values.service.port }}, targetPort: http}]
   type: {{ .Values.service.type }}
 ---
@@ -20,16 +57,16 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ .Release.Name }}-invenqor
+  labels: {{- toYaml $serviceSelector | nindent 4 }}
 spec:
   serviceName: {{ .Release.Name }}-invenqor-headless
   replicas: {{ .Values.replicaCount }}
   podManagementPolicy: Parallel
   updateStrategy: {type: RollingUpdate}
-  selector:
-    matchLabels: {app: invenqor}
+  selector: {{- toYaml $statefulSetSelector | nindent 4 }}
   template:
     metadata:
-      labels: {app: invenqor}
+      labels: {{- toYaml $podLabels | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: 30
       securityContext: {runAsNonRoot: true, fsGroup: 65532}
@@ -39,7 +76,7 @@ spec:
             - weight: 100
               podAffinityTerm:
                 labelSelector:
-                  matchLabels: {app: invenqor}
+                  matchLabels: {{- toYaml $serviceSelector | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: server
@@ -55,6 +92,9 @@ spec:
             - {name: INVENQOR_LISTEN_ADDRESS, value: "0.0.0.0:7070"}
             - {name: INVENQOR_STATE_DIR, value: /var/lib/invenqor-server}
             - {name: INVENQOR_UPDATE_DIR, value: /var/lib/invenqor-updates}
+            {{- if .Values.eventSpool.enabled }}
+            - {name: INVENQOR_EVENT_SPOOL_DIR, value: /var/lib/invenqor-event-spool}
+            {{- end }}
             - {name: INVENQOR_MASTER_KEY_FILE, value: /run/secrets/invenqor/master.key}
             - name: INVENQOR_AGENT_AUTO_ENROLLMENT
               value: {{ .Values.agentAutoEnrollment | quote }}
@@ -85,6 +125,9 @@ spec:
           volumeMounts:
             - {name: state, mountPath: /var/lib/invenqor-server}
             - {name: updates, mountPath: /var/lib/invenqor-updates}
+            {{- if .Values.eventSpool.enabled }}
+            - {name: event-spool, mountPath: /var/lib/invenqor-event-spool}
+            {{- end }}
             - {name: master-key, mountPath: /run/secrets/invenqor, readOnly: true}
             {{- if .Values.bootstrapAdmin.username }}
             - {name: bootstrap-admin-password, mountPath: /run/secrets/invenqor-bootstrap, readOnly: true}
@@ -93,8 +136,17 @@ spec:
             - {name: agent-enrollment-token, mountPath: /run/secrets/invenqor-enrollment, readOnly: true}
             {{- end }}
       volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: state
+          emptyDir: {}
+        {{- end }}
         - name: updates
           persistentVolumeClaim: {claimName: {{ .Release.Name }}-invenqor-updates}
+        {{- if .Values.eventSpool.enabled }}
+        - name: event-spool
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-invenqor-event-spool" .Release.Name) .Values.eventSpool.existingClaim }}
+        {{- end }}
         - name: master-key
           secret:
             secretName: {{ .Values.masterKeySecret.name }}
@@ -117,6 +169,7 @@ spec:
               - key: {{ .Values.agentEnrollmentTokenSecret.key }}
                 path: enrollment.token
         {{- end }}
+  {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: state
@@ -124,6 +177,7 @@ spec:
         accessModes: [ReadWriteOnce]
         resources:
           requests: {storage: {{ .Values.persistence.size }}}
+  {{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -136,12 +190,27 @@ spec:
   {{- end }}
   resources:
     requests: {storage: {{ .Values.updates.size }}}
+{{- if and .Values.eventSpool.enabled (not .Values.eventSpool.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-invenqor-event-spool
+spec:
+  accessModes: [{{ .Values.eventSpool.accessMode }}]
+  {{- if .Values.eventSpool.storageClassName }}
+  storageClassName: {{ .Values.eventSpool.storageClassName }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.eventSpool.size }}}
+{{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ .Release.Name }}-invenqor
+  labels: {{- toYaml $serviceSelector | nindent 4 }}
 spec:
   minAvailable: 1
   selector:
-    matchLabels: {app: invenqor}
+    matchLabels: {{- toYaml $serviceSelector | nindent 6 }}

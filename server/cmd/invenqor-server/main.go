@@ -93,9 +93,15 @@ func run(logger *slog.Logger) error {
 	}
 	bootstrapManager := auth.NewBootstrapManager(database.DB(), processConfig.StateDir)
 	oidcService := auth.NewOIDCService(database.DB(), bootstrapStore, authService)
+	// v0.2.14 kept the Keycloak client secret in each Pod's bootstrap.enc.
+	// Reading it once at startup migrates the value into the encrypted shared
+	// database setting, so every Pod can complete an OIDC flow.
+	if _, err := oidcService.ClientSecretConfigured(rootContext); err != nil {
+		return fmt.Errorf("initialize Keycloak client secret: %w", err)
+	}
 	agentService := agents.NewService(database.DB())
 	ingestService := ingest.NewService(database.DB())
-	eventSpool, err := spool.Open(processConfig.StateDir)
+	eventSpool, err := spool.OpenDirectory(processConfig.EventSpoolDir)
 	if err != nil {
 		return err
 	}

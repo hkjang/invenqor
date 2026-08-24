@@ -9,6 +9,7 @@ import {
   XCircle,
 } from "lucide-react";
 import {api} from "./api";
+import type {AdminAccess} from "./adminPages";
 
 type Rule = {
   id: string;
@@ -63,6 +64,15 @@ const derivationLabels: Record<string, string> = {
   machine_identity: "동일 machine identifier",
 };
 
+export const CLASSIFICATION_READ_ONLY_MESSAGE =
+  "settings.write 권한이 없어 분류 규칙을 변경하거나 재분류할 수 없습니다.";
+export const RELATIONS_READ_ONLY_MESSAGE =
+  "relations.write 권한이 없어 관계 제안을 승인하거나 거부할 수 없습니다.";
+export const classificationAccessState = (access: AdminAccess) => ({
+  canWriteSettings: access.superAdmin || access.permissions.includes("settings.write"),
+  canWriteRelations: access.superAdmin || access.permissions.includes("relations.write"),
+});
+
 const jsonRequest = (csrf: string, body: unknown, method = "POST"): RequestInit => ({
   method,
   headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
@@ -74,7 +84,11 @@ const jsonRequest = (csrf: string, body: unknown, method = "POST"): RequestInit 
  * "why does this asset look like this" and "what has the product guessed that
  * I have not confirmed".
  */
-export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
+export function ClassificationSettingsPanel({csrf, access}: {
+  csrf: string;
+  access: AdminAccess;
+}) {
+  const {canWriteSettings, canWriteRelations} = classificationAccessState(access);
   const [rules, setRules] = React.useState<Rule[]>([]);
   const [summary, setSummary] = React.useState<Summary|null>(null);
   const [proposals, setProposals] = React.useState<Proposal[]>([]);
@@ -106,30 +120,39 @@ export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
       setBusy(false);
     }
   };
-  const toggle = (rule: Rule) => mutate(
-    () => api(
+  const toggle = (rule: Rule) => {
+    if (!canWriteSettings) return Promise.resolve();
+    return mutate(
+      () => api(
       `/api/v1/admin/settings/classification/rules/${rule.id}`,
       jsonRequest(csrf, {
         enabled: !rule.enabled,
         reason: `관리 콘솔에서 ${rule.name} ${rule.enabled ? "비활성화" : "활성화"}`,
       }, "PATCH"),
-    ),
-    "규칙을 변경했습니다. 기존 자산에 적용하려면 재분류를 실행하십시오.",
-  );
-  const reclassify = () => mutate(
-    () => api(
+      ),
+      "규칙을 변경했습니다. 기존 자산에 적용하려면 재분류를 실행하십시오.",
+    );
+  };
+  const reclassify = () => {
+    if (!canWriteSettings) return Promise.resolve();
+    return mutate(
+      () => api(
       "/api/v1/admin/settings/classification/reclassify",
       jsonRequest(csrf, {reason: "관리 콘솔에서 재분류"}),
-    ),
-    "저장된 자산에 현재 규칙을 다시 적용했습니다.",
-  );
-  const review = (proposal: Proposal, decision: "approve"|"reject") => mutate(
-    () => api(
+      ),
+      "저장된 자산에 현재 규칙을 다시 적용했습니다.",
+    );
+  };
+  const review = (proposal: Proposal, decision: "approve"|"reject") => {
+    if (!canWriteRelations) return Promise.resolve();
+    return mutate(
+      () => api(
       `/api/v1/assets/relations/${proposal.id}/${decision}`,
       jsonRequest(csrf, {reason: `관리 콘솔 ${decision === "approve" ? "승인" : "거부"}`}),
-    ),
-    decision === "approve" ? "관계를 승인했습니다." : "제안을 거부했습니다.",
-  );
+      ),
+      decision === "approve" ? "관계를 승인했습니다." : "제안을 거부했습니다.",
+    );
+  };
 
   return <article className="panel">
     <div className="panel-head">
@@ -140,6 +163,14 @@ export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
       {error && <div className="error action-message">{error}</div>}
       {message && <div className="success action-message">
         <CheckCircle2 size={17}/>{message}
+      </div>}
+      {!canWriteSettings && <div id="classification-readonly-notice"
+        className="admin-notice info" role="status">
+        <strong>분류 설정 읽기 전용</strong><span>{CLASSIFICATION_READ_ONLY_MESSAGE}</span>
+      </div>}
+      {!canWriteRelations && <div id="relations-readonly-notice"
+        className="admin-notice info" role="status">
+        <strong>관계 제안 읽기 전용</strong><span>{RELATIONS_READ_ONLY_MESSAGE}</span>
       </div>}
 
       <div className="status-grid classification-summary">
@@ -153,7 +184,11 @@ export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
         <button className="secondary" disabled={busy} onClick={() => load().catch(
           reason => setError((reason as Error).message),
         )}><RefreshCw size={15}/>새로고침</button>
-        <button className="primary" disabled={busy} onClick={reclassify}>
+        <button className="primary" disabled={!canWriteSettings || busy}
+          aria-disabled={!canWriteSettings || busy}
+          aria-describedby={!canWriteSettings ? "classification-readonly-notice" : undefined}
+          title={!canWriteSettings ? CLASSIFICATION_READ_ONLY_MESSAGE : undefined}
+          onClick={reclassify}>
           <Play size={15}/>저장된 자산 재분류
         </button>
       </div>
@@ -178,7 +213,11 @@ export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
               <em>{rule.assets.toLocaleString("ko-KR")}건 적용</em>
               <span>확신도 {Math.round(rule.confidence * 100)}%</span>
             </div>
-            <button disabled={busy} onClick={() => toggle(rule)}>
+            <button disabled={!canWriteSettings || busy}
+              aria-disabled={!canWriteSettings || busy}
+              aria-describedby={!canWriteSettings ? "classification-readonly-notice" : undefined}
+              title={!canWriteSettings ? CLASSIFICATION_READ_ONLY_MESSAGE : undefined}
+              onClick={() => toggle(rule)}>
               {rule.enabled ? "비활성화" : "활성화"}
             </button>
           </div>
@@ -221,10 +260,18 @@ export function ClassificationSettingsPanel({csrf}: {csrf: string}) {
               {" · "}{proposal.source.type} / {proposal.target.type}
             </small>
           </div>
-          <button disabled={busy} onClick={() => review(proposal, "approve")}>
+          <button disabled={!canWriteRelations || busy}
+            aria-disabled={!canWriteRelations || busy}
+            aria-describedby={!canWriteRelations ? "relations-readonly-notice" : undefined}
+            title={!canWriteRelations ? RELATIONS_READ_ONLY_MESSAGE : undefined}
+            onClick={() => review(proposal, "approve")}>
             <CheckCircle2 size={14}/>승인
           </button>
-          <button className="danger" disabled={busy} onClick={() => review(proposal, "reject")}>
+          <button className="danger" disabled={!canWriteRelations || busy}
+            aria-disabled={!canWriteRelations || busy}
+            aria-describedby={!canWriteRelations ? "relations-readonly-notice" : undefined}
+            title={!canWriteRelations ? RELATIONS_READ_ONLY_MESSAGE : undefined}
+            onClick={() => review(proposal, "reject")}>
             <XCircle size={14}/>거부
           </button>
         </div>)}

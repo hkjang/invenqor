@@ -30,6 +30,7 @@ type Config struct {
 	ShutdownTimeout        time.Duration
 	MasterKeyPath          string
 	UpdateDir              string
+	EventSpoolDir          string
 	PostgresDSNFromEnv     bool
 	BootstrapAdmin         string
 	BootstrapAdminPassword string
@@ -101,6 +102,7 @@ func Load() (Config, error) {
 		ShutdownTimeout:        durationEnv("INVENQOR_SHUTDOWN_TIMEOUT", 15*time.Second),
 		MasterKeyPath:          strings.TrimSpace(os.Getenv("INVENQOR_MASTER_KEY_FILE")),
 		UpdateDir:              envOrDefault("INVENQOR_UPDATE_DIR", filepath.Join(stateDir, "updates")),
+		EventSpoolDir:          envOrDefault("INVENQOR_EVENT_SPOOL_DIR", filepath.Join(stateDir, "spool")),
 		PostgresDSNFromEnv:     postgresDSNFromEnv,
 		BootstrapAdmin:         bootstrapAdmin,
 		BootstrapAdminPassword: bootstrapPassword,
@@ -138,6 +140,9 @@ func (c Config) Validate() error {
 	}
 	if c.UpdateDir != "" && !filepath.IsAbs(c.UpdateDir) {
 		return errors.New("update directory must be absolute")
+	}
+	if c.EventSpoolDir != "" && !filepath.IsAbs(c.EventSpoolDir) {
+		return errors.New("event spool directory must be absolute")
 	}
 	if (c.BootstrapAdmin == "") != (c.BootstrapAdminPassword == "") {
 		return errors.New("bootstrap administrator and password must be configured together")

@@ -1,10 +1,77 @@
+import React from "react";
+import {renderToStaticMarkup} from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  SETTINGS_READ_ONLY_MESSAGE,
+  USERS_READ_ONLY_MESSAGE,
+  SettingsPage,
+  UsersPage,
+  canAdmin,
   formatMappings,
   normalizeKeycloakSettings,
   parseMappings,
   parseNetworkEntries,
 } from "./adminPages";
+
+const readOnlyAccess = (permission: string) => ({
+  permissions: [permission],
+  superAdmin: false,
+});
+
+describe("admin mutation permissions", () => {
+  it("renders settings.read as an explicit disabled read-only surface", () => {
+    const html = renderToStaticMarkup(React.createElement(SettingsPage, {
+      csrf: "csrf",
+      systemInfo: null,
+      userID: "reader",
+      access: readOnlyAccess("settings.read"),
+    }));
+
+    expect(html).toContain('id="settings-readonly-notice"');
+    expect(html).toContain(SETTINGS_READ_ONLY_MESSAGE);
+    expect(html).toContain('aria-describedby="settings-readonly-notice"');
+    expect(html).toContain(`title="${SETTINGS_READ_ONLY_MESSAGE}"`);
+    expect(html).toContain("연결 테스트");
+    expect(html).toContain('disabled="" aria-disabled="true"');
+  });
+
+  it("leaves the settings surface writable for settings.write and super admins", () => {
+    const writer = renderToStaticMarkup(React.createElement(SettingsPage, {
+      csrf: "csrf",
+      systemInfo: null,
+      userID: "writer",
+      access: readOnlyAccess("settings.write"),
+    }));
+    expect(writer).not.toContain("settings-readonly-notice");
+    expect(writer).not.toContain(SETTINGS_READ_ONLY_MESSAGE);
+    expect(canAdmin({permissions: [], superAdmin: true}, "settings.write")).toBe(true);
+  });
+
+  it("keeps users.read searchable but disables every management entry point", () => {
+    const html = renderToStaticMarkup(React.createElement(UsersPage, {
+      csrf: "csrf",
+      currentUserID: "reader",
+      access: readOnlyAccess("users.read"),
+    }));
+
+    expect(html).toContain('id="users-readonly-notice"');
+    expect(html).toContain(USERS_READ_ONLY_MESSAGE);
+    expect(html).toContain('aria-describedby="users-readonly-notice"');
+    expect(html).toContain(`title="${USERS_READ_ONLY_MESSAGE}"`);
+    expect(html).toContain("사용자 검색");
+    expect(html).toMatch(/<button class="primary compact" disabled="" aria-disabled="true"[^>]*>/);
+  });
+
+  it("enables user creation only for users.manage", () => {
+    const html = renderToStaticMarkup(React.createElement(UsersPage, {
+      csrf: "csrf",
+      currentUserID: "manager",
+      access: readOnlyAccess("users.manage"),
+    }));
+    expect(html).not.toContain("users-readonly-notice");
+    expect(html).toContain('<button class="primary compact" aria-disabled="false">');
+  });
+});
 
 describe("Keycloak mapping editor", () => {
   it("parses mappings while ignoring blanks and comments", () => {

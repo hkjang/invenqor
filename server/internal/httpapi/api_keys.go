@@ -15,7 +15,7 @@ func (s *Server) apiKeyScopes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := s.apiKeyService.List(r.Context())
+	keys, err := s.apiKeyService.ListFor(r.Context(), apiKeyAccess(r))
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -24,7 +24,9 @@ func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAPIKey(w http.ResponseWriter, r *http.Request) {
-	key, err := s.apiKeyService.Get(r.Context(), chi.URLParam(r, "keyID"))
+	key, err := s.apiKeyService.GetFor(
+		r.Context(), chi.URLParam(r, "keyID"), apiKeyAccess(r),
+	)
 	if errors.Is(err, apikeys.ErrNotFound) {
 		writeAPIError(w, r, 404, "API_KEY_NOT_FOUND", "The API key does not exist.")
 		return
@@ -89,24 +91,20 @@ func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, r, 400, "INVALID_SCOPES", err.Error())
 			return
 		}
-	}
-	id := chi.URLParam(r, "keyID")
-	before, err := s.apiKeyService.Get(r.Context(), id)
-	if err != nil {
-		apiKeyError(w, r, err)
-		return
-	}
-	key := before
-	if input.Name != nil {
-		key, err = s.apiKeyService.UpdateName(r.Context(), id, *input.Name)
-	}
-	if err == nil && input.Scopes != nil {
 		if !allowedToGrant(r, *input.Scopes) {
 			writeAPIError(w, r, 403, "SCOPE_ESCALATION", "A key cannot receive a scope the current user does not hold.")
 			return
 		}
-		key, err = s.apiKeyService.ReplaceScopes(r.Context(), id, *input.Scopes)
 	}
+	id := chi.URLParam(r, "keyID")
+	before, err := s.apiKeyService.GetFor(r.Context(), id, apiKeyAccess(r))
+	if err != nil {
+		apiKeyError(w, r, err)
+		return
+	}
+	key, err := s.apiKeyService.Update(
+		r.Context(), id, input.Name, input.Scopes,
+	)
 	if err != nil {
 		apiKeyError(w, r, err)
 		return
@@ -128,7 +126,11 @@ func (s *Server) addAPIKeyScopes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "keyID")
-	before, _ := s.apiKeyService.Get(r.Context(), id)
+	before, err := s.apiKeyService.GetFor(r.Context(), id, apiKeyAccess(r))
+	if err != nil {
+		apiKeyError(w, r, err)
+		return
+	}
 	key, err := s.apiKeyService.AddScopes(r.Context(), id, input.Scopes)
 	if err != nil {
 		apiKeyError(w, r, err)
@@ -140,7 +142,11 @@ func (s *Server) addAPIKeyScopes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) removeAPIKeyScope(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "keyID")
-	before, _ := s.apiKeyService.Get(r.Context(), id)
+	before, err := s.apiKeyService.GetFor(r.Context(), id, apiKeyAccess(r))
+	if err != nil {
+		apiKeyError(w, r, err)
+		return
+	}
 	key, err := s.apiKeyService.RemoveScope(
 		r.Context(), id, chi.URLParam(r, "scope"),
 	)
@@ -168,6 +174,7 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		chi.URLParam(r, "keyID"),
 		time.Duration(input.GraceSeconds)*time.Second,
+		apiKeyAccess(r),
 	)
 	if err != nil {
 		apiKeyError(w, r, err)
@@ -181,7 +188,11 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "keyID")
-	before, _ := s.apiKeyService.Get(r.Context(), id)
+	before, err := s.apiKeyService.GetFor(r.Context(), id, apiKeyAccess(r))
+	if err != nil {
+		apiKeyError(w, r, err)
+		return
+	}
 	if err := s.apiKeyService.Revoke(r.Context(), id); err != nil {
 		apiKeyError(w, r, err)
 		return
@@ -200,12 +211,25 @@ func allowedToGrant(r *http.Request, scopes []string) bool {
 	return true
 }
 
+func apiKeyAccess(r *http.Request) apikeys.Access {
+	principal := principalFromContext(r.Context())
+	return apikeys.Access{
+		UserID:          principal.User.ID,
+		SuperAdmin:      principal.User.SuperAdmin,
+		GrantableScopes: append([]string(nil), principal.User.Permissions...),
+	}
+}
+
 func apiKeyError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, apikeys.ErrNotFound):
 		writeAPIError(w, r, 404, "API_KEY_NOT_FOUND", "The API key does not exist or is inactive.")
 	case errors.Is(err, apikeys.ErrInvalid):
 		writeAPIError(w, r, 400, "INVALID_API_KEY", err.Error())
+	case errors.Is(err, apikeys.ErrConflict):
+		writeAPIError(w, r, 409, "API_KEY_CONFLICT", "The API key changed concurrently. Retry the operation.")
+	case errors.Is(err, apikeys.ErrForbidden):
+		writeAPIError(w, r, 403, "SCOPE_ESCALATION", "The key cannot be managed or reissued with scopes the current user does not hold.")
 	default:
 		writeAPIError(w, r, 500, "API_KEY_ERROR", "The API key operation failed.")
 	}

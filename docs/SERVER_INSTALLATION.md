@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.14 · Agent 버전: v0.2.14 · 기준일: 2026-08-21
+대상 Server 버전: v0.2.15 · Agent 버전: v0.2.15 · 기준일: 2026-08-24
 
 ## 1. 운영 구조와 단일 포트
 
@@ -12,8 +12,9 @@ Invenqor는 Linux Agent, 중앙 Server, PostgreSQL, 웹 관리 콘솔로 구성�
 ```text
 브라우저 ─┐
 Agent ────┼─ HTTPS :443 ─ Ingress/Reverse Proxy ─ HTTP :7070 Service ─ Server Pod(2+) ─ PostgreSQL
-관리 API ─┘                                      ├─ Pod별 spool/state PVC
-                                                └─ 업데이트 공용 RWX PVC
+관리 API ─┘                                      ├─ 이벤트 spool 공용 RWX PVC
+                                                ├─ 업데이트 공용 RWX PVC
+                                                └─ Pod별 state RWO PVC
 ```
 
 운영망에서는 외부 HTTPS `443`의 Ingress 또는 Reverse Proxy에서 TLS를 종료하고
@@ -46,6 +47,12 @@ Snapshot, 변경 이력과 오류를 함께 보존해 화면 값의 출처를 �
 같은 host의 프로세스·서비스·패키지는 내장 카탈로그로 주요 소프트웨어 제품에
 자동 결합하고 `runs_on` 관계, 설치·실행 상태와 판별 근거를 함께 저장합니다.
 
+v0.2.15 Server에서 `(Agent ID, Event ID)`가 같은 이벤트의 `processed` 상태는
+최종 상태입니다. 여러 Pod가 같은 이벤트를 처리하다 한 Pod가 먼저 성공한 뒤 다른
+Pod의 늦은 실패 기록이 도착해도 성공 상태를 `failed`로 강등하지 않습니다. Agent가
+같은 이벤트를 다시 보내면 Server는 중복 성공으로 응답하므로, 일시적인 응답 유실이
+자산을 두 번 반영하거나 완료 이벤트를 실패로 되돌리지 않습니다.
+
 ## 3. 온라인 Docker Compose 설치
 
 필수 조건은 Docker Engine 24+, Compose v2, 4 GiB 이상의 여유 메모리입니다.
@@ -53,7 +60,7 @@ Snapshot, 변경 이력과 오류를 함께 보존해 화면 값의 출처를 �
 ```bash
 git clone https://github.com/hkjang/invenqor.git
 cd invenqor
-export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 export BOOTSTRAP_ADMIN="admin"
 export BOOTSTRAP_ADMIN_PASSWORD="CorrectHorse!42"
 docker compose up -d --build
@@ -65,32 +72,61 @@ curl -fsS http://127.0.0.1:7070/health/ready
 
 ## 4. 폐쇄망·오프라인 설치
 
-GitHub Release의 두 파일을 인터넷 연결 구간에서 내려받아 승인된 매체로
-반입합니다.
+GitHub Release의 Server image 묶음과 체크섬을 인터넷 연결 구간에서 내려받아
+승인된 매체로 반입합니다.
 
-- `invenqor-0.2.14.tar.gz`
-- `invenqor-0.2.14.tar.gz.sha256`
+- `invenqor-0.2.15.tar.gz`
+- `invenqor-0.2.15.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
+
+Agent 전체 배포본도 함께 반입하려면 다음 두 파일을 사용합니다. Server image
+묶음과 분리되어 있어 자산 장비에는 필요한 Agent 패키지만 전달할 수 있습니다.
+
+- `invenqor-agents-0.2.15.tar.gz`
+- `invenqor-agents-0.2.15.tar.gz.sha256`
+
+Agent 묶음에는 Linux x86_64·aarch64, Windows x86_64 패키지와 각 체크섬,
+관리 콘솔용 단일 signature-bundle JSON을 만드는
+`sign-agent-update-manifest-v2.py`가 포함됩니다.
 
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.14.tar.gz.sha256
-gzip -t invenqor-0.2.14.tar.gz
-docker load < invenqor-0.2.14.tar.gz
-docker image inspect invenqor-server:0.2.14 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.15.tar.gz.sha256
+gzip -t invenqor-0.2.15.tar.gz
+docker load < invenqor-0.2.15.tar.gz
+docker image inspect invenqor-server:0.2.15 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
+```
+
+Agent 전체 묶음은 별도로 검증하고 해제합니다. 해제된 디렉터리 안에서도 배포할
+개별 패키지의 `.sha256`을 대상 장비에 함께 전달해 복사 후 다시 검증하십시오.
+
+```bash
+sha256sum -c invenqor-agents-0.2.15.tar.gz.sha256
+gzip -t invenqor-agents-0.2.15.tar.gz
+tar -xzf invenqor-agents-0.2.15.tar.gz
 ```
 
 `compose.offline.yaml`은 `pull_policy: never`이므로 외부 Registry를 조회하지
 않습니다.
 
 ```bash
-export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 export BOOTSTRAP_ADMIN="admin"
 export BOOTSTRAP_ADMIN_PASSWORD="CorrectHorse!42"
 docker compose -f compose.offline.yaml up -d
 curl -fsS http://127.0.0.1:7070/health/ready
+```
+
+위 `-hex` 값은 PostgreSQL URI의 사용자 정보에 그대로 넣어도 안전합니다. 조직에서
+`@`, `:`, `/`, `?`, `#`, `%` 같은 URI 예약문자가 포함된 DB 비밀번호를 사용한다면
+컨테이너에는 원문을 주고 Server에는 percent-encoding한 DSN을 별도로 지정하십시오.
+
+```bash
+export POSTGRES_PASSWORD='p@ss:word'
+export POSTGRES_DSN='postgres://invenqor:p%40ss%3Aword@postgres:5432/invenqor?sslmode=disable'
+docker compose -f compose.offline.yaml up -d
 ```
 
 반입 이미지는 `linux/amd64`용입니다. ARM 서버에는 x86_64 이미지를 실행하지
@@ -98,7 +134,7 @@ curl -fsS http://127.0.0.1:7070/health/ready
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.14
+./scripts/build-offline-images.sh 0.2.15
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -113,7 +149,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.14
+  invenqor-server:0.2.15
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -209,8 +245,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.15/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.15/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -230,7 +266,7 @@ Windows용 Agent는 별도 배포본이며 같은 Server·같은 등록 절차�
 PowerShell에서 설치합니다.
 
 ```powershell
-$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.14'
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.15'
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile agent.zip
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile agent.zip.sha256
 # 게시된 값과 일치하는지 확인합니다.
@@ -266,6 +302,17 @@ Restart-Service invenqor-agent
 있습니다. **상태 디렉터리를 이미지에 포함하면 모든 복제 호스트가 같은 `agent-id`를
 사용합니다.** 이미지화 전에 삭제하십시오.
 
+기본값이 아닌 SCM 서비스명을 표준화한 조직은 설치·업그레이드 모두 같은
+`-ServiceName`을 전달합니다. Installer가 검증한 이름은 SCM `binPath`의 독립된
+`--service-name` argv와 `%ProgramData%\Invenqor\service-name`에 기록됩니다. 따라서
+서비스로 실행할 때의 control handler, 관리자 콘솔의 `--diagnose`, 수동
+`--update-now` 재시작이 같은 SCM 대상을 사용합니다. 기존 기본 설치의
+`--service` 명령줄은 호환됩니다.
+
+```powershell
+.\scripts\install.ps1 -ServiceName 'Invenqor Agent Finance'
+```
+
 ```powershell
 # 골든 이미지 준비
 .\scripts\install.ps1 -NoStart
@@ -279,14 +326,16 @@ Remove-Item -Recurse -Force "$env:ProgramData\Invenqor\state"
 
 - Server는 시작 시 DB Schema를 자동 마이그레이션합니다.
 - PostgreSQL 멀티 파드 마이그레이션은 advisory lock으로 한 Pod씩 수행됩니다.
-- 일시적 DB 장애에는 인증된 Agent 이벤트를 Pod별 append-only spool에 쓰고
-  DB 복구 뒤 자동 재처리합니다.
+- 일시적 DB 장애에는 인증된 Agent 이벤트를 모든 Pod가 공유하는 RWX spool에
+  원자적으로 게시하고 DB 복구 뒤 자동 재처리합니다. 한 Pod가 종료되어도 다른
+  Pod가 OS advisory replay lock을 획득해 미처리 이벤트를 이어받습니다.
 - Agent는 변경분만 보내고, 전송 실패 시 내구성 큐와 지수 backoff로 자동
   재시도합니다.
 - Agent는 최초 연결에서 자동 등록하며, 장비 Token 무효화 시 로컬 claim으로
   자동 재등록합니다. 관리 API의 차단은 즉시 모든 Pod에 적용됩니다.
-- 서명된 업데이트는 Agent가 주기적으로 확인·검증·스테이징하고 systemd path
-  unit이 root helper를 한 번만 호출해 원자 교체합니다.
+- 서명된 업데이트는 Agent가 주기적으로 확인·검증·스테이징합니다. Linux systemd는
+  path unit과 root helper로, Windows service는 LocalSystem과 SCM recovery로 원자
+  교체·재시작합니다.
 
 사람이 반드시 수행할 작업은 초기 관리자, TLS/서명 개인키 보관, 백업 복구
 훈련과 업데이트 승인입니다. 외부 노출 환경에서는 enrollment token의 안전한
@@ -304,9 +353,28 @@ Remove-Item -Recurse -Force "$env:ProgramData\Invenqor\state"
 openssl genpkey -algorithm ED25519 -out update-private.pem
 openssl pkey -in update-private.pem -pubout -outform DER |
   tail -c 32 | base64 | tr -d '\n'          # 이 값을 양쪽에 설정
-openssl pkeyutl -sign -rawin -inkey update-private.pem \
-  -in invenqor-agent -out invenqor-agent.sig  # 이 .sig 파일을 그대로 업로드
 ```
+
+새 게시물은 artifact 원문만 서명하지 않습니다. 버전·channel·OS·architecture·
+정확한 byte 크기·SHA-256·rollback 허용 여부를 하나의 canonical manifest v2로
+묶어 서명합니다. 저장소와 릴리즈에 포함된 오프라인 helper를 사용하십시오.
+
+```bash
+python3 scripts/sign-agent-update-manifest-v2.py \
+  --artifact invenqor-agent-linux-x86_64 \
+  --private-key update-private.pem \
+  --version 0.2.15 --channel stable \
+  --os linux --architecture x86_64 \
+  > invenqor-agent-linux-x86_64.signature-bundle.json
+```
+
+표준 출력 JSON에는 이전 Agent의 정상 상향 업데이트를 위한 artifact 서명과
+metadata-bound v2 manifest 서명, 서명된 모든 필드가 함께 들어갑니다. 이 JSON
+하나를 콘솔에 업로드하고 변경 승인 증적으로 보관합니다. 별도 raw 파일이 필요한
+레거시 자동화에만 `--signature-output`과 `--manifest-signature-output`을
+선택적으로 사용하십시오. Windows는 `--os windows --architecture x86_64`를
+사용합니다. 하위 버전 게시에는 서명할 때와 콘솔에서 모두 `allow_downgrade`가
+일치하도록 helper에 `--allow-downgrade`를 추가해야 합니다.
 
 Server:
 
@@ -328,18 +396,23 @@ install_path = "/opt/invenqor-agent/bin/invenqor-agent"
 
 <div class="callout warning">
 <strong>Server 공개키를 반드시 설정하십시오.</strong> 설정하지 않으면 Server는
-서명 형식만 확인합니다. 잘못된 서명으로 게시해도 게시는 성공하고, 그 뒤 fleet의
-모든 Agent가 검증에 실패합니다. 증상은 각 호스트 로그 한 줄뿐이므로 발견이
-늦습니다. 공개키가 있으면 게시 시점에 <code>UPDATE_SIGNATURE_REJECTED</code>로
-거부되어 잘못을 즉시 알 수 있습니다. 콘솔 게시 화면에도 현재 검증 가능 여부가
-표시됩니다.
+관리 콘솔과 게시 API를 잠그고 <code>UPDATE_SIGNING_KEY_MISSING</code>으로
+fail-closed 거부합니다. 공개키가 있더라도 artifact 또는 manifest 서명이 맞지
+않으면 게시 시점에 <code>UPDATE_SIGNATURE_REJECTED</code>로 거부합니다. 공개키를
+설정한 뒤 Server를 재기동하고 콘솔의 게시 가능 상태를 확인하십시오.
 </div>
 
 ### 8.2 게시와 단계적 확대
 
-**Agent 관리** 화면에서 artifact와 `.sig` 파일을 올리고 버전·아키텍처·최초
-rollout을 입력하면 게시됩니다. `.sig`는 `openssl pkeyutl -sign`이 만든 64 byte
-원본을 그대로 올려도 되고, base64 문자열을 붙여넣어도 됩니다(줄바꿈 허용).
+**Agent 관리** 화면에서 artifact와 helper가 만든
+`.signature-bundle.json` 하나를 올립니다. 화면은 bundle의 버전·channel·OS·
+architecture·rollback 여부를 자동으로 채우고 수정하지 못하게 하며, 운영자는 최초
+rollout과 메모만 입력합니다. Bundle의 크기·SHA-256·플랫폼·서명 중 하나라도
+artifact와 다르면 Server가 게시를 거부하고 Agent에도 릴리즈가 노출되지 않습니다.
+
+v0.2.14 이전에 이미 저장된 artifact-only(v1) 서명은 정상 상향 업데이트에 한해
+호환됩니다. 새 게시물은 v2만 사용하며, v1 서명은 unsigned `allow_downgrade` 변조를
+막을 수 없으므로 하향 롤백을 절대로 승인하지 않습니다.
 
 게시 후에는 **재업로드 없이** rollout을 조절합니다.
 
@@ -362,27 +435,38 @@ Rollout 대상 선정은 Agent UUID 해시로 결정되므로 같은 호스트�
 
 이미 적용된 Agent를 되돌리려면 **이전 버전을 롤백 릴리즈로 게시**합니다.
 `allow_downgrade`가 설정된 릴리즈만 Agent가 하위 버전으로 받아들이며, 서명과
-SHA-256 검증은 동일하게 수행합니다. 이 표시가 없으면 Agent는 자신보다 낮은
+SHA-256 검증은 동일하게 수행합니다. v2 서명에는 이 표시 자체가 포함되므로 게시
+화면과 helper 양쪽에서 선택해야 합니다. 이 표시가 없으면 Agent는 자신보다 낮은
 버전을 거부하므로, 잘못된 릴리즈에 갇힌 fleet을 꺼낼 수 없습니다.
 
 ### 8.4 적용 경로와 안전장치
 
-Agent는 비특권 계정으로 실행되므로 스스로 바이너리를 교체하지 않습니다. 검증이
-끝난 업데이트는 `updates/pending.json`으로 스테이징되고, 실제 설치는 권한을 가진
-경로가 수행합니다.
+Linux Agent는 비특권 계정으로 실행되므로 스스로 바이너리를 교체하지 않습니다.
+검증이 끝난 업데이트는 `updates/pending.json`으로 스테이징되고 실제 설치는 권한을
+가진 init 경로가 수행합니다. Windows service는 LocalSystem으로 실행되므로 서명·
+해시 검증과 candidate 자기 점검을 마친 뒤에만 안전한 rename·교체를 직접 수행하고
+SCM recovery restart를 요청합니다.
 
 | init | 적용 시점 |
 |---|---|
 | systemd | `invenqor-agent-update.path`가 스테이징을 감지해 즉시 적용하고 서비스를 재시작 |
 | OpenRC | 서비스 시작 시 `start_pre`에서 적용 |
 | SysV | 서비스 시작 시 적용 |
+| Windows SCM | 실행 중 EXE를 `.previous`로 rename하고 새 파일을 설치한 뒤 SCM crash recovery로 즉시 재시작 |
 
-설치 직전에 **스테이징된 바이너리를 실제로 실행해 `--version`을 확인**합니다.
+실행 중인 바이너리를 rename하거나 교체하기 전에 **스테이징된 candidate를 실제로
+실행해 `--version`을 확인**합니다.
+자기 점검은 10초, stdout/stderr 각각 64 KiB로 제한되며 초과 프로세스를 종료합니다.
 서명과 해시가 맞아도 실행되지 않는 빌드(아키텍처 계열 불일치, 잘못된 빌드)를
 활성화하면 그 릴리즈를 받은 모든 호스트에서 수집이 멈추고 장비마다 손으로
 복구해야 합니다. 자기 점검에 실패하면 설치를 중단하고 기존 바이너리를 그대로
 유지합니다. 성공 시 기존 바이너리는 `.previous`로 남고 rename 실패 시 즉시
 복원되며, 스테이징 파일은 적용 후 삭제됩니다.
+
+Artifact download는 `Content-Length`가 있으면 manifest 크기와 먼저 대조하고,
+없는 chunked Ingress 응답도 manifest 크기를 상한으로 streaming합니다. 실제 수신
+크기와 SHA-256·서명을 모두 다시 검증하므로 proxy가 크기 header를 생략해도 업데이트가
+멈추지 않으며 과대 응답을 무제한 저장하지 않습니다.
 
 관리자가 직접 즉시 갱신할 때는 한 번의 명령으로 끝냅니다.
 
@@ -399,7 +483,7 @@ sudo /opt/invenqor-agent/bin/invenqor-agent \
 
 ```bash
 invenqor-agent --config /etc/invenqor-agent/config.toml --status
-#   updates       자동 · 실행 0.2.13 · 대기 0.2.14
+#   updates       자동 · 실행 0.2.14 · 대기 0.2.15
 invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
 #   [WARN] automatic updates  a verified update is staged and is waiting to be installed
 ```
@@ -410,7 +494,22 @@ invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
 ## 9. Kubernetes 멀티 파드
 
 필수 조건은 외부 PostgreSQL, 모든 Pod가 공유하는 32-byte Master Key Secret,
-Pod별 RWO state PVC, 업데이트용 RWX PVC입니다.
+이벤트 spool용 RWX PVC, 업데이트용 RWX PVC와 Pod별 RWO state PVC입니다.
+
+GitHub Release의 Helm Chart를 사용할 때는 `.tgz`와 체크섬을 함께 반입하고 먼저
+검증합니다. 소스에서 릴리즈 Chart를 만드는 운영자는 동일 입력이 항상 동일한
+SHA-256을 내도록 owner·mtime·정렬 순서를 고정하는 전용 스크립트를 사용하십시오.
+스크립트는 원본과 완성된 archive에 모두 `helm lint --strict`를 수행하며 검증이
+하나라도 실패하면 결과물을 게시하지 않습니다.
+
+```bash
+# 공식 릴리즈 artifact 검증
+sha256sum -c invenqor-0.2.15.tgz.sha256
+helm lint invenqor-0.2.15.tgz --strict
+
+# 소스 checkout에서 동일 artifact 생성
+./scripts/package-helm-release.sh ./dist/helm
+```
 
 ```bash
 head -c 32 /dev/urandom > master.key
@@ -419,34 +518,94 @@ kubectl create secret generic invenqor-database \
   --from-literal=dsn='postgres://user:password@host/db?sslmode=require'
 kubectl create secret generic invenqor-bootstrap-admin \
   --from-literal=password='CorrectHorse!42'
-helm upgrade --install invenqor deploy/helm/invenqor \
+helm upgrade --install invenqor ./invenqor-0.2.15.tgz \
   --set replicaCount=2 \
   --set bootstrapAdmin.username=admin \
   --set bootstrapAdmin.passwordSecret.name=invenqor-bootstrap-admin \
-  --set updates.storageClassName='YOUR-RWX-STORAGE-CLASS'
+  --set updates.storageClassName='YOUR-RWX-STORAGE-CLASS' \
+  --set eventSpool.storageClassName='YOUR-RWX-STORAGE-CLASS'
 ```
 
+기존 RWX 이벤트 spool PVC를 재사용하려면
+`--set eventSpool.existingClaim='YOUR-EVENT-SPOOL-CLAIM'`을 지정합니다. 신규 배포의
+기본값은 `eventSpool.enabled=true`이며 Chart가 공용 PVC를 생성합니다. 멀티 Pod에서
+이를 끄면 DB 장애 중 한 Pod가 수락한 이벤트를 다른 Pod가 복구할 수 없으므로
+사용하지 마십시오.
+
 Chart의 기본 Server 이미지는 공개 GHCR 이미지
-`ghcr.io/hkjang/invenqor-server:0.2.14`이며 `linux/amd64`와 `linux/arm64`를
+`ghcr.io/hkjang/invenqor-server:0.2.15`이며 `linux/amd64`와 `linux/arm64`를
 지원합니다. 인터넷 연결이 제한되었거나 사내 레지스트리를 사용하는 경우에는 먼저
 오프라인 이미지 번들을 레지스트리에 적재한 뒤
 `--set image.repository=REGISTRY/PROJECT/invenqor-server`와
-`--set image.tag=0.2.14`로 명시하십시오.
+`--set image.tag=0.2.15`로 명시하십시오.
 
 Chart는 StatefulSet parallel 기동, readiness/liveness/startup probe, Pod
 anti-affinity, rolling update와 PDB `minAvailable: 1`을 포함합니다. 세션,
 RBAC, Agent 상태와 감사 로그는 PostgreSQL에 있으므로 어느 Pod로 접속해도
 동일합니다. Master Key가 Pod마다 다르면 암호화된 OIDC/TOTP 비밀을 해독할 수
-없으므로 Secret을 교체하거나 분실하지 마십시오. RWX StorageClass가 없는
-클러스터는 업데이트 공유 저장소를 별도 Object Storage 구현으로 대체하기
-전까지 replica 1로 운영해야 합니다.
+없으므로 Secret을 교체하거나 분실하지 마십시오. 이벤트 spool은 완전히 fsync한
+임시 파일을 no-clobber 방식으로 원자 게시하며, 모든 Pod가 공유하는 OS advisory
+lock을 획득한 한 Pod만 arrival 순서로 재처리합니다. `fsGroup: 65532`로 마운트된
+root 소유 `0770` CSI volume도 지원하되 다른 사용자에게 읽기 권한이 있으면 기동을
+거부합니다. 두 공용 저장소에 쓸 RWX StorageClass가 없는 클러스터는 멀티 Pod로
+운영할 수 없습니다. 임시 단일 Pod 구성에는 `replicaCount=1`과 함께
+`updates.accessMode=ReadWriteOnce`, `eventSpool.accessMode=ReadWriteOnce`를 명시하고,
+확장 전에 RWX 저장소로 이관하십시오.
+
+`persistence.enabled=true`가 기본값이며 StatefulSet의 각 Pod에 독립적인 RWO
+`state` PVC를 만듭니다. `persistence.enabled=false`는 해당 volume을 실제
+`emptyDir`로 바꾸므로 Pod 교체 때 로컬 상태가 사라집니다. 후자는 폐기 가능한
+단일 Pod 검증 환경에서만 사용하십시오. StatefulSet의 `volumeClaimTemplates`는
+immutable 영역이므로 설치 뒤 이 값을 켜거나 끄는 in-place upgrade는 명확한
+오류와 함께 차단됩니다. 운영 전환 시에는 백업과 유지보수 창을 확보하고
+StatefulSet 재생성 절차를 별도로 수행해야 합니다.
+
+같은 namespace에 여러 release를 설치해도 Service, PDB, Pod anti-affinity와 새
+StatefulSet selector는 `app.kubernetes.io/instance=<release>`로 분리됩니다.
+v0.2.14에서 처음 upgrade할 때는 Chart의 `lookup`이 실행 중 StatefulSet selector
+`{app: invenqor}`를 그대로 보존하여 Kubernetes immutable field 변경을 피하고,
+Pod template에 release instance label을 추가합니다. Service와 PDB는 이 label만
+선택하므로 다른 release의 Pod로 요청이나 disruption budget이 섞이지 않습니다.
+첫 rolling upgrade 동안 기존 Pod가 새 label로 교체되는 짧은 endpoint 전환을
+감안해 유지보수 시간을 잡으십시오. 이 호환 경로는 대상 cluster에 연결된 실제
+`helm upgrade`에서 동작합니다. v0.2.14에 대해 cluster 조회가 없는 `helm template`
+출력을 직접 적용하면 기존 selector를 알 수 없으므로 사용하지 마십시오.
 
 Chart는 관리자 비밀번호 Secret을
 `/run/secrets/invenqor-bootstrap/password`에 읽기 전용으로 마운트하고
 `INVENQOR_BOOTSTRAP_ADMIN_PASSWORD_FILE`로 읽습니다. 초기 계정 생성이 확인되면
 Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기하십시오.
 
-### 9.1 HTTPS Ingress
+### 9.1 v0.2.14 Keycloak Secret 자동 이관
+
+v0.2.15부터 Keycloak Client Secret은 공용 PostgreSQL의
+`auth.keycloak.client_secret` 설정에 저장됩니다. 값은 모든 Pod가 공유하는
+32-byte Master Key와 용도별 associated data를 사용해 AES-256-GCM AEAD로
+암호화되며, DB에는 ciphertext envelope만 남습니다. 따라서 새로 설정한 Secret은
+Pod별 state PVC나 sticky session에 의존하지 않고 어느 Pod에서나 사용할 수
+있습니다.
+
+v0.2.14는 이 Secret을 설정 요청을 처리한 Pod의 `bootstrap.enc`에
+보관했습니다. Rolling upgrade는 다음 순서를 지키십시오.
+
+1. PostgreSQL, Master Key Secret과 기존 Pod state PVC를 함께 백업합니다.
+2. 동일한 Master Key와 기존 `bootstrap.enc`가 있는 PVC를 연결한 v0.2.15 Pod를
+   하나 먼저 기동합니다.
+3. Server는 공용 DB에 Secret이 없을 때만 로컬 값을 읽어 암호화하고
+   insert-if-absent로 이관합니다. 여러 Pod가 동시에 시작해도 먼저 저장된 한 값만
+   사용합니다.
+4. 두 번째 Pod의 **설정 → Keycloak** 또는
+   `GET /api/v1/admin/settings/keycloak`에서
+   `client_secret_configured=true`를 확인한 뒤 나머지 Pod를 갱신합니다.
+
+기존 PVC를 이미 잃어 공용 DB에도 Secret이 없다면 로컬 Super Admin으로 로그인해
+**설정 → Keycloak** 전용 화면에서 Client Secret을 다시 입력하십시오. Master
+Key를 잃었거나 DB와 다른 시점의 Key를 복원했다면 기존 ciphertext를 복호화할 수
+없으며 Keycloak뿐 아니라 같은 Key로 보호한 비밀 전체에 영향이 있으므로, 일치하는
+DB·Master Key 백업을 우선 복원해야 합니다. `settings` 테이블에 평문 Secret을
+직접 넣어 복구하지 마십시오.
+
+### 9.2 HTTPS Ingress
 
 Chart의 선택적 Ingress는 `/` Prefix 하나로 웹, 관리 API, Agent 등록·이벤트·
 업데이트를 모두 같은 origin에 전달합니다. NGINX Ingress 예시는 다음과 같습니다.
@@ -456,7 +615,7 @@ ingress:
   enabled: true
   className: nginx
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: 20m
+    nginx.ingress.kubernetes.io/proxy-body-size: 130m
     nginx.ingress.kubernetes.io/proxy-read-timeout: "90"
   hosts:
     - host: invenqor.example.com
@@ -468,9 +627,9 @@ ingress:
       hosts: [invenqor.example.com]
 ```
 
-Ingress는 경로를 rewrite하지 않아야 하며 Agent 이벤트 본문 상한 16 MiB보다 큰
-20 MiB 이상을 허용해야 합니다. Agent는 다음 경로를 같은 HTTPS origin으로
-사용합니다.
+Ingress는 경로를 rewrite하지 않아야 하며 Agent 이벤트 본문 상한 16 MiB와
+Agent 업데이트 아티팩트 상한 128 MiB를 모두 통과시키도록 130 MiB 이상을
+허용해야 합니다. Agent는 다음 경로를 같은 HTTPS origin으로 사용합니다.
 
 | 목적 | 경로 |
 |---|---|
@@ -490,37 +649,87 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 |---|---|
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
-| `/health/database` | `POSTGRES_ACTIVE` 권장 |
-| `/api/v1/system/info` | 버전 `0.2.14`, 포트 `7070`, DB 모드 |
+| `/api/v1/system/info` | 인증 전에도 확인 가능한 버전 `0.2.15` |
+| `/health/database` | 로그인·`settings.read` 필요, `POSTGRES_ACTIVE` 권장 |
+| `/api/v1/admin/system/info` | 로그인·`settings.read` 필요, 포트·DB·등록 정책 확인 |
 
-백업 대상은 PostgreSQL, Pod별 state/spool PVC, 업데이트 RWX PVC와 Master Key
-Secret입니다. DB와 Master Key는 같은 복구 시점으로 보호하십시오. 복구 훈련은
-별도 Namespace에서 로그인, Agent 재전송, 감사 로그와 update manifest까지
-확인해야 완료입니다.
+공개 상태 경로는 생존·준비와 로그인 화면의 버전만 노출합니다. PostgreSQL 모드,
+bind 주소, Agent 등록 정책과 시작 실패 분류는 관리 Session으로만 조회할 수 있어
+외부에서 운영 구성을 fingerprint하지 못합니다.
 
-## 11. 검증된 호환성
+백업 대상은 PostgreSQL, 공용 이벤트 spool RWX PVC, 공용 업데이트 RWX PVC,
+Pod별 state RWO PVC와 Master Key Secret입니다. DB와 Master Key는 같은 복구
+시점으로 보호하십시오. 복구 훈련은 별도 Namespace에서 로그인, Agent 재전송,
+spool 재처리, 감사 로그와 update manifest까지 확인해야 완료입니다.
 
-v0.2.14 E2E는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동하고
+### 10.1 멀티 Pod API Key 변경과 충돌 복구
+
+API Key scope는 공용 DB 값을 optimistic revision으로 사용합니다. Scope 추가·
+삭제는 충돌 시 Server가 최대 8회 다시 읽고 병합하며, 전체 scope 교체는 읽었던
+`scopes_json`과 일치할 때만 갱신합니다. 이름과 scope를 함께 PATCH하면 하나의
+조건부 SQL 문으로 처리하므로 scope 충돌 때 이름만 부분 반영되지 않습니다.
+
+Secret 회전도 현재 `key_hash`를 revision으로 사용합니다. 두 Pod가 동시에
+회전하면 한 요청만 새 Secret을 받고, 패자는 HTTP `409`와
+`API_KEY_CONFLICT`를 받으며 사용할 수 없는 Secret을 반환하지 않습니다.
+
+`409`를 받으면 다음과 같이 처리합니다.
+
+1. `GET /api/v1/admin/api-keys/{id}`로 최신 이름, scope, prefix와 변경 시각을 다시
+   읽습니다.
+2. Scope 전체 교체는 최신 목록을 기준으로 목표 목록을 다시 계산한 뒤 제한된
+   backoff와 jitter를 두고 재시도합니다. 응답 확인 없는 무한 재시도는 금지합니다.
+3. 회전 충돌은 다른 운영자가 받은 일회성 Secret의 배포 여부를 먼저 확인합니다.
+   승자 응답을 사용할 수 없다는 사실이 확인된 경우에만 새 회전을 승인합니다.
+
+모든 판정은 PostgreSQL에서 이루어지므로 API 요청에 sticky session을 설정할
+필요가 없습니다. 상세 scope와 권한 모델은
+[자산 API·MCP·키 관리 가이드](API_MCP_GUIDE.md)를 참조하십시오.
+
+### 10.2 Agent Event 멱등성과 최종 상태
+
+`pending`과 `failed` 이벤트는 재처리할 수 있지만 `processed`는 최종 상태입니다.
+처리 중이던 다른 Pod가 늦게 실패하더라도 실패 UPSERT는 이미 완료된 행을 변경하지
+않습니다. 먼저 성공한 트랜잭션의 자산, 주요 소프트웨어 projection과 원본 이벤트가
+그대로 유지되며, Agent의 다음 재전송은 중복 성공으로 끝납니다. 장애 조사 때는
+Agent 응답 하나만 보고 상태를 수동 변경하지 말고 `agent_events.processing_status`,
+request ID와 Server 진단 로그를 함께 확인하십시오.
+
+자산의 최신 상태는 Agent가 보낸 시각 하나만 믿지 않고
+`(effective created_at, Server received_at, event_id)` 순서로 결정합니다. 같은 초에
+여러 Pod가 이벤트를 받아도 DB 수신 시각과 Event ID가 안정적인 tie-breaker가 되어
+늦게 도착한 오래된 이벤트가 최신 상태를 되돌리지 않습니다. Agent 또는 기존 DB의
+시각이 Server 수신 시각보다 10분 넘게 미래이면 수신 시각으로 clamp하고
+`FUTURE_TIMESTAMP_CLAMPED` 진단을 남겨, 잘못된 장비 시계가 이후 정상 이벤트를
+영구 차단하지 않게 합니다.
+
+## 11. 자동 호환성 검증 범위
+
+v0.2.15 검증 경로는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동해
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
-스테이징을 확인했습니다.
+스테이징을 확인하도록 구성되어 있습니다.
 
-| OS 이미지 | 결과 |
+| OS 이미지 | 자동 E2E |
 |---|---|
-| Alpine | 통과 |
-| CentOS 7 | 통과 |
-| Red Hat UBI 8 | 통과 |
-| Red Hat UBI 9 | 통과 |
-| Ubuntu 22.04 LTS | 통과 |
-| Ubuntu 24.04 LTS | 통과 |
+| Alpine | 포함 |
+| CentOS 7 | 포함 |
+| Red Hat UBI 8 | 포함 |
+| Red Hat UBI 9 | 포함 |
+| Ubuntu 22.04 LTS | 포함 |
+| Ubuntu 24.04 LTS | 포함 |
 
-별도 E2E에서 Server 두 Pod를 동시에 시작해 migration, readiness, 교차 Pod
-로그인 세션을 확인했습니다. 재현 명령은 `./scripts/e2e-client-server.sh`와
-`./scripts/e2e-multipod.sh`입니다.
+`./scripts/e2e-client-server.sh`는 배포용 Linux x86_64 archive를 실제로 풀고
+RHEL 8 계열 systemd 환경에서 installer, URL-only 등록, daemon 전송,
+`invenqor-agent-update.path`, 설정 소유권과 진단을 확인합니다.
+`./scripts/e2e-multipod.sh`는 Server 두 Pod를 동시에 시작해 migration, readiness,
+교차 Pod 로그인과 정책뿐 아니라 PostgreSQL 장애 중 두 Pod의 공용 spool 수락,
+한 Pod 제거 후 생존 Pod의 replay, 재확장과 공용 update 게시를 재현합니다.
 
 Windows Agent 실행 파일은 CI에서 `x86_64-pc-windows-gnu` release target으로
-매 커밋 교차 빌드합니다. 그 산출물을 artifact로 Windows GitHub runner에 전달해
-실제 릴리즈 ZIP과 동일한 GNU Agent와 Server를 함께 기동하고 자동 등록, 네이티브
-수집, 전송과 조회까지 `scripts/e2e-windows.ps1`로 검증합니다. Linux CI의
+교차 빌드합니다. 그 산출물을 artifact로 Windows GitHub runner에 전달해 실제
+릴리즈 ZIP과 동일한 GNU Agent를 사용자 지정 SCM 서비스명으로 설치하고 Server와
+함께 기동합니다. 자동 등록, 네이티브 수집, 상태·진단, 전송·조회, service marker와
+제거까지 `scripts/e2e-windows.ps1`가 확인합니다. Linux CI의
 PostgreSQL 계약 E2E도 Windows
 형식 `system`, Service Control Manager 서비스, process와 Uninstall 패키지 이벤트를
 Server에 전송해 다음 계약을 독립적으로 검증합니다.
@@ -592,7 +801,7 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
   **등록 진단**의 *첫 수집 대기* 목록과 Agent의 `--status` 큐 깊이를 함께
   확인합니다.
 - Windows Agent의 첫 inventory 시각은 있는데 **운영체제 확인 전**: Server와
-  Agent 버전을 확인합니다. v0.2.14는 기존 최상위 `os_name`과 새 `os_release`
+  Agent 버전을 확인합니다. v0.2.15는 기존 최상위 `os_name`과 새 `os_release`
   형식을 모두 읽고 snapshot·후속 `system` delta뿐 아니라 저장된 기존 원천을 첫
   heartbeat에서 다시 투영합니다. Server를 올리면 자동 복구되며 Agent를 삭제·
   재등록하거나 `%ProgramData%\Invenqor\state`를 지우면 안 됩니다. Agent는 이후
@@ -624,12 +833,17 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
   필요합니다. v0.2.13 이후의 `install.sh`는 설치·업그레이드 시 이 권한을 맞추고,
   Agent는 읽을 수 없는 설정 파일을 발견하면 기본값으로 조용히 넘어가지 않고 조치
   명령과 함께 기동을 거부합니다.
-- `SQLITE_FALLBACK`: PostgreSQL DSN/DNS/TLS/인증을 수정하고 운영 전
-  PostgreSQL 모드로 재기동합니다.
-- 업데이트 미적용: 공개키, signature, SHA-256, version, architecture,
-  rollout bucket과 systemd update path unit을 확인합니다.
-- 멀티 파드 일부 실패: 공통 Master Key, RWX 권한, PostgreSQL advisory lock,
-  해당 Pod의 state/spool PVC를 확인합니다.
+- `SQLITE_FALLBACK`: 호환성을 위해 유지되는 상태 이름이며, PostgreSQL DSN을
+  지정하지 않은 단일 인스턴스 개발·복구 모드입니다.
+  운영 전 `INVENQOR_POSTGRES_DSN`을 지정해 PostgreSQL 모드로 재기동합니다.
+- PostgreSQL DSN 지정 후 기동/readiness 실패: DSN/DNS/TLS/인증과 migration
+  권한을 수정하십시오. 안전을 위해 Pod 로컬 SQLite로 자동 전환하지 않습니다.
+- 업데이트 미적용: Server·Agent 공개키, signature bundle, SHA-256, version,
+  architecture, rollout bucket과 systemd update path unit을 확인합니다. 게시 자체가
+  거부되면 먼저 `UPDATE_SIGNING_KEY_MISSING` 또는 `UPDATE_SIGNATURE_REJECTED`를
+  확인합니다.
+- 멀티 파드 일부 실패: 공통 Master Key, 공용 event spool·update RWX 권한,
+  PostgreSQL advisory lock, replay lock과 해당 Pod의 state RWO PVC를 확인합니다.
 
 ## 13. Agent 자동 등록 설정
 
@@ -737,7 +951,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.14
+  invenqor-server:0.2.15
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
@@ -771,6 +985,14 @@ TLS/사설 CA를 검증한 뒤 Callback URI, Logout URI, `openid profile email`,
 경우에는 Secret을 다시 입력하지 않고 URL/Realm/Client ID만 재검증할 수
 있습니다. 생성된 Callback URI는 성공 메시지와 고급 설정에서 확인하여 Keycloak
 Client의 Valid Redirect URI와 일치시키십시오.
+
+Client Secret과 OIDC 설정은 반드시 **설정 → Keycloak** 또는
+`/api/v1/admin/settings/keycloak` 전용 API로 관리합니다. 일반 설정 API
+`/api/v1/admin/settings`는 `auth.keycloak`과
+`auth.keycloak.client_secret`을 목록·이력에서 제외하고, 해당 키의 PATCH 또는
+rollback을 HTTP `409 DEDICATED_SETTING_ENDPOINT`로 거부합니다. 이는 마스킹된
+값이나 잘못된 암호화 용도의 값이 OIDC 구성을 덮어쓰는 것을 막기 위한 보호
+장치입니다.
 
 고급 정책에서는 Redirect/Logout URI, Scope, 사용자·Email·이름·역할·그룹
 claim, 허용 Email domain, 기본 역할과 자동 사용자 생성을 세밀하게 조정합니다.
@@ -969,7 +1191,7 @@ curl -fsS -b cookies.txt \
 inventory가 현재 저장 증거를 자동 조정하고 `software_catalog_reconciliations`에
 카탈로그 버전 완료 마커를 기록합니다. 제품이 없는 장비도 마커가 있으므로 이후
 heartbeat에서 반복 스캔하지 않으며, 카탈로그 버전이 바뀔 때만 한 번 다시
-조정합니다. 즉시 확인하려면 Server v0.2.14 기동 후 한 heartbeat 주기를 기다리고,
+조정합니다. 즉시 확인하려면 Server v0.2.15 기동 후 한 heartbeat 주기를 기다리고,
 주요 소프트웨어 API의 `hosts`, `high_confidence`, `needs_review`를 운영 기준선으로
 기록하십시오.
 

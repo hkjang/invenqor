@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use invenqor_agent::config::{Config, ConfigAvailability};
 use invenqor_agent::diagnose;
 use invenqor_agent::identity;
@@ -27,27 +27,96 @@ const HELP_FLAGS: &[&str] = &[
     // with this flag. It is accepted everywhere so the parser and the help text
     // never disagree by platform.
     "--service",
+    // New SCM registrations use the more explicit internal spelling. Keep the
+    // old switch above forever so an existing service can upgrade in place.
+    "--service-run",
 ];
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let service_options = match service_launch_options(&args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("invenqor-agent: {error:#}");
+            std::process::exit(2);
+        }
+    };
+    #[cfg(not(windows))]
+    let _ = &service_options;
+
     // The Service Control Manager expects the process to hand itself to the
     // dispatcher before doing anything else, and it will kill a service that
     // does not report RUNNING within its timeout. Everything else - including a
     // service binary invoked from a console - runs the ordinary path.
     #[cfg(windows)]
-    if std::env::args().any(|value| value == "--service") {
-        if invenqor_agent::windows_service::dispatch(service_body) {
-            return;
+    {
+        // Help and version do not need to touch machine state. All operational
+        // commands resolve the protected marker so diagnostics and a console
+        // update target the same custom service the installer registered.
+        let informational = args.iter().any(|value| {
+            matches!(
+                value.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--print-default-config"
+            )
+        });
+        if service_options.run_under_scm || !informational {
+            let config_path = argument_value(&args, "--config")
+                .map(PathBuf::from)
+                .unwrap_or_else(platform::default_config_path);
+            let service_name = match invenqor_agent::service_identity::resolve_service_name(
+                service_options.name.as_deref(),
+                &config_path,
+            )
+            .and_then(|name| {
+                invenqor_agent::windows_service::configure_service_name(&name)?;
+                Ok(name)
+            }) {
+                Ok(name) => name,
+                Err(error) => {
+                    eprintln!("invenqor-agent: {error:#}");
+                    std::process::exit(2);
+                }
+            };
+            if service_options.run_under_scm {
+                if invenqor_agent::windows_service::dispatch(service_body) {
+                    return;
+                }
+                // Not actually started by the SCM: fall through and run in the
+                // foreground so an internal service command copied from the SCM
+                // can be debugged rather than silently doing nothing.
+                eprintln!(
+                    "invenqor-agent: {service_name} was not started by the service \
+                     control manager; running in the foreground"
+                );
+            }
         }
-        // Not actually started by the SCM: fall through and run in the
-        // foreground so `--service` from a console is debuggable rather than
-        // silently doing nothing.
-        eprintln!(
-            "invenqor-agent: not started by the service control manager; \
-             running in the foreground"
-        );
     }
     std::process::exit(blocking_run());
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ServiceLaunchOptions {
+    run_under_scm: bool,
+    name: Option<String>,
+}
+
+fn service_launch_options(args: &[String]) -> Result<ServiceLaunchOptions> {
+    reject_unknown_arguments(args)?;
+    let names = argument_values(args, "--service-name")?;
+    anyhow::ensure!(
+        names.len() <= 1,
+        "--service-name may be specified only once"
+    );
+    let name = names.into_iter().next();
+    if let Some(value) = name.as_deref() {
+        invenqor_agent::service_identity::validate_service_name(value)?;
+    }
+    Ok(ServiceLaunchOptions {
+        run_under_scm: args
+            .iter()
+            .any(|value| value == "--service" || value == "--service-run"),
+        name,
+    })
 }
 
 /// Runs the agent on its own runtime and returns a process exit code.
@@ -267,7 +336,10 @@ async fn update_in_one_step(config: &Config, agent_id: &str) -> Result<i32> {
                 "installed invenqor-agent {version} at {}",
                 config.updates.install_path.display()
             );
-            println!("restart the service to run it: systemctl restart invenqor-agent");
+            println!(
+                "service restart command: {}",
+                invenqor_agent::platform::restart_command()
+            );
             Ok(0)
         }
         Ok(None) => {
@@ -416,10 +488,37 @@ fn argument_value(args: &[String], name: &str) -> Option<String> {
         })
 }
 
+fn argument_values(args: &[String], name: &str) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    let joined_prefix = format!("{name}=");
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == name {
+            let value = args
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .with_context(|| format!("{name} requires a value"))?;
+            values.push(value.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(value) = args[index].strip_prefix(&joined_prefix) {
+            anyhow::ensure!(!value.is_empty(), "{name} requires a value");
+            values.push(value.to_string());
+        }
+        index += 1;
+    }
+    Ok(values)
+}
+
 fn reject_unknown_arguments(args: &[String]) -> Result<()> {
     let mut skip = false;
     for arg in args {
         if skip {
+            anyhow::ensure!(
+                !arg.starts_with("--"),
+                "option requires a value before {arg}"
+            );
             skip = false;
             continue;
         }
@@ -428,13 +527,14 @@ fn reject_unknown_arguments(args: &[String]) -> Result<()> {
             // accepted straight from the documented list below, so a flag cannot
             // be offered in --help and refused here.
             "-h" | "-V" => {}
-            "--config" => skip = true,
+            "--config" | "--service-name" => skip = true,
             value if value.starts_with("--config=") => {}
+            value if value.starts_with("--service-name=") => {}
             value if HELP_FLAGS.contains(&value) => {}
             value => anyhow::bail!("unknown argument: {value}"),
         }
     }
-    anyhow::ensure!(!skip, "--config requires a path");
+    anyhow::ensure!(!skip, "argument requires a value");
     Ok(())
 }
 
@@ -481,7 +581,7 @@ fn print_help() {
     // text, but it only means anything where there is a service manager to be
     // dispatched to.
     let service_help = if cfg!(windows) {
-        "\n  --service               Run under the Windows Service Control Manager"
+        "\n  --service-name NAME     Windows service identity (normally auto-discovered)"
     } else {
         ""
     };
@@ -527,6 +627,11 @@ mod tests {
                 panic!("the help text documents {flag} but it is rejected: {error}")
             });
         }
+        reject_unknown_arguments(&[
+            "--service-name".to_string(),
+            "Invenqor Agent West-1".to_string(),
+        ])
+        .unwrap();
     }
 
     #[test]
@@ -536,6 +641,7 @@ mod tests {
         assert!(reject_unknown_arguments(&["--config".to_string()]).is_err());
         reject_unknown_arguments(&["--config".to_string(), "/tmp/x.toml".to_string()]).unwrap();
         reject_unknown_arguments(&["--config=/tmp/x.toml".to_string()]).unwrap();
+        assert!(reject_unknown_arguments(&["--service-name".to_string()]).is_err());
     }
 
     #[test]
@@ -551,5 +657,39 @@ mod tests {
             Some("/etc/b.toml")
         );
         assert!(argument_value(&[], "--config").is_none());
+    }
+
+    #[test]
+    fn service_launch_accepts_legacy_and_new_scm_switches() {
+        let legacy = service_launch_options(&["--service".to_string()]).unwrap();
+        assert!(legacy.run_under_scm);
+        assert_eq!(legacy.name, None);
+
+        let current = service_launch_options(&[
+            "--service-run".to_string(),
+            "--service-name".to_string(),
+            "Invenqor Agent West-1".to_string(),
+        ])
+        .unwrap();
+        assert!(current.run_under_scm);
+        assert_eq!(current.name.as_deref(), Some("Invenqor Agent West-1"));
+    }
+
+    #[test]
+    fn service_name_is_single_valued_and_cannot_consume_another_flag() {
+        assert!(service_launch_options(&[
+            "--service-name".to_string(),
+            "one".to_string(),
+            "--service-name=two".to_string(),
+        ])
+        .is_err());
+        assert!(
+            service_launch_options(&["--service-name".to_string(), "--diagnose".to_string(),])
+                .is_err()
+        );
+        assert!(service_launch_options(&[
+            "--service-name=invenqor-agent\" --config C:\\attacker.toml".to_string(),
+        ])
+        .is_err());
     }
 }

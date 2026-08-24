@@ -150,6 +150,17 @@ type ManagedRole = {
   permissions: string[];
 };
 
+export type AdminAccess = {
+  permissions: string[];
+  superAdmin: boolean;
+};
+export const canAdmin = (access: AdminAccess, permission: string) =>
+  access.superAdmin || access.permissions.includes(permission);
+export const SETTINGS_READ_ONLY_MESSAGE =
+  "settings.write 권한이 없어 설정을 조회만 할 수 있습니다.";
+export const USERS_READ_ONLY_MESSAGE =
+  "users.manage 권한이 없어 사용자와 역할을 조회만 할 수 있습니다.";
+
 const jsonRequest = (csrf: string, body: unknown, method = "POST"): RequestInit => ({
   method,
   headers: {
@@ -163,11 +174,14 @@ export function SettingsPage({
   csrf,
   systemInfo,
   userID,
+  access,
 }: {
   csrf: string;
   systemInfo: SystemInfo | null;
   userID: string;
+  access: AdminAccess;
 }) {
+  const canWriteSettings = canAdmin(access, "settings.write");
   const [tab, setTab] = React.useState<SettingsTab>(() => loadSettingsTab(userID));
   const selectTab = React.useCallback((next: SettingsTab) => {
     setTab(next);
@@ -192,28 +206,35 @@ export function SettingsPage({
       title="운영 설정"
       subtitle="데이터베이스, Agent 등록과 조직 인증 정책을 한곳에서 검증하고 관리합니다."
     />
+    {!canWriteSettings && <div id="settings-readonly-notice">
+      <Notice tone="info" title="읽기 전용 설정">
+        {SETTINGS_READ_ONLY_MESSAGE} 새로고침과 현재 설정·이력 조회는 계속 사용할 수 있습니다.
+      </Notice>
+    </div>}
     <div className="settings-layout">
-      <div className="settings-nav">
-        <button className={tab === "postgresql" ? "active" : ""} onClick={() => selectTab("postgresql")}><Database size={17}/>PostgreSQL</button>
-        <button className={tab === "agents" ? "active" : ""} onClick={() => selectTab("agents")}><RadioTower size={17}/>Agent 등록</button>
-        <button className={tab === "classification" ? "active" : ""} onClick={() => selectTab("classification")}><Layers size={17}/>자산 분류</button>
-        <button className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
-        <button className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
-        <button className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
-      </div>
-      <div className="settings-content">
-        {tab === "postgresql" && <PostgresSettings csrf={csrf}/>}
-        {tab === "agents" && <AgentEnrollmentSettingsPanel csrf={csrf}/>}
-        {tab === "classification" && <ClassificationSettingsPanel csrf={csrf}/>}
-        {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf}/>}
-        {tab === "general" && <GeneralSettingsPanel csrf={csrf}/>}
+      <nav className="settings-nav" aria-label="운영 설정 메뉴">
+        <button aria-current={tab === "postgresql" ? "page" : undefined} className={tab === "postgresql" ? "active" : ""} onClick={() => selectTab("postgresql")}><Database size={17}/>PostgreSQL</button>
+        <button aria-current={tab === "agents" ? "page" : undefined} className={tab === "agents" ? "active" : ""} onClick={() => selectTab("agents")}><RadioTower size={17}/>Agent 등록</button>
+        <button aria-current={tab === "classification" ? "page" : undefined} className={tab === "classification" ? "active" : ""} onClick={() => selectTab("classification")}><Layers size={17}/>자산 분류</button>
+        <button aria-current={tab === "keycloak" ? "page" : undefined} className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
+        <button aria-current={tab === "general" ? "page" : undefined} className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
+        <button aria-current={tab === "system" ? "page" : undefined} className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
+      </nav>
+      <div className="settings-content"
+        aria-describedby={!canWriteSettings ? "settings-readonly-notice" : undefined}>
+        {tab === "postgresql" && <PostgresSettings csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "agents" && <AgentEnrollmentSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "classification" && <ClassificationSettingsPanel csrf={csrf} access={access}/>}
+        {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "general" && <GeneralSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "system" && <SystemSettingsInfo info={systemInfo}/>}
       </div>
     </div>
   </section>;
 }
 
-function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
+function AgentEnrollmentSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
   const [policy, setPolicy] = React.useState<AgentEnrollmentSettings|null>(null);
   const [mode, setMode] = React.useState<AgentEnrollmentSettings["mode"]>("open");
   const [networkMode, setNetworkMode] = React.useState<AgentEnrollmentSettings["network_mode"]>("any");
@@ -238,6 +259,7 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
     load().catch(reason => setError((reason as Error).message));
   }, [load]);
   const save = async () => {
+    if (!canWrite) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const value = await api<AgentEnrollmentSettings>(
@@ -266,6 +288,7 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
     }
   };
   const issueToken = async () => {
+    if (!canWrite) return;
     if (policy?.token_configured &&
       !window.confirm("현재 등록 토큰을 즉시 교체합니까? 기존 등록 토큰은 더 이상 사용할 수 없습니다.")) return;
     setBusy(true); setError(""); setMessage(""); setRegistrationToken("");
@@ -284,6 +307,7 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
     }
   };
   const deleteToken = async () => {
+    if (!canWrite) return;
     if (!window.confirm("등록 토큰을 폐기합니까? 자동 등록이 활성 상태라면 URL-only Open 모드로 전환됩니다.")) return;
     setBusy(true); setError(""); setMessage(""); setRegistrationToken("");
     try {
@@ -344,13 +368,15 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
         {options.map(option => <label
           key={option.value}
           className={mode === option.value ? "enrollment-mode selected" : "enrollment-mode"}
+          title={mutationTitle}
         >
           <input
             type="radio"
             name="agent-enrollment-mode"
             value={option.value}
             checked={mode === option.value}
-            disabled={option.value === "token" && !policy.token_configured}
+            disabled={!canWrite || (option.value === "token" && !policy.token_configured)}
+            aria-disabled={!canWrite || (option.value === "token" && !policy.token_configured)}
             onChange={() => setMode(option.value)}
           />
           <span>
@@ -377,11 +403,13 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
         <div className="network-mode-switch" role="radiogroup" aria-label="자동 등록 IP 범위">
           <label className={networkMode === "any" ? "selected" : ""}>
             <input type="radio" name="network-mode" checked={networkMode === "any"}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               onChange={() => setNetworkMode("any")}/>
             <span><strong>모든 IP 허용</strong><small>네트워크 제한 없이 현재 등록 방식을 적용합니다.</small></span>
           </label>
           <label className={networkMode === "allowlist" ? "selected" : ""}>
             <input type="radio" name="network-mode" checked={networkMode === "allowlist"}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               onChange={() => setNetworkMode("allowlist")}/>
             <span><strong>지정 IP만 허용</strong><small>아래의 정확한 IP 또는 CIDR에 일치할 때만 등록합니다.</small></span>
           </label>
@@ -390,6 +418,9 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
           <label>허용 IP / CIDR <b>{parseNetworkEntries(allowedNetworks).length}</b>
             <textarea
               value={allowedNetworks}
+              disabled={!canWrite}
+              aria-disabled={!canWrite}
+              title={mutationTitle}
               onChange={event => setAllowedNetworks(event.target.value)}
               placeholder={"10.20.30.40\n10.20.40.0/24\n2001:db8:100::/64"}
               rows={6}
@@ -399,6 +430,9 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
           <label>신뢰 프록시 IP / CIDR <b>{parseNetworkEntries(trustedProxies).length}</b>
             <textarea
               value={trustedProxies}
+              disabled={!canWrite}
+              aria-disabled={!canWrite}
+              title={mutationTitle}
               onChange={event => setTrustedProxies(event.target.value)}
               placeholder={"10.0.0.10\n10.0.1.0/24"}
               rows={6}
@@ -423,14 +457,21 @@ function AgentEnrollmentSettingsPanel({csrf}: {csrf: string}) {
       </div>}
       <label className="enrollment-reason">변경 사유
         <input value={reason} onChange={event => setReason(event.target.value)}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
           placeholder="예: 사내망 URL-only 자동 등록 허용"/>
       </label>
       <div className="form-actions enrollment-actions">
         <button className="secondary" disabled={busy} onClick={load}><RefreshCw size={16}/>새로고침</button>
-        {policy.token_configured && <button className="secondary" disabled={busy} onClick={deleteToken}><Trash2 size={16}/>토큰 폐기</button>}
-        <button className="secondary" disabled={busy} onClick={issueToken}><KeyRound size={16}/>{policy.token_configured ? "토큰 회전" : "토큰 발급"}</button>
+        {policy.token_configured && <button className="secondary"
+          disabled={busy || !canWrite} aria-disabled={busy || !canWrite}
+          title={mutationTitle} onClick={deleteToken}><Trash2 size={16}/>토큰 폐기</button>}
+        <button className="secondary" disabled={busy || !canWrite}
+          aria-disabled={busy || !canWrite} title={mutationTitle} onClick={issueToken}>
+          <KeyRound size={16}/>{policy.token_configured ? "토큰 회전" : "토큰 발급"}</button>
         <button className="primary compact"
-          disabled={busy || !policyChanged || (networkMode === "allowlist" && parseNetworkEntries(allowedNetworks).length === 0)}
+          disabled={!canWrite || busy || !policyChanged || (networkMode === "allowlist" && parseNetworkEntries(allowedNetworks).length === 0)}
+          aria-disabled={!canWrite || busy || !policyChanged || (networkMode === "allowlist" && parseNetworkEntries(allowedNetworks).length === 0)}
+          title={mutationTitle}
           onClick={save}><Save size={16}/>정책 적용</button>
       </div>
       <ActionMessage message={message} error={error}/>
@@ -447,7 +488,8 @@ export function parseNetworkEntries(value: string): string[] {
   return [...new Set(value.split(/[\n,]+/).map(entry => entry.trim()).filter(Boolean))].sort();
 }
 
-function PostgresSettings({csrf}: {csrf: string}) {
+function PostgresSettings({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
   const [status, setStatus] = React.useState<PostgresStatus|null>(null);
   const [dsn, setDSN] = React.useState("");
   const [reason, setReason] = React.useState("");
@@ -462,6 +504,7 @@ function PostgresSettings({csrf}: {csrf: string}) {
     load().catch(reason => setError((reason as Error).message));
   }, [load]);
   const run = async (save: boolean) => {
+    if (!canWrite) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const path = save
@@ -507,6 +550,9 @@ function PostgresSettings({csrf}: {csrf: string}) {
             <input
               type={showDSN ? "text" : "password"}
               value={dsn}
+              disabled={!canWrite}
+              aria-disabled={!canWrite}
+              title={mutationTitle}
               onChange={event => setDSN(event.target.value)}
               placeholder="postgres://user:password@host:5432/invenqor?sslmode=require"
               autoComplete="off"
@@ -517,12 +563,18 @@ function PostgresSettings({csrf}: {csrf: string}) {
           </div>
         </label>
         <label className="wide">변경 사유
-          <input value={reason} onChange={event => setReason(event.target.value)} placeholder="예: 운영 PostgreSQL 전환"/>
+          <input value={reason} onChange={event => setReason(event.target.value)}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="예: 운영 PostgreSQL 전환"/>
         </label>
       </div>
       <div className="form-actions">
-        <button className="secondary" disabled={busy || !dsn.trim()} onClick={() => run(false)}><RefreshCw size={16}/>연결 테스트</button>
-        <button className="primary compact" disabled={busy || !dsn.trim()} onClick={() => run(true)}><Save size={16}/>검증 후 저장</button>
+        <button className="secondary" disabled={!canWrite || busy || !dsn.trim()}
+          aria-disabled={!canWrite || busy || !dsn.trim()} title={mutationTitle}
+          onClick={() => run(false)}><RefreshCw size={16}/>연결 테스트</button>
+        <button className="primary compact" disabled={!canWrite || busy || !dsn.trim()}
+          aria-disabled={!canWrite || busy || !dsn.trim()} title={mutationTitle}
+          onClick={() => run(true)}><Save size={16}/>검증 후 저장</button>
       </div>
       <ActionMessage message={message} error={error}/>
       <div className="env-help">
@@ -535,7 +587,8 @@ function PostgresSettings({csrf}: {csrf: string}) {
   </AdminPanel>;
 }
 
-function KeycloakSettingsPanel({csrf}: {csrf: string}) {
+function KeycloakSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
   const [settings, setSettings] = React.useState<KeycloakSettings|null>(null);
   const [secretConfigured, setSecretConfigured] = React.useState(false);
   const [clientSecret, setClientSecret] = React.useState("");
@@ -578,14 +631,17 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
   if (!settings) {
     return <AdminPanel title="Keycloak" action="OIDC"><div className="settings-body">{error || "설정을 불러오는 중입니다."}</div></AdminPanel>;
   }
-  const change = <K extends keyof KeycloakSettings>(key: K, value: KeycloakSettings[K]) =>
+  const change = <K extends keyof KeycloakSettings>(key: K, value: KeycloakSettings[K]) => {
+    if (!canWrite) return;
     setSettings(current => current ? {...current, [key]: value} : current);
+  };
   const requestSettings = () => ({
     ...settings,
     role_mappings: parseMappings(roleMappings, "역할 매핑"),
     group_mappings: parseMappings(groupMappings, "그룹 매핑"),
   });
   const test = async () => {
+    if (!canWrite) return;
     setBusy(true); setError(""); setMessage("");
     try {
       await api("/api/v1/admin/settings/keycloak/test", jsonRequest(csrf, {
@@ -599,6 +655,7 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
     }
   };
   const save = async () => {
+    if (!canWrite) return;
     setBusy(true); setError(""); setMessage("");
     try {
       await api(
@@ -619,6 +676,7 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
     }
   };
   const autoConfigure = async () => {
+    if (!canWrite) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const value = await api<{
@@ -662,32 +720,40 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
         <div className="admin-form">
           <label className="wide">Keycloak 주소
             <input value={quickKeycloakURL} onChange={event => setQuickKeycloakURL(event.target.value)}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               placeholder="https://sso.example.com"/>
           </label>
           <label>Realm
             <input value={quickRealm} onChange={event => setQuickRealm(event.target.value)}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               placeholder="invenqor"/>
           </label>
           <label>Client ID
             <input value={quickClientID} onChange={event => setQuickClientID(event.target.value)}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               placeholder="invenqor"/>
           </label>
           <label className="wide">InvenQor 외부 주소
             <input value={applicationURL} onChange={event => setApplicationURL(event.target.value)}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               placeholder="https://invenqor.example.com"/>
             <small>현재 접속 주소가 기본값입니다. Ingress 외부 주소가 다르면 수정하십시오.</small>
           </label>
           <label className="wide">Client Secret
             <input type="password" value={clientSecret} onChange={event => setClientSecret(event.target.value)}
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
               placeholder={secretConfigured ? "기존 Secret 사용 · 회전할 때만 입력" : "Keycloak Client Secret"}
               autoComplete="new-password"/>
           </label>
         </div>
         <div className="form-actions">
           <button className="primary compact" disabled={
-            busy || !quickKeycloakURL.trim() || !quickClientID.trim() ||
+            !canWrite || busy || !quickKeycloakURL.trim() || !quickClientID.trim() ||
             !applicationURL.trim() || (!secretConfigured && !clientSecret.trim())
-          } onClick={autoConfigure}>
+          } aria-disabled={
+            !canWrite || busy || !quickKeycloakURL.trim() || !quickClientID.trim() ||
+            !applicationURL.trim() || (!secretConfigured && !clientSecret.trim())
+          } title={mutationTitle} onClick={autoConfigure}>
             <Power size={16}/>자동 구성 · 검증 · 활성화
           </button>
         </div>
@@ -696,23 +762,28 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
         <strong>고급 정책</strong>
         <small>기본값을 세밀하게 조정하거나 Role/Group 매핑과 사설 CA를 구성합니다.</small>
       </div>
-      <label className="toggle-row"><input type="checkbox" checked={settings.enabled} onChange={event => change("enabled", event.target.checked)}/><span><strong>Keycloak 로그인 활성화</strong><small>로컬 로그인은 비상 접근 경로로 유지됩니다.</small></span></label>
+      <label className="toggle-row"><input type="checkbox" checked={settings.enabled}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => change("enabled", event.target.checked)}/><span><strong>Keycloak 로그인 활성화</strong><small>로컬 로그인은 비상 접근 경로로 유지됩니다.</small></span></label>
       <div className="admin-form">
-        <label className="wide">Issuer URL<input value={settings.issuer_url} onChange={event => change("issuer_url", event.target.value)} placeholder="https://sso.example.com"/></label>
-        <label>Realm<input value={settings.realm} onChange={event => change("realm", event.target.value)} placeholder="invenqor"/></label>
-        <label>Client ID<input value={settings.client_id} onChange={event => change("client_id", event.target.value)}/></label>
-        <label className="wide">Redirect URI<input value={settings.redirect_uri} onChange={event => change("redirect_uri", event.target.value)} placeholder="https://invenqor.example.com/api/v1/auth/keycloak/callback"/></label>
-        <label className="wide">Logout Redirect URI<input value={settings.logout_redirect_uri} onChange={event => change("logout_redirect_uri", event.target.value)}/></label>
-        <label>Scopes<input value={settings.scopes.join(", ")} onChange={event => change("scopes", splitList(event.target.value))}/></label>
-        <label>기본 역할<input value={settings.default_role} onChange={event => change("default_role", event.target.value)}/></label>
-        <label>Username Claim<input value={settings.username_claim} onChange={event => change("username_claim", event.target.value)}/></label>
-        <label>Email Claim<input value={settings.email_claim} onChange={event => change("email_claim", event.target.value)}/></label>
-        <label>Name Claim<input value={settings.name_claim} onChange={event => change("name_claim", event.target.value)}/></label>
-        <label>Role Claim<input value={settings.role_claim} onChange={event => change("role_claim", event.target.value)}/></label>
-        <label>Group Claim<input value={settings.group_claim} onChange={event => change("group_claim", event.target.value)}/></label>
+        <label className="wide">Issuer URL<input value={settings.issuer_url} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("issuer_url", event.target.value)} placeholder="https://sso.example.com"/></label>
+        <label>Realm<input value={settings.realm} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("realm", event.target.value)} placeholder="invenqor"/></label>
+        <label>Client ID<input value={settings.client_id} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("client_id", event.target.value)}/></label>
+        <label className="wide">Redirect URI<input value={settings.redirect_uri} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("redirect_uri", event.target.value)} placeholder="https://invenqor.example.com/api/v1/auth/keycloak/callback"/></label>
+        <label className="wide">Logout Redirect URI<input value={settings.logout_redirect_uri} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("logout_redirect_uri", event.target.value)}/></label>
+        <label>Scopes<input value={settings.scopes.join(", ")} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("scopes", splitList(event.target.value))}/></label>
+        <label>기본 역할<input value={settings.default_role} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("default_role", event.target.value)}/></label>
+        <label>Username Claim<input value={settings.username_claim} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("username_claim", event.target.value)}/></label>
+        <label>Email Claim<input value={settings.email_claim} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("email_claim", event.target.value)}/></label>
+        <label>Name Claim<input value={settings.name_claim} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("name_claim", event.target.value)}/></label>
+        <label>Role Claim<input value={settings.role_claim} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("role_claim", event.target.value)}/></label>
+        <label>Group Claim<input value={settings.group_claim} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle} onChange={event => change("group_claim", event.target.value)}/></label>
         <label className="wide">허용 Email Domain
           <input
             value={settings.allowed_email_domains.join(", ")}
+            disabled={!canWrite}
+            aria-disabled={!canWrite}
+            title={mutationTitle}
             onChange={event => change("allowed_email_domains", splitList(event.target.value))}
             placeholder="example.com, subsidiary.example.com (비우면 제한 없음)"
           />
@@ -721,6 +792,9 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
           <textarea
             className="mapping-editor"
             value={roleMappings}
+            disabled={!canWrite}
+            aria-disabled={!canWrite}
+            title={mutationTitle}
             onChange={event => setRoleMappings(event.target.value)}
             placeholder={"realm-admin=super_admin\ninventory-viewer=viewer"}
             spellCheck={false}
@@ -731,6 +805,9 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
           <textarea
             className="mapping-editor"
             value={groupMappings}
+            disabled={!canWrite}
+            aria-disabled={!canWrite}
+            title={mutationTitle}
             onChange={event => setGroupMappings(event.target.value)}
             placeholder={"/invenqor/operators=operator\n/invenqor/auditors=auditor"}
             spellCheck={false}
@@ -741,18 +818,29 @@ function KeycloakSettingsPanel({csrf}: {csrf: string}) {
           <textarea
             className="pem-editor"
             value={settings.private_ca_pem}
+            disabled={!canWrite}
+            aria-disabled={!canWrite}
+            title={mutationTitle}
             onChange={event => change("private_ca_pem", event.target.value)}
             placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
             spellCheck={false}
           />
           <small>사내 CA로 Keycloak TLS를 구성한 경우에만 입력합니다.</small>
         </label>
-        <label className="wide">변경 사유<input value={reason} onChange={event => setReason(event.target.value)}/></label>
+        <label className="wide">변경 사유<input value={reason}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => setReason(event.target.value)}/></label>
       </div>
-      <label className="toggle-row"><input type="checkbox" checked={settings.auto_create_users} onChange={event => change("auto_create_users", event.target.checked)}/><span><strong>최초 로그인 사용자 자동 생성</strong><small>기본 역할과 mapping 정책을 적용합니다.</small></span></label>
+      <label className="toggle-row"><input type="checkbox" checked={settings.auto_create_users}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => change("auto_create_users", event.target.checked)}/><span><strong>최초 로그인 사용자 자동 생성</strong><small>기본 역할과 mapping 정책을 적용합니다.</small></span></label>
       <div className="form-actions">
-        <button className="secondary" disabled={busy || !settings.enabled} onClick={test}><RefreshCw size={16}/>연결 테스트</button>
-        <button className="primary compact" disabled={busy} onClick={save}><Save size={16}/>설정 저장</button>
+        <button className="secondary" disabled={!canWrite || busy || !settings.enabled}
+          aria-disabled={!canWrite || busy || !settings.enabled} title={mutationTitle}
+          onClick={test}><RefreshCw size={16}/>연결 테스트</button>
+        <button className="primary compact" disabled={!canWrite || busy}
+          aria-disabled={!canWrite || busy} title={mutationTitle}
+          onClick={save}><Save size={16}/>설정 저장</button>
       </div>
       <ActionMessage message={message} error={error}/>
     </div>
@@ -779,7 +867,8 @@ type SettingVersion = {
   created_at: string;
 };
 
-function GeneralSettingsPanel({csrf}: {csrf: string}) {
+function GeneralSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
   const [items, setItems] = React.useState<GeneralSetting[]>([]);
   const [history, setHistory] = React.useState<SettingVersion[]>([]);
   const [key, setKey] = React.useState("");
@@ -800,6 +889,7 @@ function GeneralSettingsPanel({csrf}: {csrf: string}) {
   };
   const save = async (event: React.FormEvent) => {
     event.preventDefault(); setError(""); setMessage("");
+    if (!canWrite) return;
     try {
       const parsed = JSON.parse(value);
       await api("/api/v1/admin/settings", jsonRequest(csrf, {
@@ -810,6 +900,7 @@ function GeneralSettingsPanel({csrf}: {csrf: string}) {
     } catch (reason) { setError((reason as Error).message); }
   };
   const rollback = async (entry: SettingVersion) => {
+    if (!canWrite) return;
     if (!window.confirm(`${entry.key} 설정을 버전 ${entry.version} 값으로 되돌립니까?`)) return;
     try {
       await api("/api/v1/admin/settings/rollback", jsonRequest(csrf, {
@@ -829,17 +920,27 @@ function GeneralSettingsPanel({csrf}: {csrf: string}) {
       <form className="settings-body" onSubmit={save}>
         <div className="admin-form">
           <label className="wide">Key<input value={key} onChange={event => setKey(event.target.value)}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
             placeholder="agents.collection.interval" required/></label>
-          <label>적용 방식<select value={applyMode} onChange={event => setApplyMode(event.target.value as GeneralSetting["apply_mode"])}>
+          <label>적용 방식<select value={applyMode} disabled={!canWrite}
+            aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => setApplyMode(event.target.value as GeneralSetting["apply_mode"])}>
             <option value="immediate">immediate</option><option value="restart">restart</option>
             <option value="migration">migration</option></select></label>
-          <label className="toggle-row"><input type="checkbox" checked={secret} onChange={event => setSecret(event.target.checked)}/>
+          <label className="toggle-row"><input type="checkbox" checked={secret}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => setSecret(event.target.checked)}/>
             <span><strong>비밀값</strong><small>암호화 저장·조회 마스킹</small></span></label>
           <label className="wide">JSON Value<textarea value={value} onChange={event => setValue(event.target.value)}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
             spellCheck={false} required/></label>
-          <label className="wide">변경 사유<input value={reason} onChange={event => setReason(event.target.value)} required/></label>
+          <label className="wide">변경 사유<input value={reason}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => setReason(event.target.value)} required/></label>
         </div>
-        <div className="form-actions"><button className="primary compact"><Save size={15}/>버전 저장</button></div>
+        <div className="form-actions"><button className="primary compact"
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}>
+          <Save size={15}/>버전 저장</button></div>
         <ActionMessage message={message} error={error}/>
       </form>
     </AdminPanel>
@@ -847,7 +948,9 @@ function GeneralSettingsPanel({csrf}: {csrf: string}) {
       <AdminPanel title="설정 변경 이력" action={`최근 ${history.length}건`}>
         <div className="history-list">{history.map(entry => <details key={entry.id}>
           <summary><div><strong>{entry.key}</strong><span>v{entry.version} · {formatAdminDate(entry.created_at)}</span></div>
-            <span>{entry.reason || "변경 사유 없음"}</span><button onClick={event => {event.preventDefault(); rollback(entry);}}>
+            <span>{entry.reason || "변경 사유 없음"}</span><button
+              disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+              onClick={event => {event.preventDefault(); rollback(entry);}}>
               <RotateCcw size={14}/>롤백</button></summary>
           <pre>{JSON.stringify({before: entry.before, after: entry.after}, null, 2)}</pre>
         </details>)}</div>
@@ -895,10 +998,14 @@ function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
 export function UsersPage({
   csrf,
   currentUserID,
+  access,
 }: {
   csrf: string;
   currentUserID: string;
+  access: AdminAccess;
 }) {
+  const canManage = canAdmin(access, "users.manage");
+  const mutationTitle = canManage ? undefined : USERS_READ_ONLY_MESSAGE;
   const [users, setUsers] = React.useState<ManagedUser[]>([]);
   const [roles, setRoles] = React.useState<ManagedRole[]>([]);
   const [username, setUsername] = React.useState("");
@@ -918,6 +1025,7 @@ export function UsersPage({
     load().catch(reason => setError((reason as Error).message));
   }, [load]);
   const mutate = async (work: () => Promise<unknown>, success: string) => {
+    if (!canManage) return;
     setBusy(true); setError(""); setMessage("");
     try {
       await work(); setMessage(success); await load();
@@ -939,6 +1047,7 @@ export function UsersPage({
     }, "사용자를 생성했습니다.");
   };
   const updateRoles = (user: ManagedUser, role: string) => {
+    if (!canManage) return Promise.resolve();
     const localRoles = user.local_roles || [];
     const next = localRoles.includes(role)
       ? localRoles.filter(value => value !== role)
@@ -965,6 +1074,7 @@ export function UsersPage({
     user.active ? "사용자를 비활성화하고 세션·API 키를 폐기했습니다." : "사용자를 활성화했습니다.",
   );
   const editProfile = (user: ManagedUser) => {
+    if (!canManage) return;
     const nextName = window.prompt("표시 이름", user.display_name);
     if (nextName === null) return;
     const nextEmail = window.prompt("Email", user.email);
@@ -977,6 +1087,7 @@ export function UsersPage({
     );
   };
   const resetPassword = (user: ManagedUser) => {
+    if (!canManage) return;
     const next = window.prompt(`${user.username}의 새 임시 비밀번호`);
     if (!next) return;
     return mutate(
@@ -991,6 +1102,7 @@ export function UsersPage({
     "계정 잠금을 해제했습니다.",
   );
   const remove = (user: ManagedUser) => {
+    if (!canManage) return;
     if (!window.confirm(`${user.username} 사용자를 삭제합니까? 세션과 API 키가 즉시 폐기됩니다.`)) return;
     return mutate(
       () => api(`/api/v1/admin/users/${user.id}`, {
@@ -1005,21 +1117,36 @@ export function UsersPage({
   );
   return <section>
     <AdminPageTitle kicker="IDENTITY GOVERNANCE" title="사용자 관리" subtitle="로컬·Keycloak 사용자, 역할, 활성 상태와 자격 증명을 통제합니다."/>
+    {!canManage && <div id="users-readonly-notice">
+      <Notice tone="info" title="읽기 전용 사용자 관리">
+        {USERS_READ_ONLY_MESSAGE} 검색과 현재 사용자·역할 조회는 계속 사용할 수 있습니다.
+      </Notice>
+    </div>}
     <ActionMessage message={message} error={error}/>
-    <div className="user-admin-layout">
-      <AdminPanel title="로컬 사용자 생성" action="Argon2id 비밀번호">
+    <div className="user-admin-layout"
+      aria-describedby={!canManage ? "users-readonly-notice" : undefined}>
+      <AdminPanel title="로컬 사용자 생성" action={canManage ? "Argon2id 비밀번호" : "읽기 전용"}>
         <form className="user-create-form" onSubmit={create}>
-          <label>사용자 ID<input value={username} onChange={event => setUsername(event.target.value)} required minLength={3}/></label>
-          <label>표시 이름<input value={displayName} onChange={event => setDisplayName(event.target.value)}/></label>
-          <label>Email<input type="email" value={email} onChange={event => setEmail(event.target.value)}/></label>
-          <label>초기 비밀번호<input type="password" value={password} onChange={event => setPassword(event.target.value)} required autoComplete="new-password"/></label>
+          <label>사용자 ID<input value={username} disabled={!canManage}
+            aria-disabled={!canManage} title={mutationTitle}
+            onChange={event => setUsername(event.target.value)} required minLength={3}/></label>
+          <label>표시 이름<input value={displayName} disabled={!canManage}
+            aria-disabled={!canManage} title={mutationTitle}
+            onChange={event => setDisplayName(event.target.value)}/></label>
+          <label>Email<input type="email" value={email} disabled={!canManage}
+            aria-disabled={!canManage} title={mutationTitle}
+            onChange={event => setEmail(event.target.value)}/></label>
+          <label>초기 비밀번호<input type="password" value={password}
+            disabled={!canManage} aria-disabled={!canManage} title={mutationTitle}
+            onChange={event => setPassword(event.target.value)} required autoComplete="new-password"/></label>
           <fieldset className="role-selector"><legend><span>역할</span>
             <small>{selectedRoles.length}개 선택</small></legend>
             <div className="role-options">{roles.map(role => {
               const selected = selectedRoles.includes(role.name);
               return <label className={`role-check${selected ? " selected" : ""}`}
-                key={role.id} title={role.permissions.join(", ")}>
-                <input type="checkbox" checked={selected} onChange={() =>
+                key={role.id} title={mutationTitle || role.permissions.join(", ")}>
+                <input type="checkbox" checked={selected} disabled={!canManage}
+                  aria-disabled={!canManage} onChange={() =>
                   setSelectedRoles(selected
                     ? selectedRoles.filter(value => value !== role.name)
                     : [...selectedRoles, role.name])}/>
@@ -1030,11 +1157,13 @@ export function UsersPage({
               </label>;
             })}</div>
           </fieldset>
-          <button className="primary compact" disabled={busy || !selectedRoles.length}><UserPlus size={16}/>사용자 생성</button>
+          <button className="primary compact" disabled={!canManage || busy || !selectedRoles.length}
+            aria-disabled={!canManage || busy || !selectedRoles.length} title={mutationTitle}>
+            <UserPlus size={16}/>사용자 생성</button>
         </form>
       </AdminPanel>
       <AdminPanel title={`${users.length}명 사용자`} action="RBAC · 세션 즉시 반영">
-        <div className="user-search"><Users size={17}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="사용자 검색"/></div>
+        <div className="user-search"><Users size={17}/><input aria-label="사용자 검색" value={query} onChange={event => setQuery(event.target.value)} placeholder="사용자 검색"/></div>
         <div className="managed-users">{filtered.map(user =>
           <article key={user.id} className={!user.active ? "inactive" : ""}>
             <div className="managed-user-head">
@@ -1048,18 +1177,32 @@ export function UsersPage({
               return <button
                 key={role.id}
                 className={local || oidc ? "on" : ""}
-                disabled={busy || (oidc && !local)}
+                disabled={!canManage || busy || (oidc && !local)}
+                aria-disabled={!canManage || busy || (oidc && !local)}
                 onClick={() => updateRoles(user, role.name)}
-                title={oidc ? `${role.description} · Keycloak에서 부여됨` : role.description}
+                title={mutationTitle || (oidc ? `${role.description} · Keycloak에서 부여됨` : role.description)}
               >{role.name}{oidc && <sup>SSO</sup>}</button>;
             })}</div>
             {!!user.oidc_roles?.length && <small className="oidc-role-note">SSO 표시는 Keycloak 클레임에서 동기화되며 이 화면에서 제거할 수 없습니다.</small>}
             <div className="user-actions">
-              <button disabled={user.provider === "keycloak"} title={user.provider === "keycloak" ? "프로필은 Keycloak에서 관리" : "정보 수정"} onClick={() => editProfile(user)}><Pencil size={15}/>정보</button>
-              <button title={user.active ? "비활성화" : "활성화"} disabled={user.id === currentUserID} onClick={() => toggleActive(user)}><Power size={15}/>{user.active ? "비활성" : "활성"}</button>
-              {user.locked && <button onClick={() => unlock(user)}><LockKeyholeOpen size={15}/>잠금 해제</button>}
-              <button disabled={user.provider !== "local"} title={user.provider === "local" ? "비밀번호 초기화" : "Keycloak에서 관리"} onClick={() => resetPassword(user)}><Shield size={15}/>비밀번호</button>
-              <button className="danger" disabled={user.id === currentUserID} onClick={() => remove(user)}><Trash2 size={15}/>삭제</button>
+              <button disabled={!canManage || user.provider === "keycloak"}
+                aria-disabled={!canManage || user.provider === "keycloak"}
+                title={mutationTitle || (user.provider === "keycloak" ? "프로필은 Keycloak에서 관리" : "정보 수정")}
+                onClick={() => editProfile(user)}><Pencil size={15}/>정보</button>
+              <button disabled={!canManage || user.id === currentUserID}
+                aria-disabled={!canManage || user.id === currentUserID}
+                title={mutationTitle || (user.id === currentUserID ? "현재 사용자는 비활성화할 수 없습니다." : user.active ? "비활성화" : "활성화")}
+                onClick={() => toggleActive(user)}><Power size={15}/>{user.active ? "비활성" : "활성"}</button>
+              {user.locked && <button disabled={!canManage} aria-disabled={!canManage}
+                title={mutationTitle} onClick={() => unlock(user)}><LockKeyholeOpen size={15}/>잠금 해제</button>}
+              <button disabled={!canManage || user.provider !== "local"}
+                aria-disabled={!canManage || user.provider !== "local"}
+                title={mutationTitle || (user.provider === "local" ? "비밀번호 초기화" : "Keycloak에서 관리")}
+                onClick={() => resetPassword(user)}><Shield size={15}/>비밀번호</button>
+              <button className="danger" disabled={!canManage || user.id === currentUserID}
+                aria-disabled={!canManage || user.id === currentUserID}
+                title={mutationTitle || (user.id === currentUserID ? "현재 사용자는 삭제할 수 없습니다." : "사용자 삭제")}
+                onClick={() => remove(user)}><Trash2 size={15}/>삭제</button>
             </div>
           </article>,
         )}{!filtered.length && <div className="admin-empty">조건에 맞는 사용자가 없습니다.</div>}</div>
@@ -1078,7 +1221,9 @@ function StatusItem({label, value, good}: {label: string; value: string; good?: 
   return <div><span>{label}</span><strong className={good ? "status-good" : ""}>{value}</strong></div>;
 }
 function Notice({tone, title, children}: {tone: "info"|"warning"|"error"; title: string; children: React.ReactNode}) {
-  return <div className={`admin-notice ${tone}`}><strong>{title}</strong><span>{children}</span></div>;
+  return <div className={`admin-notice ${tone}`} role={tone === "error" ? "alert" : "status"}>
+    <strong>{title}</strong><span>{children}</span>
+  </div>;
 }
 function ActionMessage({message, error}: {message: string; error: string}) {
   if (error) return <div className="error action-message">{error}</div>;

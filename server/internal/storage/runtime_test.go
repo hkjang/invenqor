@@ -39,49 +39,39 @@ func TestOpenWithoutPostgresUsesSQLiteFallback(t *testing.T) {
 	assertTableExists(t, runtime, "software_catalog_reconciliations")
 }
 
-func TestMalformedPostgresDSNFallsBackWithoutLeakingSecret(t *testing.T) {
+func TestMalformedPostgresDSNFailsClosedWithoutLeakingSecret(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "invenqor.db")
 	secret := "never-log-this-password"
-	runtime, err := Open(context.Background(), Options{
+	_, err := Open(context.Background(), Options{
 		PostgresDSN: "postgres://user:" + secret + "@%zz/invenqor",
 		SQLitePath:  path,
 		Timeout:     100 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), string(FailureInvalidDSN)) {
+		t.Fatalf("Open() error = %v, want INVALID_DSN", err)
 	}
-	defer runtime.Close()
-	if runtime.Mode() != ModeSQLiteFallback {
-		t.Fatalf("Mode() = %s, want %s", runtime.Mode(), ModeSQLiteFallback)
+	if strings.Contains(err.Error(), secret) {
+		t.Fatal("PostgreSQL startup error leaked the password")
 	}
-	failure := runtime.PostgresFailure()
-	if failure == nil || failure.Code != FailureInvalidDSN {
-		t.Fatalf("PostgresFailure() = %#v, want INVALID_DSN", failure)
-	}
-	if strings.Contains(failure.Summary, secret) || strings.Contains(failure.Host, secret) {
-		t.Fatal("PostgreSQL failure metadata leaked the password")
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("explicit PostgreSQL failure created SQLite database: %v", statErr)
 	}
 }
 
-func TestUnavailablePostgresFallsBackToSQLite(t *testing.T) {
+func TestUnavailablePostgresFailsClosedWithoutCreatingSQLite(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "invenqor.db")
-	runtime, err := Open(context.Background(), Options{
+	_, err := Open(context.Background(), Options{
 		PostgresDSN: "postgres://user:secret@127.0.0.1:1/invenqor?sslmode=disable",
 		SQLitePath:  path,
 		Timeout:     100 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), string(FailureConnection)) {
+		t.Fatalf("Open() error = %v, want CONNECTION_FAILURE", err)
 	}
-	defer runtime.Close()
-	if runtime.Mode() != ModeSQLiteFallback {
-		t.Fatalf("Mode() = %s, want %s", runtime.Mode(), ModeSQLiteFallback)
-	}
-	failure := runtime.PostgresFailure()
-	if failure == nil || failure.Code != FailureConnection {
-		t.Fatalf("PostgresFailure() = %#v, want CONNECTION_FAILURE", failure)
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("explicit PostgreSQL failure created SQLite database: %v", statErr)
 	}
 }
 

@@ -1,10 +1,48 @@
+import React from "react";
+import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
-import {describeAssign, describeMatch} from "./classificationPage";
+import {
+  CLASSIFICATION_READ_ONLY_MESSAGE,
+  RELATIONS_READ_ONLY_MESSAGE,
+  ClassificationSettingsPanel,
+  classificationAccessState,
+  describeAssign,
+  describeMatch,
+} from "./classificationPage";
 
 const rule = (match: unknown, assign: unknown) => ({
   id: "r", name: "n", description: "", priority: 10, enabled: true,
   system_rule: true, confidence: 1, assets: 0,
   match: match as never, assign: assign as never,
+});
+
+describe("classification mutation permissions", () => {
+  it("separates settings.write from relations.write", () => {
+    expect(classificationAccessState({
+      permissions: ["settings.read", "settings.write"],
+      superAdmin: false,
+    })).toEqual({canWriteSettings: true, canWriteRelations: false});
+    expect(classificationAccessState({
+      permissions: ["settings.read", "relations.write"],
+      superAdmin: false,
+    })).toEqual({canWriteSettings: false, canWriteRelations: true});
+    expect(classificationAccessState({permissions: [], superAdmin: true}))
+      .toEqual({canWriteSettings: true, canWriteRelations: true});
+  });
+
+  it("keeps refresh readable while disabling classification mutations", () => {
+    const html = renderToStaticMarkup(React.createElement(ClassificationSettingsPanel, {
+      csrf: "csrf",
+      access: {permissions: ["settings.read"], superAdmin: false},
+    }));
+    expect(html).toContain(CLASSIFICATION_READ_ONLY_MESSAGE);
+    expect(html).toContain(RELATIONS_READ_ONLY_MESSAGE);
+    expect(html).toContain('id="classification-readonly-notice"');
+    expect(html).toContain('id="relations-readonly-notice"');
+    expect(html).toMatch(/<button class="secondary">[^]*새로고침<\/button>/);
+    expect(html).toContain(`title="${CLASSIFICATION_READ_ONLY_MESSAGE}"`);
+    expect(html).toContain('aria-disabled="true"');
+  });
 });
 
 describe("describeMatch", () => {

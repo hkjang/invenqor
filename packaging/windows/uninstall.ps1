@@ -37,14 +37,56 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'uninstall.ps1 must run from an elevated PowerShell session.'
 }
 
+function Resolve-ManagedDirectoryPath {
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][string] $Path
+    )
+    # Keep the destructive target contract identical to install.ps1. In
+    # particular, Path.IsPathRooted alone is insufficient because it accepts
+    # drive-relative and current-drive-root-relative paths.
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "$Name must be a fully qualified Windows drive or UNC path."
+    }
+    $driveAbsolute = $Path.Length -ge 3 -and
+        [char]::IsLetter($Path[0]) -and $Path[1] -eq ':' -and
+        ($Path[2] -eq '\' -or $Path[2] -eq '/')
+    $uncAbsolute = $Path.StartsWith('\\')
+    if (-not $driveAbsolute -and -not $uncAbsolute) {
+        throw "$Name must be a fully qualified Windows drive or UNC path."
+    }
+
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        $rootPath = [IO.Path]::GetPathRoot($fullPath)
+    } catch {
+        throw "$Name is not a valid absolute Windows path: $($_.Exception.Message)"
+    }
+    if ([string]::IsNullOrWhiteSpace($rootPath)) {
+        throw "$Name does not have a filesystem root."
+    }
+
+    $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fullComparable = $fullPath.TrimEnd($separators)
+    $rootComparable = $rootPath.TrimEnd($separators)
+    if ([string]::Equals($fullComparable, $rootComparable,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Name must be a directory below the volume or UNC share root, not the root itself."
+    }
+    return $fullPath
+}
+
 if (-not $InstallRoot) { $InstallRoot = Join-Path $env:ProgramFiles 'Invenqor' }
 if (-not $DataRoot) { $DataRoot = Join-Path $env:ProgramData 'Invenqor' }
+$InstallRoot = Resolve-ManagedDirectoryPath -Name 'InstallRoot' -Path $InstallRoot
+$DataRoot = Resolve-ManagedDirectoryPath -Name 'DataRoot' -Path $DataRoot
 
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$serviceSelector = [WildcardPattern]::Escape($ServiceName)
+$service = Get-Service -Name $serviceSelector -ErrorAction SilentlyContinue
 if ($service) {
     if ($service.Status -ne 'Stopped') {
         Write-Host "Stopping $ServiceName"
-        Stop-Service -Name $ServiceName -Force
+        Stop-Service -InputObject $service -Force
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
     }
     # The recovery action would otherwise restart the service while it is being

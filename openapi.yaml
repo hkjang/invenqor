@@ -1,10 +1,331 @@
 openapi: 3.1.0
 info:
   title: Invenqor Server API
-  version: 0.2.14
+  version: 0.2.15
   license: {name: Apache-2.0, identifier: Apache-2.0}
 servers: [{url: /}]
 paths:
+  /:
+    get:
+      operationId: getManagementConsole
+      summary: Serve the embedded management console
+      security: []
+      responses:
+        "200":
+          description: Management console HTML
+          content: {text/html: {schema: {type: string}}}
+        "4XX": {description: Invalid request}
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Confirm that the Server process can answer HTTP
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties: {status: {type: string, const: UP}}
+        "4XX": {description: Invalid request}
+  /health/database:
+    get:
+      operationId: getDatabaseHealth
+      summary: Inspect the active database connection and startup fallback
+      description: Requires an authenticated session with `settings.read`.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Database is reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, mode, opened_at]
+                properties:
+                  status: {type: string, const: UP}
+                  mode: {type: string}
+                  opened_at: {type: string, format: date-time}
+                  postgres_startup_failure: {type: object, additionalProperties: true}
+        "401": {description: Authentication required}
+        "403": {description: Missing `settings.read` permission}
+        "503": {description: Database is not reachable}
+  /api/v1/system/info:
+    get:
+      operationId: getPublicSystemInfo
+      summary: Read the product and Server version shown before login
+      description: Deliberately excludes database, bind-address, and enrollment details.
+      security: []
+      responses:
+        "200":
+          description: Public version information
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PublicSystemInfo"}
+        "4XX": {description: Invalid request}
+  /api/v1/admin/system/info:
+    get:
+      operationId: getAdminSystemInfo
+      summary: Read authenticated Server, database, and enrollment runtime details
+      description: Requires `settings.read`; values describe the Server Pod that answered the request.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Runtime details used by the administrative system panel
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AdminSystemInfo"}
+        "401": {description: Authentication required}
+        "403": {description: Missing `settings.read` permission}
+  /api/v1/bootstrap/status:
+    get:
+      operationId: getBootstrapStatus
+      summary: Report whether the one-time initial administrator is still required
+      description: The token itself is never returned; `token_file` is present only on the Pod that owns it.
+      security: []
+      responses:
+        "200":
+          description: Initial setup state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [required]
+                properties:
+                  required: {type: boolean}
+                  token_file: {type: string}
+        "500": {description: Bootstrap state could not be loaded}
+  /api/v1/bootstrap/admin:
+    post:
+      operationId: createInitialAdministrator
+      summary: Consume the one-time bootstrap token and create the first super administrator
+      security: [{bootstrapToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, minLength: 3, maxLength: 64}
+                password: {type: string, format: password, writeOnly: true}
+                display_name: {type: string}
+                email: {type: string, format: email}
+      responses:
+        "201":
+          description: Initial administrator created and bootstrap claim consumed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties: {user: {$ref: "#/components/schemas/User"}}
+        "400": {description: Administrator data fails policy}
+        "401": {description: Bootstrap token is invalid}
+        "409": {description: Initial setup is already complete}
+  /api/v1/auth/local/login:
+    post:
+      operationId: loginLocalUser
+      summary: Authenticate a local user and issue session and CSRF cookies
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string, format: password, writeOnly: true}
+                totp_code: {type: string, writeOnly: true, description: Authenticator or one-time recovery code when MFA is enabled.}
+      responses:
+        "200":
+          description: Authenticated; session cookies and the double-submit token are issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, csrf_token, idle_expires_at, absolute_expires_at]
+                properties:
+                  user: {$ref: "#/components/schemas/User"}
+                  csrf_token: {type: string, writeOnly: true}
+                  idle_expires_at: {type: string, format: date-time}
+                  absolute_expires_at: {type: string, format: date-time}
+        "400": {description: Invalid JSON request}
+        "401": {description: "Invalid credentials, missing MFA, or invalid MFA"}
+        "403": {description: Account inactive}
+        "423": {description: Account temporarily locked or source rate-limited}
+  /api/v1/auth/methods:
+    get:
+      operationId: getAuthenticationMethods
+      summary: Report login methods that are ready for use
+      security: []
+      responses:
+        "200":
+          description: Local and Keycloak readiness
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [local, keycloak, keycloak_enabled, keycloak_client_secret, keycloak_incomplete, keycloak_provider_issuer]
+                properties:
+                  local: {type: boolean, const: true}
+                  keycloak: {type: boolean}
+                  keycloak_enabled: {type: boolean}
+                  keycloak_client_secret: {type: boolean}
+                  keycloak_incomplete: {type: boolean}
+                  keycloak_provider_issuer: {type: string}
+        "500": {description: Authentication settings unavailable}
+  /api/v1/auth/keycloak/start:
+    get:
+      operationId: startKeycloakLogin
+      summary: Start an OIDC authorization-code flow and redirect to Keycloak
+      security: []
+      parameters:
+        - in: query
+          name: return_to
+          schema: {type: string, default: /}
+          description: Safe same-origin path used after a successful callback; unsafe values become `/`.
+      responses:
+        "302": {description: "Redirect to Keycloak, or back to the console with a stable `auth_error` code"}
+        "4XX": {description: Invalid request}
+  /api/v1/auth/keycloak/callback:
+    get:
+      operationId: completeKeycloakLogin
+      summary: Verify the Keycloak callback, synchronize the user, and issue a session
+      security: []
+      parameters:
+        - {in: query, name: state, schema: {type: string}, description: OIDC state for a successful provider response}
+        - {in: query, name: code, schema: {type: string}, description: Authorization code for a successful provider response}
+        - {in: query, name: error, schema: {type: string}, description: Provider error instead of `code`}
+        - {in: query, name: error_description, schema: {type: string}}
+      responses:
+        "302": {description: "Redirect to the requested console path on success, or to the login screen with `auth_error` on failure"}
+        "4XX": {description: Invalid request}
+  /api/v1/auth/me:
+    get:
+      operationId: getCurrentSession
+      summary: Read the current user, expiry, permissions, and account-security posture
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current authenticated principal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, idle_expires_at, absolute_expires_at, security]
+                properties:
+                  user: {$ref: "#/components/schemas/User"}
+                  idle_expires_at: {type: string, format: date-time}
+                  absolute_expires_at: {type: string, format: date-time}
+                  security: {$ref: "#/components/schemas/AccountSecurity"}
+        "401": {description: Authentication required or session expired}
+  /api/v1/auth/logout:
+    post:
+      operationId: logoutCurrentSession
+      summary: Revoke the current session and clear its cookies
+      description: Returns a Keycloak end-session URL only for a linked OIDC identity.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      responses:
+        "200":
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logged_out, logout_url]
+                properties:
+                  logged_out: {type: boolean, const: true}
+                  logout_url: {type: string}
+        "401": {description: Authentication required}
+        "403": {description: CSRF token invalid}
+  /api/v1/auth/password/change:
+    post:
+      operationId: changeCurrentPassword
+      summary: Change the current local password and revoke the user's other sessions
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string, format: password, writeOnly: true}
+                new_password: {type: string, format: password, writeOnly: true}
+      responses:
+        "200": {description: Password changed}
+        "400": {description: Password is unchanged or does not satisfy policy}
+        "401": {description: Current password invalid or authentication required}
+        "403": {description: CSRF token invalid}
+        "409": {description: Federated account has no local password}
+  /api/v1/auth/totp/setup:
+    post:
+      operationId: setupCurrentUserTotp
+      summary: Generate an unverified TOTP secret and one-time recovery codes
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      responses:
+        "200":
+          description: Secret, provisioning URI, and recovery codes shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret, provisioning_uri, recovery_codes]
+                properties:
+                  secret: {type: string, writeOnly: true}
+                  provisioning_uri: {type: string, format: uri, writeOnly: true}
+                  recovery_codes: {type: array, writeOnly: true, items: {type: string}}
+        "401": {description: Authentication required}
+        "403": {description: CSRF token invalid}
+        "409": {description: TOTP already enabled}
+  /api/v1/auth/totp/enable:
+    post:
+      operationId: enableCurrentUserTotp
+      summary: Verify the pending TOTP secret and enable MFA
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: {code: {type: string, writeOnly: true}}
+      responses:
+        "200": {description: TOTP enabled}
+        "400": {description: Code invalid or setup not started}
+        "401": {description: Authentication required}
+        "403": {description: CSRF token invalid}
+  /api/v1/auth/totp:
+    delete:
+      operationId: disableCurrentUserTotp
+      summary: Verify an authenticator code and disable MFA
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: {code: {type: string, writeOnly: true}}
+      responses:
+        "200": {description: TOTP disabled and recovery codes invalidated}
+        "400": {description: Authenticator code invalid}
+        "401": {description: Authentication required}
+        "403": {description: CSRF token invalid}
   /health/ready:
     get:
       operationId: getReadiness
@@ -112,12 +433,17 @@ paths:
     get:
       operationId: getAgentUpdateManifest
       summary: Select a newer signed update for this agent and rollout bucket
+      description: >-
+        Normal dual-signature upgrades are available to legacy Agents. A v2
+        rollback is returned only when current_version is 0.2.15 or newer;
+        artifact-only v1 rollbacks are never returned because their rollback
+        flag is not authenticated.
       security: [{agentBearer: []}, {agentMTLS: []}]
       parameters:
         - {in: query, name: agent_id, required: true, schema: {type: string, format: uuid}}
         - {in: query, name: current_version, required: true, schema: {type: string}}
         - {in: query, name: channel, required: true, schema: {type: string, enum: [stable, beta]}}
-        - {in: query, name: os, required: true, schema: {type: string, const: linux}}
+        - {in: query, name: os, required: true, schema: {type: string, enum: [linux, windows]}}
         - {in: query, name: arch, required: true, schema: {type: string, enum: [x86_64, aarch64]}}
       responses:
         "200":
@@ -138,6 +464,262 @@ paths:
         "200": {description: Agent binary}
         "401": {description: Invalid agent credential}
         "404": {description: Artifact not found}
+  /api/v1/admin/agents:
+    get:
+      operationId: listAgents
+      summary: List the registered Agent fleet and its collection posture
+      description: Requires `agents.read`; credential secret material is never returned.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Registered Agents ordered by hostname and device ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents: {type: array, items: {$ref: "#/components/schemas/Agent"}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `agents.read` permission}
+    post:
+      operationId: provisionAgentCredential
+      summary: Pre-provision an Agent and return a one-time device bearer token
+      description: Requires `agents.manage` and CSRF validation. Only the token digest is retained.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id: {type: string, format: uuid}
+                hostname: {type: string, maxLength: 255}
+      responses:
+        "201":
+          description: Provisioned Agent and one-time token
+          headers: {Cache-Control: {schema: {type: string, const: no-store}}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent, token]
+                properties:
+                  agent: {$ref: "#/components/schemas/Agent"}
+                  token: {type: string, writeOnly: true, pattern: "^ivq_at_"}
+        "400": {description: Invalid Agent UUID or request}
+        "401": {description: Authentication required}
+        "403": {description: Missing `agents.manage` permission or invalid CSRF token}
+  /api/v1/admin/agents/{agentId}/tokens/rotate:
+    post:
+      operationId: rotateAgentCredential
+      summary: Rotate an Agent bearer token with an optional overlap window
+      description: Requires `agents.manage`; the replacement token is returned once.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AgentId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grace_seconds]
+              properties:
+                grace_seconds: {type: integer, minimum: 0, maximum: 604800}
+      responses:
+        "200":
+          description: One-time replacement token
+          headers: {Cache-Control: {schema: {type: string, const: no-store}}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties: {token: {type: string, writeOnly: true, pattern: "^ivq_at_"}}
+        "400": {description: Grace period outside zero to seven days}
+        "403": {description: Missing `agents.manage` permission or invalid CSRF token}
+        "404": {description: Agent not found}
+  /api/v1/admin/agents/{agentId}/block:
+    post:
+      operationId: blockAgent
+      summary: Block an Agent and revoke its ability to authenticate
+      description: Requires `agents.manage` and CSRF validation.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AgentId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      responses:
+        "200":
+          description: Agent blocked
+          content:
+            application/json:
+              schema: {type: object, required: [blocked], properties: {blocked: {type: boolean, const: true}}}
+        "403": {description: Missing `agents.manage` permission or invalid CSRF token}
+        "404": {description: Agent not found}
+  /api/v1/admin/agents/{agentId}/unblock:
+    post:
+      operationId: unblockAgent
+      summary: Allow a blocked Agent to authenticate again
+      description: Requires `agents.manage` and CSRF validation.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AgentId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      responses:
+        "200":
+          description: Agent unblocked
+          content:
+            application/json:
+              schema: {type: object, required: [blocked], properties: {blocked: {type: boolean, const: false}}}
+        "403": {description: Missing `agents.manage` permission or invalid CSRF token}
+        "404": {description: Agent not found}
+  /api/v1/admin/agents/{agentId}/certificates:
+    post:
+      operationId: registerAgentCertificate
+      summary: Register an mTLS certificate fingerprint for an Agent
+      description: Requires `agents.manage` and CSRF validation.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AgentId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fingerprint]
+              properties:
+                fingerprint: {type: string, description: SHA-256 certificate fingerprint in hexadecimal form.}
+                expires_at: {type: string, format: date-time}
+      responses:
+        "201": {description: Certificate fingerprint registered}
+        "400": {description: "Invalid fingerprint, expiry, or Agent"}
+        "403": {description: Missing `agents.manage` permission or invalid CSRF token}
+  /api/v1/admin/api-key-scopes:
+    get:
+      operationId: listApiKeyScopes
+      summary: List the scope catalog available to API and MCP keys
+      description: Requires `api_keys.manage`; scope escalation is still checked when a key is created or changed.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Supported scope names and descriptions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scopes]
+                properties:
+                  scopes:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, description]
+                      properties:
+                        name: {$ref: "#/components/schemas/ApiKeyScope"}
+                        description: {type: string}
+        "401": {description: Authentication required}
+        "403": {description: Missing `api_keys.manage` permission}
+  /api/v1/admin/settings:
+    get:
+      operationId: listRuntimeSettings
+      summary: List generic runtime settings with secrets masked
+      description: Requires `settings.read`. Dedicated Keycloak records are excluded.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Settings and supported category names
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, categories]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Setting"}}
+                  categories: {type: array, items: {type: string}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `settings.read` permission}
+    patch:
+      operationId: updateRuntimeSettings
+      summary: Atomically create or update generic runtime settings
+      description: Requires `settings.write` and CSRF validation. Secret values are encrypted before storage; dedicated Keycloak records are rejected.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [key, value]
+                    properties:
+                      key: {type: string, maxLength: 128, pattern: "^[a-z0-9._-]+$"}
+                      value: {description: Any valid JSON value.}
+                      secret: {type: boolean, default: false}
+                      apply_mode: {type: string, enum: [immediate, restart, migration], default: immediate}
+                      reason: {type: string}
+      responses:
+        "200": {description: All settings committed}
+        "400": {description: "Empty update, invalid key, value, or apply mode"}
+        "403": {description: Missing `settings.write` permission or invalid CSRF token}
+        "409": {description: A dedicated setting endpoint must be used}
+        "503": {description: Secret storage unavailable}
+  /api/v1/admin/settings/history:
+    get:
+      operationId: listRuntimeSettingHistory
+      summary: Read up to 500 generic setting versions, with secret values masked
+      description: Requires `settings.read`; dedicated Keycloak settings are excluded.
+      security: [{session: []}]
+      parameters:
+        - {in: query, name: key, schema: {type: string}, description: Limit history to one exact setting key.}
+      responses:
+        "200":
+          description: Setting versions newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: {items: {type: array, items: {$ref: "#/components/schemas/SettingVersion"}}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `settings.read` permission}
+  /api/v1/admin/settings/rollback:
+    post:
+      operationId: rollbackRuntimeSetting
+      summary: Restore a generic setting to a selected historical value
+      description: Requires `settings.write` and CSRF validation; the rollback creates a new version.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, version]
+              properties:
+                key: {type: string}
+                version: {type: integer, minimum: 1}
+                reason: {type: string}
+      responses:
+        "200": {description: Historical value restored as a new version}
+        "400": {description: Key or version missing}
+        "403": {description: Missing `settings.write` permission or invalid CSRF token}
+        "404": {description: Setting version not found}
+        "409": {description: A dedicated setting endpoint must be used}
   /api/v1/admin/agent-updates:
     get:
       operationId: listAgentUpdates
@@ -161,11 +743,14 @@ paths:
                         base: {type: string, description: Release identifier used by the rollout and delete endpoints}
                         version: {type: string}
                         channel: {type: string, enum: [stable, beta]}
+                        os: {type: string, enum: [linux, windows]}
                         architecture: {type: string, enum: [x86_64, aarch64]}
                         rollout_percent: {type: integer, minimum: 0, maximum: 100}
                         allow_downgrade: {type: boolean, description: "A deliberate rollback release, which agents accept even though it is older"}
                         notes: {type: string}
                         signature_verified: {type: boolean, description: Whether the server checked the signature when it was published}
+                        signature_scheme: {type: string, const: ed25519}
+                        signature_version: {type: integer, enum: [1, 2], description: "1 is a stored legacy artifact-only release; all new publications are metadata-bound v2"}
                         published_at: {type: string, format: date-time}
                         published_by: {type: string}
                         sha256: {type: string}
@@ -186,7 +771,13 @@ paths:
     post:
       operationId: publishAgentUpdate
       summary: Publish an administrator-approved signed agent update
-      description: Requires agents.manage and the X-CSRF-Token header.
+      description: >-
+        Requires agents.manage and the X-CSRF-Token header. New publications
+        require two Ed25519 signatures: signature authenticates artifact bytes
+        for pre-v2 Agent bridge compatibility, and manifest_signature protects
+        version, channel, OS, architecture, exact size, SHA-256, and
+        allow_downgrade. Prefer the offline helper's single signature_bundle_file;
+        direct Base64 values or raw signature files are also supported.
       security: [{session: []}]
       requestBody:
         required: true
@@ -194,14 +785,20 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [artifact, version, channel, os, architecture, signature, rollout_percent]
+              required: [artifact, rollout_percent]
               properties:
                 artifact: {type: string, format: binary}
-                version: {type: string, example: 0.2.3}
-                channel: {type: string, enum: [stable, beta]}
-                os: {type: string, const: linux}
-                architecture: {type: string, enum: [x86_64, aarch64]}
-                signature: {type: string, description: Base64 Ed25519 signature over the artifact bytes}
+                signature_bundle_file: {type: string, format: binary, description: JSON emitted by sign-agent-update-manifest-v2.py; supplies metadata and both signatures}
+                version: {type: string, example: 0.2.3, description: Required without signature_bundle_file; when both are supplied they must match}
+                channel: {type: string, enum: [stable, beta], description: Required without signature_bundle_file}
+                os: {type: string, enum: [linux, windows], description: Required without signature_bundle_file}
+                architecture: {type: string, enum: [x86_64, aarch64], description: Required without signature_bundle_file}
+                signature: {type: string, description: Base64 artifact-only Ed25519 bridge signature; required with direct fields when signature_file is absent}
+                signature_file: {type: string, format: binary, description: Raw 64-byte artifact-only bridge signature}
+                manifest_signature: {type: string, description: Base64 Ed25519 canonical manifest-v2 signature; required with direct fields when manifest_signature_file is absent}
+                manifest_signature_file: {type: string, format: binary, description: Raw 64-byte canonical manifest-v2 signature}
+                allow_downgrade: {type: boolean, default: false, description: Must match the value protected by the v2 signature}
+                notes: {type: string}
                 rollout_percent: {type: integer, minimum: 0, maximum: 100}
       responses:
         "201":
@@ -210,6 +807,7 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/UpdateManifest"}
         "400": {description: "Invalid metadata, signature encoding, or artifact"}
+        "503": {description: "Update signing public key or update store is unavailable"}
   /api/v1/admin/agent-updates/{release}:
     patch:
       operationId: setAgentUpdateRollout
@@ -291,6 +889,7 @@ paths:
       responses:
         "200": {description: Updated}
         "400": {description: Invalid input}
+        "409": {description: Concurrent scope update conflict; reload the key and retry}
     delete:
       operationId: revokeApiKey
       summary: Immediately revoke current and grace API key secrets
@@ -317,6 +916,7 @@ paths:
       responses:
         "200": {description: Updated key and one-time new secret}
         "400": {description: Invalid grace period}
+        "409": {description: Concurrent key rotation conflict; reload the key and retry}
   /api/v1/admin/api-keys/{keyId}/scopes:
     post:
       operationId: addApiKeyScopes
@@ -326,6 +926,7 @@ paths:
       responses:
         "200": {description: Scopes added}
         "400": {description: Invalid scopes}
+        "409": {description: Concurrent key update conflict; reload the key and retry}
   /api/v1/admin/api-keys/{keyId}/scopes/{scope}:
     delete:
       operationId: removeApiKeyScope
@@ -337,6 +938,7 @@ paths:
       responses:
         "200": {description: Scope removed}
         "404": {description: Key or scope not found}
+        "409": {description: Concurrent scope update conflict; reload the key and retry}
   /api/v1/admin/settings/postgresql:
     get:
       operationId: getPostgresqlSettings
@@ -886,20 +1488,239 @@ paths:
       operationId: externalCreateAsset
       summary: Create a manual asset using a scoped machine credential
       security: [{externalBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/AssetMutation"}
+                - type: object
+                  required: [name, type]
       responses:
-        "201": {description: Created}
+        "201": {description: Created manual asset}
+        "400": {description: Name or type missing}
+        "401": {description: Invalid API key}
         "403": {description: Missing assets.write scope}
+        "409": {description: Asset key already exists}
+  /api/v1/external/assets/{assetId}:
+    get:
+      operationId: externalGetAsset
+      summary: Read one asset and its collector source evidence
+      description: Requires the API-key scope `assets.read`.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Asset and its source records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset, sources]
+                properties:
+                  asset: {$ref: "#/components/schemas/Asset"}
+                  sources: {type: array, items: {type: object, additionalProperties: true}}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `assets.read` scope}
+        "404": {description: Asset not found}
+    patch:
+      operationId: externalUpdateAsset
+      summary: Update operator-managed fields on one asset
+      description: Requires `assets.write`; supplied classification fields become manual overrides.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AssetMutation"}
+      responses:
+        "200": {description: Updated asset}
+        "400": {description: Invalid mutation}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `assets.write` scope}
+        "404": {description: Asset not found}
+    delete:
+      operationId: externalDeleteAsset
+      summary: Logically delete an asset
+      description: Requires `assets.delete`; this operation is reversible through the restore endpoint.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Asset marked deleted
+          content:
+            application/json:
+              schema: {type: object, required: [deleted], properties: {deleted: {type: boolean, const: true}}}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `assets.delete` scope}
+        "404": {description: Asset not found}
+  /api/v1/external/assets/{assetId}/restore:
+    post:
+      operationId: externalRestoreAsset
+      summary: Restore a logically deleted asset
+      description: Requires the API-key scope `assets.delete`, matching logical deletion authority.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Asset restored
+          content:
+            application/json:
+              schema: {type: object, required: [deleted], properties: {deleted: {type: boolean, const: false}}}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `assets.delete` scope}
+        "404": {description: Asset not found}
+  /api/v1/external/assets/{assetId}/relations:
+    get:
+      operationId: externalListAssetRelations
+      summary: List active relationships connected to an asset
+      description: Requires the API-key scope `relations.read`.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Active incoming and outgoing relationships
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: {items: {type: array, items: {$ref: "#/components/schemas/AssetRelation"}}}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `relations.read` scope}
+    post:
+      operationId: externalCreateAssetRelation
+      summary: Create a manual relationship from this asset
+      description: Requires the API-key scope `relations.write`.
+      security: [{externalBearer: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_asset_id, relation_type]
+              properties:
+                target_asset_id: {type: string, format: uuid}
+                relation_type: {type: string}
+                confidence: {type: number, minimum: 0, maximum: 1, default: 1}
+                reason: {type: string}
+      responses:
+        "201": {description: Relationship created}
+        "400": {description: Target or relationship type missing}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `relations.write` scope}
+        "409": {description: Relationship could not be created}
+  /api/v1/external/assets/{assetId}/relations/{relationId}:
+    delete:
+      operationId: externalDeleteAssetRelation
+      summary: End an active asset relationship
+      description: Requires the API-key scope `relations.write`; history is preserved with `valid_to`.
+      security: [{externalBearer: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/RelationId"}
+      responses:
+        "200": {description: Relationship ended}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `relations.write` scope}
+        "404": {description: Active relationship not found}
+  /api/v1/external/query/validate:
+    post:
+      operationId: externalValidateQuery
+      summary: Parse a Query DSL expression without executing it
+      description: Requires the API-key scope `queries.execute`; syntactic rejection is returned as `valid:false` with HTTP 200.
+      security: [{externalBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/QueryInput"}
+      responses:
+        "200": {description: Validation result and parsed AST when valid}
+        "400": {description: Invalid JSON request}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `queries.execute` scope}
+  /api/v1/external/query/execute:
+    post:
+      operationId: externalExecuteQuery
+      summary: Execute a parameter-bound Query DSL expression using an API key
+      description: Requires `queries.execute`; result size defaults to 100 and is capped at 500.
+      security: [{externalBearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/QueryInput"}
+      responses:
+        "200":
+          description: Matching assets, count, and parsed AST
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count, ast]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Asset"}}
+                  count: {type: integer}
+                  ast: {type: object}
+        "400": {description: Invalid JSON or Query DSL expression}
+        "401": {description: Invalid API key}
+        "403": {description: Missing `queries.execute` scope}
   /mcp:
+    get:
+      operationId: rejectMcpSseTransport
+      summary: Reject legacy MCP SSE discovery on the stateless endpoint
+      description: Requires `mcp.access`; clients must use Streamable HTTP POST instead of an SSE stream.
+      security: [{externalBearer: []}]
+      responses:
+        "401": {description: Invalid API key}
+        "403": {description: Missing `mcp.access` scope}
+        "405":
+          description: SSE is unsupported
+          headers: {Allow: {schema: {type: string, const: POST}}}
     post:
       operationId: mcpStreamableHttp
       summary: Stateless MCP Streamable HTTP JSON-RPC endpoint
-      description: MCP protocol version 2025-11-25. Requires mcp.access; tool visibility is scope-filtered.
+      description: >-
+        Supports the stateless MCP 2026-07-28 lifecycle and the legacy
+        2025-11-25 initialize lifecycle on one endpoint. Modern requests must
+        carry matching MCP-Protocol-Version, Mcp-Method and, for tools/call,
+        Mcp-Name headers plus the protocol metadata envelope. Requires
+        mcp.access; tool visibility and execution are filtered by API-key
+        scopes on every request.
       security: [{externalBearer: []}]
+      parameters:
+        - in: header
+          name: MCP-Protocol-Version
+          required: false
+          schema: {type: string, enum: [2026-07-28, 2025-11-25]}
+          description: Required as 2026-07-28 for the modern stateless lifecycle; optional during legacy initialize.
+        - in: header
+          name: Mcp-Method
+          required: false
+          schema: {type: string}
+          description: Required for modern requests and must equal the JSON-RPC method.
+        - in: header
+          name: Mcp-Name
+          required: false
+          schema: {type: string}
+          description: Required for modern tools/call and must equal params.name; omitted for methods without a named subject.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
       responses:
         "200": {description: JSON-RPC response}
-        "202": {description: Notification accepted}
+        "202": {description: Legacy notification accepted}
+        "400": {description: "Invalid JSON-RPC, protocol metadata, version, or routing header contract"}
         "401": {description: Invalid API key}
         "403": {description: Missing scope or rejected Origin}
+        "404": {description: RPC method is unavailable in the modern protocol lifecycle}
   /api/v1/assets:
     get:
       operationId: listAssets
@@ -929,8 +1750,241 @@ paths:
     post:
       operationId: createAsset
       summary: Create manual asset
+      description: Requires `assets.write` and CSRF validation.
       security: [{session: []}]
-      responses: {"201": {description: Created}, "400": {description: Invalid asset}}
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/AssetMutation"}
+                - type: object
+                  required: [name, type]
+      responses:
+        "201": {description: Created manual asset}
+        "400": {description: Name or type missing}
+        "403": {description: Missing `assets.write` permission or invalid CSRF token}
+        "409": {description: Asset key already exists}
+  /api/v1/assets/{assetId}:
+    get:
+      operationId: getAsset
+      summary: Read one asset and its collector source evidence
+      description: Requires `assets.read`.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Asset and its source records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset, sources]
+                properties:
+                  asset: {$ref: "#/components/schemas/Asset"}
+                  sources: {type: array, items: {type: object, additionalProperties: true}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `assets.read` permission}
+        "404": {description: Asset not found}
+    patch:
+      operationId: updateAsset
+      summary: Update operator-managed fields on one asset
+      description: Requires `assets.write` and CSRF validation; supplied classification fields become manual overrides.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AssetMutation"}
+      responses:
+        "200": {description: Updated asset}
+        "400": {description: Invalid mutation}
+        "403": {description: Missing `assets.write` permission or invalid CSRF token}
+        "404": {description: Asset not found}
+    delete:
+      operationId: deleteAsset
+      summary: Logically delete an asset
+      description: Requires `assets.delete` and CSRF validation; the restore operation is governed by the same permission.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      responses:
+        "200":
+          description: Asset marked deleted
+          content:
+            application/json:
+              schema: {type: object, required: [deleted], properties: {deleted: {type: boolean, const: true}}}
+        "403": {description: Missing `assets.delete` permission or invalid CSRF token}
+        "404": {description: Asset not found}
+  /api/v1/assets/{assetId}/restore:
+    post:
+      operationId: restoreAsset
+      summary: Restore a logically deleted asset
+      description: Requires `assets.delete` and CSRF validation, matching deletion authority.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      responses:
+        "200":
+          description: Asset restored
+          content:
+            application/json:
+              schema: {type: object, required: [deleted], properties: {deleted: {type: boolean, const: false}}}
+        "403": {description: Missing `assets.delete` permission or invalid CSRF token}
+        "404": {description: Asset not found}
+  /api/v1/assets/{assetId}/history:
+    get:
+      operationId: listAssetHistory
+      summary: List an asset's lifecycle changes newest first
+      description: Requires `assets.read`.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Recorded create, update, merge, split, delete, and restore changes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: {items: {type: array, items: {type: object, additionalProperties: true}}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `assets.read` permission}
+  /api/v1/assets/{assetId}/relations:
+    get:
+      operationId: listAssetRelations
+      summary: List active relationships connected to an asset
+      description: Requires `relations.read`.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/AssetId"}]
+      responses:
+        "200":
+          description: Active incoming and outgoing relationships
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: {items: {type: array, items: {$ref: "#/components/schemas/AssetRelation"}}}
+        "401": {description: Authentication required}
+        "403": {description: Missing `relations.read` permission}
+    post:
+      operationId: createAssetRelation
+      summary: Create a manual relationship from this asset
+      description: Requires `relations.write` and CSRF validation.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_asset_id, relation_type]
+              properties:
+                target_asset_id: {type: string, format: uuid}
+                relation_type: {type: string}
+                confidence: {type: number, minimum: 0, maximum: 1, default: 1}
+                reason: {type: string}
+      responses:
+        "201": {description: Relationship created}
+        "400": {description: Target or relationship type missing}
+        "403": {description: Missing `relations.write` permission or invalid CSRF token}
+        "409": {description: Relationship could not be created}
+  /api/v1/assets/{assetId}/relations/{relationId}:
+    delete:
+      operationId: deleteAssetRelation
+      summary: End an active asset relationship
+      description: Requires `relations.write` and CSRF validation; history is preserved with `valid_to`.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/RelationId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      responses:
+        "200": {description: Relationship ended}
+        "403": {description: Missing `relations.write` permission or invalid CSRF token}
+        "404": {description: Active relationship not found}
+  /api/v1/assets/merge:
+    post:
+      operationId: mergeAssets
+      summary: Move source evidence into one representative asset and retire duplicates
+      description: Requires `assets.merge` and CSRF validation.
+      security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [primary_id, secondary_ids]
+              properties:
+                primary_id: {type: string, format: uuid}
+                secondary_ids: {type: array, minItems: 1, items: {type: string, format: uuid}}
+                reason: {type: string}
+      responses:
+        "200": {description: Assets merged and moved source IDs returned}
+        "400": {description: Primary or secondary assets missing}
+        "403": {description: Missing `assets.merge` permission or invalid CSRF token}
+  /api/v1/assets/{assetId}/split:
+    post:
+      operationId: splitAsset
+      summary: Move selected source evidence into a new representative asset
+      description: Requires `assets.merge` and CSRF validation.
+      security: [{session: []}]
+      parameters:
+        - {$ref: "#/components/parameters/AssetId"}
+        - {$ref: "#/components/parameters/CSRFToken"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ids, name, type]
+              properties:
+                source_ids: {type: array, minItems: 1, items: {type: string, format: uuid}}
+                name: {type: string}
+                type: {type: string}
+                reason: {type: string}
+      responses:
+        "201":
+          description: New representative asset created
+          content:
+            application/json:
+              schema: {type: object, required: [asset_id], properties: {asset_id: {type: string, format: uuid}}}
+        "400": {description: Invalid split or source does not belong to the original asset}
+        "403": {description: Missing `assets.merge` permission or invalid CSRF token}
+  /api/v1/assets/visualization:
+    get:
+      operationId: getAssetVisualization
+      summary: Aggregate composition, freshness, growth, and bounded topology views
+      description: Requires both `assets.read` and `relations.read` because the response contains relationship edges and types.
+      security: [{session: []}]
+      parameters:
+        - {in: query, name: days, schema: {type: integer, minimum: 1, maximum: 365, default: 30}}
+        - {in: query, name: environment, schema: {type: string}}
+        - {in: query, name: criticality, schema: {type: string}}
+        - {in: query, name: type, schema: {type: string}}
+        - {in: query, name: stale_hours, schema: {type: integer, minimum: 1, maximum: 2160, default: 24}}
+      responses:
+        "200":
+          description: One consistent aggregation for every visualization view
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AssetVisualization"}
+        "401": {description: Authentication required}
+        "403": {description: Missing `assets.read` or `relations.read` permission}
   /api/v1/assets/software-products:
     get:
       operationId: listSoftwareProducts
@@ -961,13 +2015,14 @@ paths:
     get:
       operationId: getDashboardStatistics
       summary: Get authoritative asset, Agent, and collection aggregates
+      description: Requires both `assets.read` and `agents.read` because the response includes fleet status and operating-system aggregates.
       security: [{session: []}]
       parameters:
         - {in: query, name: scope, schema: {type: string, enum: [managed]}, description: Exclude raw process observations from asset aggregates}
       responses:
         "200": {description: Current aggregates and seven-day collection trend}
         "401": {description: Authentication required}
-        "403": {description: Missing assets.read permission}
+        "403": {description: Missing `assets.read` or `agents.read` permission}
   /api/v1/assets.csv:
     get:
       operationId: exportAssets
@@ -978,7 +2033,7 @@ paths:
       security: [{session: []}]
       responses:
         "200": {description: CSV inventory extract, content: {text/csv: {schema: {type: string}}}}
-        "403": {description: Missing assets.read permission}
+        "403": {description: Missing assets.export permission}
   /api/v1/admin/audit:
     get:
       operationId: listAudit
@@ -1029,6 +2084,32 @@ paths:
       responses:
         "200": {description: "Queryable fields, operators and limits"}
         "403": {description: Missing queries.execute permission}
+  /api/v1/query/validate:
+    post:
+      operationId: validateQuery
+      summary: Parse a Query DSL expression without executing it
+      description: Requires `queries.execute`; syntactic rejection is returned as `valid:false` with HTTP 200.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/QueryInput"}
+      responses:
+        "200":
+          description: Validation result and parsed AST when valid
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid]
+                properties:
+                  valid: {type: boolean}
+                  error: {type: string}
+                  ast: {type: object}
+        "400": {description: Invalid JSON request}
+        "401": {description: Authentication required}
+        "403": {description: Missing `queries.execute` permission}
   /api/v1/auth/totp/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1038,27 +2119,225 @@ paths:
         so one leaked code cannot be used to mint more. The previous set stops
         working immediately.
       security: [{session: []}]
+      parameters: [{$ref: "#/components/parameters/CSRFToken"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties: {code: {type: string, writeOnly: true}}
       responses:
         "200": {description: "The new codes, shown once"}
         "400": {description: The authenticator code is invalid}
+        "403": {description: CSRF token invalid}
         "409": {description: The account has no enabled second factor}
   /api/v1/query/execute:
     post:
       operationId: executeQuery
       summary: Execute a validated, parameter-bound Query DSL expression
+      description: Requires `queries.execute`; result size defaults to 100 and is capped at 500.
       security: [{session: []}]
-      responses: {"200": {description: Query results}, "400": {description: Unsafe or invalid query}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/QueryInput"}
+      responses:
+        "200": {description: "Matching assets, count, and parsed AST"}
+        "400": {description: "Unsafe, invalid, or malformed query"}
+        "401": {description: Authentication required}
+        "403": {description: Missing `queries.execute` permission}
 components:
   securitySchemes:
     agentBearer: {type: http, scheme: bearer}
     agentEnrollment: {type: apiKey, in: header, name: X-Invenqor-Enrollment-Token}
     agentMTLS: {type: mutualTLS}
+    bootstrapToken: {type: apiKey, in: header, name: X-Invenqor-Bootstrap-Token}
     session: {type: apiKey, in: cookie, name: invenqor_session}
     externalBearer: {type: http, scheme: bearer, bearerFormat: Invenqor scoped API key}
   parameters:
+    AgentId: {in: path, name: agentId, required: true, schema: {type: string, format: uuid}}
+    AssetId: {in: path, name: assetId, required: true, schema: {type: string, format: uuid}}
+    RelationId: {in: path, name: relationId, required: true, schema: {type: string, format: uuid}}
+    CSRFToken:
+      in: header
+      name: X-CSRF-Token
+      required: true
+      description: Double-submit token from the current `invenqor_csrf` cookie.
+      schema: {type: string}
     KeyId: {in: path, name: keyId, required: true, schema: {type: string, format: uuid}}
     UserId: {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
   schemas:
+    User:
+      type: object
+      required: [id, username, display_name, email, super_admin, roles, permissions]
+      properties:
+        id: {type: string, format: uuid}
+        username: {type: string}
+        display_name: {type: string}
+        email: {type: string}
+        super_admin: {type: boolean}
+        roles: {type: array, items: {type: string}}
+        permissions: {type: array, items: {type: string}}
+    AccountSecurity:
+      type: object
+      required: [password_configured, totp_enabled, recovery_codes_remaining]
+      properties:
+        password_configured: {type: boolean}
+        totp_enabled: {type: boolean}
+        recovery_codes_remaining: {type: integer, minimum: 0}
+        totp_verified_at: {type: string, format: date-time}
+    Agent:
+      type: object
+      required: [id, agent_id, hostname, status, version, os_name, architecture, auth_method, policy_version]
+      properties:
+        id: {type: string, format: uuid}
+        agent_id: {type: string, format: uuid}
+        hostname: {type: string}
+        status: {type: string}
+        version: {type: string}
+        os_name: {type: string}
+        architecture: {type: string}
+        auth_method: {type: string}
+        policy_version: {type: string}
+        last_seen_at: {type: string, format: date-time}
+        last_inventory_at: {type: string, format: date-time}
+    Asset:
+      type: object
+      required: [id, asset_key, name, type, status, criticality, environment, owner_department, location, confidence, attributes, custom_fields, source, first_seen_at, last_seen_at]
+      properties:
+        id: {type: string, format: uuid}
+        asset_key: {type: string}
+        name: {type: string}
+        type: {type: string}
+        status: {type: string}
+        criticality: {type: string}
+        environment: {type: string}
+        owner_department: {type: string}
+        location: {type: string}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        attributes: {type: object, additionalProperties: true}
+        custom_fields: {type: object, additionalProperties: true}
+        source: {type: string}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+        deleted_at: {type: string, format: date-time}
+    AssetMutation:
+      type: object
+      properties:
+        asset_key: {type: string, description: Used only when a manual asset is created.}
+        name: {type: string}
+        type: {type: string, description: Required when a manual asset is created; immutable on update.}
+        status: {type: string}
+        criticality: {type: string}
+        environment: {type: string}
+        owner_department: {type: string}
+        location: {type: string}
+        attributes: {type: object, additionalProperties: true}
+        custom_fields: {type: object, additionalProperties: true}
+        reason: {type: string}
+    AssetRelation:
+      type: object
+      required: [id, source_asset_id, relation_type, target_asset_id, valid_from, source, confidence, source_asset, target_asset]
+      properties:
+        id: {type: string, format: uuid}
+        source_asset_id: {type: string, format: uuid}
+        relation_type: {type: string}
+        target_asset_id: {type: string, format: uuid}
+        valid_from: {type: string, format: date-time}
+        source: {type: string}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        source_asset: {$ref: "#/components/schemas/RelationAssetSummary"}
+        target_asset: {$ref: "#/components/schemas/RelationAssetSummary"}
+    RelationAssetSummary:
+      type: object
+      required: [name, type]
+      properties:
+        name: {type: string}
+        type: {type: string}
+    QueryInput:
+      type: object
+      required: [query]
+      properties:
+        query: {type: string}
+        limit: {type: integer, minimum: 1, maximum: 500, default: 100}
+    Setting:
+      type: object
+      required: [key, value, secret, apply_mode, pending, version]
+      properties:
+        key: {type: string}
+        value: {description: JSON setting value; secret values are replaced by a configured/masked marker.}
+        secret: {type: boolean}
+        apply_mode: {type: string, enum: [immediate, restart, migration]}
+        pending: {type: boolean}
+        version: {type: integer, minimum: 1}
+        updated_by: {type: string}
+        updated_at: {type: string, format: date-time}
+    SettingVersion:
+      type: object
+      required: [id, key, version, before, after, reason, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        key: {type: string}
+        version: {type: integer, minimum: 1}
+        before: {description: "Previous JSON value, masked when secret."}
+        after: {description: "New JSON value, masked when secret."}
+        changed_by: {type: string}
+        reason: {type: string}
+        created_at: {type: string, format: date-time}
+    PublicSystemInfo:
+      type: object
+      required: [product, server_version]
+      properties:
+        product: {type: string, const: Invenqor}
+        server_version: {type: string}
+    AdminSystemInfo:
+      allOf:
+        - {$ref: "#/components/schemas/PublicSystemInfo"}
+        - type: object
+          required: [commit, build_time, database_mode, agent_auto_enrollment, agent_enrollment_mode, agent_enrollment_source]
+          properties:
+            commit: {type: string}
+            build_time: {type: string}
+            database_mode: {type: string}
+            listen_address: {type: string}
+            port: {type: integer, minimum: 1, maximum: 65535}
+            agent_auto_enrollment: {type: boolean}
+            agent_enrollment_mode: {type: string, enum: [disabled, open, token]}
+            agent_enrollment_source: {type: string, enum: [database, startup-environment]}
+            agent_enrollment_policy_available: {type: boolean}
+            postgres_startup_failure: {type: object, additionalProperties: true}
+    AssetVisualization:
+      type: object
+      required: [generated_at, window_days, stale_hours, filter, totals, dimensions, matrix, freshness, hierarchy, flow, graph]
+      properties:
+        generated_at: {type: string, format: date-time}
+        window_days: {type: integer}
+        stale_hours: {type: integer}
+        filter: {type: object, additionalProperties: {type: string}}
+        totals:
+          type: object
+          required: [assets, stale, fresh, unowned]
+          properties:
+            assets: {type: integer}
+            stale: {type: integer}
+            fresh: {type: integer}
+            unowned: {type: integer}
+        dimensions: {type: object, additionalProperties: {type: array, items: {type: object}}}
+        matrix: {type: object}
+        freshness: {type: array, items: {type: object}}
+        hierarchy: {type: array, items: {type: object}}
+        flow: {type: array, items: {type: object}}
+        graph:
+          type: object
+          required: [nodes, edges, truncated, total_relations]
+          properties:
+            nodes: {type: array, items: {type: object}}
+            edges: {type: array, items: {type: object}}
+            truncated: {type: boolean}
+            total_relations: {type: integer}
     AgentEnrollmentPolicy:
       type: object
       required: [enabled, mode, token_configured, network_mode, allowed_networks, trusted_proxies, version, updated_at, updated_by, source]
@@ -1258,17 +2537,22 @@ components:
         collection_errors: {type: array, items: {type: object}}
     UpdateManifest:
       type: object
-      required: [version, channel, os, architecture, sha256, signature, download_url, size, rollout_percent]
+      required: [version, channel, os, architecture, sha256, signature, signature_scheme, signature_version, download_url, size, rollout_percent]
       properties:
         version: {type: string}
         channel: {type: string, enum: [stable, beta]}
-        os: {type: string, const: linux}
+        os: {type: string, enum: [linux, windows]}
         architecture: {type: string, enum: [x86_64, aarch64]}
         sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
-        signature: {type: string}
+        signature: {type: string, description: Artifact-only Ed25519 signature retained for pre-v2 bridge upgrades}
+        manifest_signature: {type: string, description: Canonical metadata signature; present and required when signature_version is 2}
+        signature_scheme: {type: string, const: ed25519}
+        signature_version: {type: integer, enum: [1, 2]}
         download_url: {type: string}
         size: {type: integer, minimum: 1, maximum: 134217728}
         rollout_percent: {type: integer, minimum: 0, maximum: 100}
+        allow_downgrade: {type: boolean}
+        notes: {type: string}
     ApiKeyScope:
       type: string
       enum:

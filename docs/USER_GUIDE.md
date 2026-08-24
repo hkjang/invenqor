@@ -3,9 +3,9 @@
   <h1>사용자 가이드</h1>
   <p class="subtitle">Linux·Windows 자산 수집 에이전트의 안전한 설치, 최초 설정, 상태 확인과 일상 사용</p>
   <div class="meta">
-    <p><strong>대상 버전</strong> Agent v0.2.14 · Server v0.2.14</p>
+    <p><strong>대상 버전</strong> Agent v0.2.15 · Server v0.2.15</p>
     <p><strong>문서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-08-21</p>
+    <p><strong>기준일</strong> 2026-08-24</p>
     <p><strong>문서 등급</strong> 공개</p>
   </div>
 </div>
@@ -24,7 +24,7 @@
 3. 서비스 상태, 로그, 수집 결과와 전송 대기열을 확인합니다.
 4. 기본적인 장애를 구분하고 안전하게 제거합니다.
 
-> Invenqor Agent v0.2.14는 Server v0.2.14와 중앙 관리 콘솔을 함께 사용합니다.
+> Invenqor Agent v0.2.15는 Server v0.2.15와 중앙 관리 콘솔을 함께 사용합니다.
 > 서버 설치와 수집 데이터 처리 원칙은 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md)를 참조하십시오.
 
 ## 1. 제품 이해하기
@@ -109,9 +109,14 @@ uname -m
 GitHub 릴리즈 페이지에서 아키텍처에 맞는 `.tar.gz`와 같은 이름의
 `.sha256` 파일을 같은 디렉터리에 받습니다.
 
+폐쇄망에 Linux와 Windows 배포본을 함께 반입하는 관리자는
+`invenqor-agents-0.2.15.tar.gz`와 같은 이름의 `.sha256`을 사용할 수 있습니다.
+묶음을 한 번 검증·해제한 뒤 대상 장비에는 아키텍처에 맞는 개별 패키지와 그
+체크섬만 전달하십시오.
+
 ```bash
-curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz
-curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.14/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.15/invenqor-agent-linux-x86_64.tar.gz
+curl -LO https://github.com/hkjang/invenqor/releases/download/v0.2.15/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 ```
 
@@ -195,7 +200,7 @@ sudo service invenqor-agent status
 /opt/invenqor-agent/bin/invenqor-agent --version
 ```
 
-예상 출력은 `invenqor-agent 0.2.14`입니다.
+예상 출력은 `invenqor-agent 0.2.15`입니다.
 
 ## 4.4 Windows에 설치하기
 
@@ -203,7 +208,7 @@ Windows는 별도 배포본을 사용합니다. `invenqor-agent-windows-x86_64.z
 체크섬을 확인하고, 압축을 푼 뒤 **관리자 권한 PowerShell**에서 설치합니다.
 
 ```powershell
-$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.14'
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.15'
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile invenqor-agent-windows-x86_64.zip
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile invenqor-agent-windows-x86_64.zip.sha256
 (Get-FileHash invenqor-agent-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
@@ -220,6 +225,7 @@ Set-Location invenqor-agent-windows-x86_64
 | `%ProgramFiles%\Invenqor\invenqor-agent.exe` | 실행 파일 |
 | `%ProgramData%\Invenqor\config.toml` | 설정 파일 |
 | `%ProgramData%\Invenqor\state\` | 식별자와 미전송 큐 |
+| `%ProgramData%\Invenqor\service-name` | Installer가 관리하는 Windows 서비스명 |
 
 Server 주소를 설정하고 재시작합니다. TOML의 작은따옴표 문자열은 이스케이프가
 필요 없으므로 Windows 경로를 그대로 적을 수 있습니다.
@@ -251,6 +257,12 @@ Windows 서비스에는 표준 오류를 볼 콘솔이 없으므로 Agent가
 `--config` 값만 위의 경로로 바꿔 같은 방식으로 사용하십시오. 서비스 제어는
 `Restart-Service` / `Stop-Service` / `Start-Service`를 사용합니다.
 
+기본 서비스명은 `invenqor-agent`입니다. 조직 표준에 따라 다른 이름을 써야 할 때만
+`install.ps1 -ServiceName 'Invenqor Agent Finance'`로 설치하고 이후 업그레이드에도
+같은 값을 사용하십시오. Agent는 보호된 `service-name` 파일에서 이를 자동 복구하므로
+일반 `--diagnose` 명령에 이름을 반복할 필요가 없습니다. 파일을 직접 고치면 진단과
+자동 업데이트 재시작이 실제 SCM 서비스와 달라질 수 있습니다.
+
 ## 5. 최초 설정
 
 설정 파일은 TOML 형식이며 알 수 없는 키가 있으면 실행을 거부합니다. 수정 전에
@@ -273,6 +285,12 @@ timeout_seconds = 30
 기본 Server에서는 URL만 설정하면 Agent가 최초 전송 전에 자동 등록하고 장비
 전용 Token을 상태 디렉터리에 `0600`으로 저장합니다. 이후 설정 파일에 장비별
 `bearer_token`을 복사할 필요가 없습니다.
+
+`url`에는 scheme, host와 선택적 port만 입력합니다. `/api`, `/v1/agent` 같은 path,
+query, fragment, `user:password@` 형식의 인증정보를 붙이면 Agent가 기동 단계에서
+거부합니다. 외부 Ingress가 `https://inventory.example.internal`을 받아 내부
+Server `7070`으로 전달한다면 외부 HTTPS origin만 입력하고 `:7070`을 덧붙이지
+않습니다.
 
 인터넷 또는 신뢰하지 않는 망에서 Server 7070에 접근할 수 있다면 관리자가
 enrollment token 보호 모드를 사용할 수 있습니다. 이 경우에만 다음 항목을
@@ -342,7 +360,7 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.14 registration diagnosis at 2026-08-21T09:12:44Z
+invenqor-agent 0.2.15 registration diagnosis at 2026-08-24T09:12:44Z
   host          app-web-01
   agent-id      d8d847a5-7a75-48bc-8ee8-c8e1af94f74c
   config        /etc/invenqor-agent/config.toml
@@ -356,7 +374,7 @@ invenqor-agent 0.2.14 registration diagnosis at 2026-08-21T09:12:44Z
   [PASS] transport encryption          HTTPS is configured
   [PASS] name resolution               inventory.example resolves to 10.10.4.20:7070
   [PASS] server reachability           GET /health/ready answered READY
-  [PASS] server identity               Invenqor Server 0.2.14 (pod invenqor-0, database POSTGRES)
+  [PASS] server identity               Invenqor Server 0.2.15 (pod invenqor-0, database POSTGRES)
   [PASS] observed source address       the Server sees this host as 10.20.7.31
   [PASS] registration policy           mode open, network any: this host may register
   [PASS] device credential             accepted by the Server as agent d8d847a5… (auto_bearer)
@@ -450,13 +468,13 @@ sudo -u invenqor-agent \
 ```
 
 ```text
-invenqor-agent 0.2.14 on app-web-01
-  updated       2026-08-21T09:14:02Z
+invenqor-agent 0.2.15 on app-web-01
+  updated       2026-08-24T09:14:02Z
   server.url    https://inventory.example:7070
   registration  failed (the Server rejected or could not be reached for registration)
   queue         3 event(s), 41231 of 104857600 bytes
   delivered     0 event(s), last success never
-  last error    AGENT_SOURCE_NOT_ALLOWED during automatic enrollment at 2026-08-21T09:14:02Z
+  last error    AGENT_SOURCE_NOT_ALLOWED during automatic enrollment at 2026-08-24T09:14:02Z
                 The Agent source IP is not permitted by the enrollment policy.
                 server request_id invenqor-0/abc-000123
                 fix: The Server registration allowlist rejects this host's source IP…
@@ -569,9 +587,9 @@ grep -n '^\s*url' /etc/invenqor-agent/config.toml
 
 첫 inventory 시각은 있는데 운영체제만 비어 있다면 먼저 Server가 v0.2.14 이상인지
 확인하십시오. 이전 버전 Server는 Windows가 전송한 최상위 `os_name`을 읽지
-못했습니다. v0.2.14 Server는 기존 Agent 형식과 새 `os_release` 호환 형식을 모두
+못했습니다. v0.2.14 이상 Server는 기존 Agent 형식과 새 `os_release` 호환 형식을 모두
 이해하고, 이미 저장된 기존 `system` 원천도 다음 heartbeat에서 다시 투영합니다.
-따라서 Agent를 먼저 올리지 않아도 자동 복구되며, Agent v0.2.14로 순차 업데이트하면
+따라서 Agent를 먼저 올리지 않아도 자동 복구되며, Agent v0.2.15로 순차 업데이트하면
 구 Server와의 양방향 wire 호환도 확보됩니다. `%ProgramData%\Invenqor\state`를
 삭제하거나 Agent를 재등록하지 마십시오.
 
@@ -695,11 +713,16 @@ sudo ./scripts/uninstall.sh
 ### 자동 업데이트나 원격 명령을 지원합니까?
 
 서명된 Agent 자동 업데이트는 선택적으로 지원합니다. 관리자가 승인·서명한
-새 버전만 다운로드하고 SHA-256, 크기, OS/Architecture와 고정 Ed25519 공개키를
-검증한 뒤 스테이징합니다. 설치 직전에 새 바이너리를 실행해 버전을 확인하므로
-실행되지 않는 빌드는 설치되지 않고 기존 바이너리가 유지됩니다. 교체는 원자적이며
+새 버전만 다운로드하고 SHA-256, 크기, version/channel/OS/Architecture와 rollback
+의도를 함께 보호하는 Ed25519 manifest v2 서명을 고정 공개키로 검증한 뒤
+스테이징합니다. 설치 직전에 새 바이너리를 제한된 시간·출력 범위에서 실행해
+버전을 확인하므로 실행되지 않는 빌드는 설치되지 않고 기존 바이너리가 유지됩니다.
+교체는 원자적이며
 이전 바이너리를 `.previous`로 보존합니다. systemd는 즉시, OpenRC와 SysV는 서비스
-시작 시 적용합니다. 한 대를 지금 갱신하려면 `--update-now`를 실행하고, 현재 실행
+시작 시 적용합니다. Windows service는 LocalSystem 권한으로 검증된 파일을 자동
+교체하고 SCM recovery 동작으로 새 버전을 재시작합니다. `Content-Length`가 없는
+Ingress 응답도 manifest 크기를 넘지 않는 범위에서 안전하게 받을 수 있습니다.
+한 대를 지금 갱신하려면 `--update-now`를 실행하고, 현재 실행
 버전과 대기 중인 버전은 `--status`로 확인합니다. 설정 방법은
 [Server 설치 및 운영 가이드](SERVER_INSTALLATION.md#8-서명된-agent-자동-업데이트)를
 참조하십시오. 원격 셸이나 임의 명령 실행은 지원하지 않습니다.
@@ -772,7 +795,7 @@ URL은 접근 가능한 첫 화면으로 안전하게 복구됩니다.
 
 신뢰도 80% 이상은 **높음**, 미만은 **검토 권장**입니다. 이는 보안 위험도가 아니라
 제품 식별 근거의 강도입니다. 상세 화면의 서비스·프로세스·패키지와 원천 ID를
-확인해 판단하십시오. v0.2.14 내장 카탈로그는 인프라와 보안 제품에 더해
+확인해 판단하십시오. v0.2.15 내장 카탈로그는 인프라와 보안 제품에 더해
 Office/Microsoft 365, Chrome·Edge·Firefox, Teams·Zoom, Java·.NET,
 MECM·Tanium·BigFix, Elastic Agent·Wazuh 등 51개 주요 제품을 식별합니다.
 카탈로그에 없는 일반 프로세스는 제품으로 추측하지 않으므로,
@@ -786,4 +809,4 @@ Chrome·Java처럼 범용 process 단독 신호는 오탐 방지를 위해 제�
 
 <p class="small">문서 오류 및 제품 문의:
 <a href="https://github.com/hkjang/invenqor">GitHub 저장소</a> ·
-보안 취약점 보고 절차: <a href="https://github.com/hkjang/invenqor/blob/v0.2.14/SECURITY.md">SECURITY.md</a></p>
+보안 취약점 보고 절차: <a href="https://github.com/hkjang/invenqor/blob/v0.2.15/SECURITY.md">SECURITY.md</a></p>

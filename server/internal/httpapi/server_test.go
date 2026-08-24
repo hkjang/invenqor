@@ -220,7 +220,7 @@ func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
 	defer runtime.Close()
 	server := testServer(t, runtime)
 
-	for _, path := range []string{"/health/live", "/health/ready", "/health/database"} {
+	for _, path := range []string{"/health/live", "/health/ready"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
 		server.Handler().ServeHTTP(response, request)
@@ -229,9 +229,23 @@ func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
 		}
 	}
 
+	unauthenticated := httptest.NewRequest(http.MethodGet, "/health/database", nil)
+	unauthenticatedResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthenticatedResponse, unauthenticated)
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"unauthenticated database health status = %d, want 401",
+			unauthenticatedResponse.Code,
+		)
+	}
+	adminCookie, _ := authenticateInitialAdmin(t, server, runtime)
 	request := httptest.NewRequest(http.MethodGet, "/health/database", nil)
+	request.AddCookie(adminCookie)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("database health status = %d body = %s", response.Code, response.Body.String())
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response error = %v", err)
@@ -241,25 +255,94 @@ func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
 	}
 }
 
-func TestDatabaseHealthDoesNotExposePostgresPassword(t *testing.T) {
+func TestPublicSystemInfoDoesNotExposeAdministrativeRuntimeDetails(t *testing.T) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	server := testServer(t, runtime)
+
+	public := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		public,
+		httptest.NewRequest(http.MethodGet, "/api/v1/system/info", nil),
+	)
+	var publicPayload map[string]any
+	if public.Code != http.StatusOK ||
+		json.Unmarshal(public.Body.Bytes(), &publicPayload) != nil {
+		t.Fatalf("public system info = %d/%s", public.Code, public.Body.String())
+	}
+	publicVersion, versionPresent := publicPayload["server_version"].(string)
+	if !versionPresent || publicVersion == "" || publicPayload["database_mode"] != nil ||
+		publicPayload["listen_address"] != nil || publicPayload["agent_enrollment_mode"] != nil {
+		t.Fatalf("public system info exposed administrative details: %#v", publicPayload)
+	}
+	var accessLogs int
+	if err := runtime.DB().QueryRow(
+		`SELECT COUNT(*) FROM diagnostic_logs
+		  WHERE event_code='HTTP_REQUEST' AND details_json LIKE '%/api/v1/system/info%'`,
+	).Scan(&accessLogs); err != nil || accessLogs != 1 {
+		t.Fatalf("persisted public system access logs = %d/%v, want 1", accessLogs, err)
+	}
+
+	adminCookie, _ := authenticateInitialAdmin(t, server, runtime)
+	adminRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/system/info", nil)
+	adminRequest.AddCookie(adminCookie)
+	admin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(admin, adminRequest)
+	var adminPayload map[string]any
+	if admin.Code != http.StatusOK ||
+		json.Unmarshal(admin.Body.Bytes(), &adminPayload) != nil {
+		t.Fatalf("admin system info = %d/%s", admin.Code, admin.Body.String())
+	}
+	if adminPayload["database_mode"] != string(storage.ModeSQLiteFallback) ||
+		adminPayload["agent_enrollment_mode"] == nil {
+		t.Fatalf("admin system info omitted runtime details: %#v", adminPayload)
+	}
+}
+
+func TestRequestLogRetentionSkipsNoiseButKeepsFailures(t *testing.T) {
+	tests := []struct {
+		path   string
+		status int
+		want   bool
+	}{
+		{"/health/live", http.StatusOK, false},
+		{"/health/ready", http.StatusOK, false},
+		{"/assets/index.js", http.StatusOK, false},
+		{"/", http.StatusOK, false},
+		{"/api/v1/assets", http.StatusOK, true},
+		{"/v1/agent/events", http.StatusAccepted, true},
+		{"/health/live", http.StatusServiceUnavailable, true},
+		{"/assets/missing.js", http.StatusNotFound, true},
+	}
+	for _, test := range tests {
+		if got := shouldPersistRequestLog(test.path, test.status); got != test.want {
+			t.Errorf("shouldPersistRequestLog(%q, %d) = %t, want %t", test.path, test.status, got, test.want)
+		}
+	}
+}
+
+func TestExplicitInvalidPostgresDSNFailsClosedWithoutExposingPassword(t *testing.T) {
 	secret := "do-not-expose-this"
 	runtime, err := storage.Open(context.Background(), storage.Options{
 		PostgresDSN: "postgres://user:" + secret + "@%zz/invenqor",
 		SQLitePath:  filepath.Join(t.TempDir(), "invenqor.db"),
 	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
+	if runtime != nil || err == nil {
+		if runtime != nil {
+			_ = runtime.Close()
+		}
+		t.Fatalf("storage.Open() = %#v, %v, want fail-closed error", runtime, err)
 	}
-	defer runtime.Close()
-	server := testServer(t, runtime)
-	request := httptest.NewRequest(http.MethodGet, "/health/database", nil)
-	response := httptest.NewRecorder()
-	server.Handler().ServeHTTP(response, request)
-	if strings.Contains(response.Body.String(), secret) {
-		t.Fatal("database health response exposed the PostgreSQL password")
+	if strings.Contains(err.Error(), secret) {
+		t.Fatal("database startup error exposed the PostgreSQL password")
 	}
-	if !strings.Contains(response.Body.String(), "INVALID_DSN") {
-		t.Fatalf("database health response = %s, want INVALID_DSN", response.Body.String())
+	if !strings.Contains(err.Error(), "INVALID_DSN") {
+		t.Fatalf("database startup error = %s, want INVALID_DSN", err)
 	}
 }
 

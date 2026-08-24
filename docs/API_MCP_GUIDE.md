@@ -1,6 +1,6 @@
 # Invenqor 자산 API·MCP·키 관리 가이드
 
-대상 Server 버전: v0.2.14 · 기준일: 2026-08-21
+대상 Server 버전: v0.2.15 · 기준일: 2026-08-24
 
 ## 1. 목적과 설계 원칙
 
@@ -16,10 +16,13 @@ REST API와 MCP(Model Context Protocol)를 Server의 단일 HTTPS TCP `7070`에�
 - 읽기·변경 권한을 분리하고 MCP는 현재 읽기 전용 자산 도구만 제공합니다.
 - MCP 처리는 stateless이므로 Kubernetes의 어느 Server Pod로 요청해도 됩니다.
 
-MCP 구현은 안정 규격 `2025-11-25`의 JSON-RPC 2.0과 Streamable HTTP를
-기준으로 합니다. Server가 client session ID를 발급하지 않는 stateless 방식이라
-sticky session이 필요 없습니다. 공식 전송 규격이 요구하는 Origin 검증을 적용하고,
-SSE가 필요 없는 현재 도구 집합은 POST JSON 응답을 사용합니다.
+MCP 구현은 최신 안정 규격 `2026-07-28`의 무상태 JSON-RPC 2.0과 Streamable
+HTTP를 기본으로 하고, 기존 연계의 무중단 업그레이드를 위해 `2025-11-25`
+initialize 방식도 같은 URL에서 지원합니다. 최신 방식은 handshake와 protocol
+session ID가 없고 모든 요청이 버전·client capability를 자체 포함하므로 sticky
+session이나 Pod별 session 저장소가 필요 없습니다. 공식 전송 규격의 Origin 검증과
+헤더/본문 일치 검증을 적용하고, SSE가 필요 없는 현재 도구 집합은 POST JSON
+응답을 사용합니다.
 
 Agent 자동 등록의 운영 API도 같은 Session+CSRF 경계에 있습니다. 관리자는
 `/api/v1/admin/settings/agent-enrollment`에서 URL-only Open, Token 보호,
@@ -33,11 +36,12 @@ Keycloak은 `/api/v1/admin/settings/keycloak/auto-configure`에 Keycloak URL,
 Realm, Client ID, Client Secret과 InvenQor 외부 URL을 보내면 Discovery/TLS
 검증, Callback/Logout URI와 표준 claim 구성을 거쳐 활성화할 수 있습니다.
 
-멀티 Pod 진단은 `GET /api/v1/admin/diagnostics/logs`에서 공용 DB의 제한된
-warning/error와 Agent 등록 이벤트를 조회합니다. `audit.read`가 필요하고
-`level`, `component`, `instance_id`, `q`, `limit` 필터를 지원합니다. Agent
-응답과 로그의 `request_id`를 `q`로 검색하면 처리 Pod와 실패 단계를 연결할 수
-있습니다. Secret과 원문 인벤토리는 저장하지 않습니다.
+멀티 Pod 진단은 `GET /api/v1/admin/diagnostics/logs`에서 공용 DB의 구조화
+API·Agent access log와 warning/error, Agent 등록 이벤트를 조회합니다.
+정상 health probe와 정적 UI asset은 제외하고 모든 실패 응답은 기록합니다.
+`audit.read`가 필요하며 `level`, `component`, `instance_id`, `q`, `limit` 필터를
+지원합니다. Agent 응답과 로그의 `request_id`를 `q`로 검색하면 처리 Pod와 실패
+단계를 연결할 수 있습니다. Secret과 원문 인벤토리는 저장하지 않습니다.
 
 주요 소프트웨어는 Agent가 수집한 process·service·software.package 원천을
 Server 내장 카탈로그로 host별 정규화한 `software_product` 자산입니다. 제품명만
@@ -129,7 +133,10 @@ curl -X DELETE -b cookies.txt -H "X-CSRF-Token: $CSRF" \
 ```
 
 변경은 DB에서 직접 검증하므로 별도 cache 만료를 기다리지 않고 다음 요청부터
-모든 Server Pod에 적용됩니다.
+모든 Server Pod에 적용됩니다. scope 추가·삭제·전체 교체는 DB의 현재 revision을
+조건으로 한 원자 변경이어서 두 Pod가 동시에 수정해도 한쪽 변경이 조용히
+덮어써지지 않습니다. 경쟁이 반복되면 HTTP `409 API_KEY_CONFLICT`를 반환하므로
+키 상세를 새로 읽고 의도한 scope를 다시 적용하십시오.
 
 ### 3.3 무중단 회전과 폐기
 
@@ -142,7 +149,10 @@ curl -b cookies.txt -H "X-CSRF-Token: $CSRF" \
 
 새 `secret`을 소비자에 배포하고 1시간 안에 구 키를 제거합니다. 유예는
 0~604800초(7일)이며 0이면 구 키가 즉시 무효화됩니다. Scope는 논리 Key에
-연결되므로 구·신 키 모두 최신 scope 변경을 즉시 따릅니다.
+연결되므로 구·신 키 모두 최신 scope 변경을 즉시 따릅니다. 여러 Pod에서 같은
+키를 동시에 회전하면 먼저 반영된 새 Secret만 반환되고 stale 요청은
+`409 API_KEY_CONFLICT`로 끝나므로, 사용할 수 없는 Secret이 성공 응답으로
+노출되지 않습니다.
 
 ```bash
 curl -X DELETE -b cookies.txt -H "X-CSRF-Token: $CSRF" \
@@ -267,7 +277,55 @@ https://invenqor.example.com:7070/mcp
 }
 ```
 
-초기화 확인:
+### 5.1 최신 `2026-07-28` 무상태 연결
+
+최신 client는 initialize 없이 `server/discover`로 Server capability를 확인하거나
+바로 도구를 호출합니다. 모든 POST에는 다음 계약이 적용됩니다.
+
+| 위치 | 값 | 규칙 |
+|---|---|---|
+| Header | `MCP-Protocol-Version: 2026-07-28` | 모든 최신 요청에서 필수 |
+| Header | `Mcp-Method` | JSON-RPC `method`와 정확히 일치 |
+| Header | `Mcp-Name` | `tools/call`에서 필수이며 `params.name`과 일치. `tools/list`, `server/discover`에서는 생략 |
+| `params._meta` | `io.modelcontextprotocol/protocolVersion` | Header와 같은 `2026-07-28` |
+| `params._meta` | `io.modelcontextprotocol/clientCapabilities` | 객체. 기능이 없으면 `{}` |
+| `params._meta` | `io.modelcontextprotocol/clientInfo` | client 이름·버전. 권장 값 |
+
+Gateway는 body를 열지 않고 `Mcp-Method`와 `Mcp-Name`으로 routing·rate limit을
+적용할 수 있습니다. Server는 Header가 없거나 body와 다르면 HTTP 400과 JSON-RPC
+`-32020`을 반환해 잘못 라우팅된 요청을 실행하지 않습니다.
+
+Capability 탐색 예:
+
+```bash
+curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: server/discover' \
+  -d '{
+    "jsonrpc":"2.0","id":1,"method":"server/discover",
+    "params":{"_meta":{
+      "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities":{},
+      "io.modelcontextprotocol/clientInfo":{
+        "name":"asset-assistant","version":"1.0"
+      }
+    }}
+  }' \
+  https://invenqor.example.com:7070/mcp
+```
+
+응답의 `supportedVersions`는 `2026-07-28`이며, 모든 최신 성공 결과는
+`resultType: complete`와
+`_meta.io.modelcontextprotocol/serverInfo`를 포함합니다. `server/discover`와
+`tools/list`는 scope별 결과가 사용자 간 공유되지 않도록 `ttlMs: 0`,
+`cacheScope: private`을 반환합니다.
+
+### 5.2 기존 `2025-11-25` client 호환
+
+기존 client는 이전과 같이 initialize를 사용합니다. Server는 `2025-11-25`로
+협상하고 후속 요청을 처리하므로 기존 설정을 즉시 바꿀 필요는 없습니다.
 
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
@@ -284,6 +342,9 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
   https://invenqor.example.com:7070/mcp
 ```
 
+새 연계는 멀티 Pod 단순성, 표준 Gateway routing과 향후 SDK 호환성을 위해
+`2026-07-28`을 사용하십시오.
+
 ## 6. 제공 MCP 도구
 
 | 도구 | Scope | 입력 | 결과 |
@@ -297,7 +358,8 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 도구 목록은 고정된 결정적 순서이며 키에 없는 scope의 도구는 아예 노출하지
 않습니다. 결과는 MCP 호환 text content와 typed `structuredContent`를 함께
 제공합니다. 자산의 이름·속성·사용자 입력은 신뢰할 수 없는 데이터이며 AI에 대한
-명령으로 해석해서는 안 된다는 지침도 initialize 응답에 포함됩니다.
+명령으로 해석해서는 안 된다는 지침도 최신 `server/discover`와 기존 initialize
+응답에 포함됩니다.
 
 `software_inventory`의 `runtime_state`는 `running|stopped|unknown`, `confidence`는
 `high|review`이며 `limit`는 기본 50, 최대 100입니다. 범용 `asset_search`는
@@ -308,9 +370,21 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
   -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: asset_search' \
   -d '{
     "jsonrpc":"2.0","id":2,"method":"tools/call",
-    "params":{"name":"asset_search","arguments":{"type":"host","limit":20}}
+    "params":{
+      "name":"asset_search","arguments":{"type":"host","limit":20},
+      "_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{},
+        "io.modelcontextprotocol/clientInfo":{
+          "name":"asset-assistant","version":"1.0"
+        }
+      }
+    }
   }' \
   https://invenqor.example.com:7070/mcp
 ```
@@ -320,11 +394,23 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
   -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: software_inventory' \
   -d '{
     "jsonrpc":"2.0","id":3,"method":"tools/call",
-    "params":{"name":"software_inventory","arguments":{
-      "runtime_state":"running","confidence":"high","limit":50
-    }}
+    "params":{
+      "name":"software_inventory","arguments":{
+        "runtime_state":"running","confidence":"high","limit":50
+      },
+      "_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{},
+        "io.modelcontextprotocol/clientInfo":{
+          "name":"asset-assistant","version":"1.0"
+        }
+      }
+    }
   }' \
   https://invenqor.example.com:7070/mcp
 ```
@@ -347,8 +433,10 @@ MCP는 임의 SQL, shell, 원격 명령, 자산 변경 도구를 제공하지 �
   평문으로 내보내지 않습니다.
 
 멀티 파드에서 키·scope·회전 상태는 PostgreSQL을 단일 원장으로 사용합니다.
-Pod별 메모리 session이나 sticky routing을 요구하지 않으므로 rolling update
-중에도 같은 MCP client가 어느 Pod로든 요청할 수 있습니다.
+최신 MCP 요청은 protocol version과 client capability가 매 요청의 `_meta`에 있고
+Server는 `Mcp-Session-Id`를 발급하지 않습니다. Pod별 메모리 session이나 sticky
+routing을 요구하지 않으므로 rolling update 중에도 같은 MCP client가 어느 Pod로든
+요청할 수 있습니다.
 
 ## 8. 장애 코드
 
@@ -358,13 +446,20 @@ Pod별 메모리 session이나 sticky routing을 요구하지 않으므로 rolli
 | 403 | `FORBIDDEN` | 필요한 scope 추가 또는 별도 Key 발급 |
 | 403 | `MCP_ORIGIN_REJECTED` | Proxy Host/Origin 전달 정책 확인 |
 | 403 | `SCOPE_ESCALATION` | 관리자의 RBAC 권한 범위 안에서만 위임 |
+| 409 | `API_KEY_CONFLICT` | 키 상세를 새로 읽고 동시 scope 변경 또는 회전을 재시도 |
 | 429 | `API_RATE_LIMITED` | 호출 빈도 감소, Gateway 정책 확인 |
+| 400 | JSON-RPC `-32020` | 최신 요청의 protocol/method/name Header와 body 값을 일치시킴 |
+| 400 | JSON-RPC `-32602` | 요청별 `_meta`에 `clientCapabilities` 객체를 포함하고 metadata 형식을 확인 |
+| 200 | JSON-RPC `-32602` | 도구 이름·입력 형식을 확인 |
+| 400 | JSON-RPC `-32022` | 오류 data의 지원 버전 목록에 맞춰 protocol version을 재선택 |
 
 MCP protocol 오류는 JSON-RPC error로, 도구 입력·실행 오류는 `isError: true`
 tool result로 반환해 AI client가 안전하게 수정 요청을 만들 수 있게 합니다.
 
 ## 9. 참고 규격
 
+- [MCP 2026-07-28 릴리즈](https://blog.modelcontextprotocol.io/posts/2026-07-28/)
+- [Stateless MCP와 버전 협상](https://modelcontextprotocol.io/seps/2575-stateless-mcp)
+- [HTTP Header 표준화](https://modelcontextprotocol.io/seps/2243-http-standardization)
+- [List 결과 Cache Hint](https://modelcontextprotocol.io/seps/2549-TTL-for-list-results)
 - [MCP 2025-11-25 Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-- [MCP Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
-- [MCP Schema Reference](https://modelcontextprotocol.io/specification/2025-11-25/schema)

@@ -14,9 +14,13 @@ case "$TARGET" in
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+OUTPUT_DIR=${OUTPUT_DIR:-$ROOT}
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
 PACKAGE="$STAGE/invenqor-agent-linux-$ARCH"
+
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR=$(CDPATH= cd -- "$OUTPUT_DIR" && pwd)
 
 mkdir -p "$PACKAGE/bin" "$PACKAGE/config" "$PACKAGE/scripts" "$PACKAGE/service"
 install -m 0755 "$ROOT/$TARGET_DIR/$TARGET/release/invenqor-agent" "$PACKAGE/bin/"
@@ -32,8 +36,8 @@ install -m 0644 "$ROOT/README.md" "$PACKAGE/"
 
 tar -C "$STAGE" --sort=name --mtime="@${SOURCE_DATE_EPOCH:-0}" \
     --owner=0 --group=0 --numeric-owner -czf \
-    "$ROOT/invenqor-agent-linux-$ARCH.tar.gz" "invenqor-agent-linux-$ARCH"
+    "$OUTPUT_DIR/invenqor-agent-linux-$ARCH.tar.gz" "invenqor-agent-linux-$ARCH"
 ARCHIVE="invenqor-agent-linux-$ARCH.tar.gz"
-(cd "$ROOT" && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
-echo "$ROOT/$ARCHIVE"
-echo "$ROOT/$ARCHIVE.sha256"
+(cd "$OUTPUT_DIR" && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
+echo "$OUTPUT_DIR/$ARCHIVE"
+echo "$OUTPUT_DIR/$ARCHIVE.sha256"

@@ -5,6 +5,20 @@ report_failure() {
   status=$?
   line=$1
   echo "E2E FAIL: command at line $line exited with status $status" >&2
+  if [[ -n "${work:-}" && -f "$work/windows-event-response.json" ]]; then
+    echo "E2E Windows ingest response (including request_id when provided):" >&2
+    sed -n '1,80p' "$work/windows-event-response.json" >&2
+  fi
+  if [[ -n "${server:-}" ]] && docker inspect "$server" >/dev/null 2>&1; then
+    echo "E2E Server log tail:" >&2
+    docker logs --tail 160 "$server" >&2 || true
+  fi
+  if [[ -n "${packaged_client:-}" ]] && docker inspect "$packaged_client" >/dev/null 2>&1; then
+    echo "E2E packaged Agent systemd status:" >&2
+    docker exec "$packaged_client" systemctl --no-pager status invenqor-agent.service >&2 || true
+    echo "E2E packaged Agent journal tail:" >&2
+    docker exec "$packaged_client" journalctl --no-pager -u invenqor-agent.service -n 160 >&2 || true
+  fi
   exit "$status"
 }
 trap 'report_failure "$LINENO"' ERR
@@ -17,6 +31,8 @@ server="invenqor-e2e-server-$suffix"
 client="invenqor-e2e-agent-$suffix"
 update_client="invenqor-e2e-agent-update-$suffix"
 bootstrap_client="invenqor-e2e-agent-bootstrap-$suffix"
+packaged_client="invenqor-e2e-agent-packaged-$suffix"
+packaged_hostname="invenqor-packaged-$suffix"
 state_volume="invenqor-e2e-state-$suffix"
 pg_volume="invenqor-e2e-pg-$suffix"
 agent_volume="invenqor-e2e-agent-state-$suffix"
@@ -24,7 +40,8 @@ port=${INVENQOR_E2E_PORT:-18091}
 work=$(mktemp -d)
 
 cleanup() {
-  docker rm -f "$client" "$update_client" "$bootstrap_client" "$server" "$postgres" >/dev/null 2>&1 || true
+  docker rm -f "$client" "$update_client" "$bootstrap_client" "$packaged_client" \
+    "$server" "$postgres" >/dev/null 2>&1 || true
   docker volume rm "$state_volume" "$pg_volume" "$agent_volume" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -143,14 +160,19 @@ jq -n \
     changes: [],
     collection_errors: []
   }' > "$work/windows-event.json"
-curl -fsS -H "Authorization: Bearer $windows_token" \
+windows_event_status=$(curl -sS -o "$work/windows-event-response.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $windows_token" \
   -H "X-Invenqor-Agent-Id: $windows_agent_id" \
   -H "X-Invenqor-Event-Id: $windows_event_id" \
-  -H 'User-Agent: invenqor-agent/0.2.14' \
+  -H 'User-Agent: invenqor-agent/0.2.15' \
   -H 'Content-Type: application/json' \
   --data-binary "@$work/windows-event.json" \
-  "http://127.0.0.1:$port/v1/agent/events" |
-  jq -e '.accepted == true' >/dev/null
+  "http://127.0.0.1:$port/v1/agent/events")
+if [[ ! "$windows_event_status" =~ ^2[0-9][0-9]$ ]]; then
+  echo "Windows inventory ingest returned HTTP $windows_event_status" >&2
+  false
+fi
+jq -e '.accepted == true' "$work/windows-event-response.json" >/dev/null
 curl -fsS -b "$work/cookies" \
   "http://127.0.0.1:$port/api/v1/admin/agents" |
   jq -e --arg id "$windows_agent_id" \
@@ -210,33 +232,38 @@ jq -e '.totals.succeeded >= 1 and
 docker volume create "$agent_volume" >/dev/null
 mkdir -p "$work/config"
 
-openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
-  -in "$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -out "$work/update.sig"
+"$root/scripts/sign-agent-update-manifest-v2.py" \
+  --artifact "$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
+  --private-key "$work/update-private.pem" \
+  --version 99.0.0 --channel stable --os linux --architecture x86_64 \
+  > "$work/update-signature.json"
 
-# A signature over the wrong bytes must be refused when it is published, not
-# discovered later by every agent in the fleet.
-openssl pkeyutl -sign -rawin -inkey "$work/update-private.pem" \
-  -in "$work/token" -out "$work/wrong.sig"
+# A v2 signature whose bound artifact size and digest belong to another file
+# must be refused when it is published, not discovered by every fleet Agent.
+"$root/scripts/sign-agent-update-manifest-v2.py" \
+  --artifact "$work/token" --private-key "$work/update-private.pem" \
+  --version 99.0.0 --channel stable --os linux --architecture x86_64 \
+  > "$work/wrong-signature.json"
 rejected_publish=$(curl -sS -o "$work/rejected-publish.json" -w '%{http_code}' \
   -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -F version=99.0.0 -F architecture=x86_64 \
-  -F "signature_file=@$work/wrong.sig" -F rollout_percent=100 \
+  -F "signature_bundle_file=@$work/wrong-signature.json;type=application/json" \
+  -F rollout_percent=100 \
   "http://127.0.0.1:$port/api/v1/admin/agent-updates")
 test "$rejected_publish" = 400
 jq -e '.error.code == "UPDATE_SIGNATURE_REJECTED"' "$work/rejected-publish.json" >/dev/null
 
-# The raw .sig file openssl produced is accepted as-is, and a canary rollout
-# starts small.
+# One offline bundle carries both the legacy bridge signature and authenticated
+# v2 manifest signature, and a canary rollout starts small.
 curl -fsS -b "$work/cookies" -H "X-CSRF-Token: $csrf" \
   -F "artifact=@$root/target-x86_64/x86_64-unknown-linux-musl/release/invenqor-agent" \
-  -F version=99.0.0 -F channel=stable -F architecture=x86_64 \
-  -F "signature_file=@$work/update.sig" -F rollout_percent=10 \
+  -F "signature_bundle_file=@$work/update-signature.json;type=application/json" \
+  -F rollout_percent=10 \
   -F "notes=e2e canary" \
   "http://127.0.0.1:$port/api/v1/admin/agent-updates" \
   > "$work/update-manifest.json"
 jq -e '.version == "99.0.0" and .size > 0 and .signature_verified == true and
+       .signature_scheme == "ed25519" and .signature_version == 2 and
        .rollout_percent == 10' "$work/update-manifest.json" >/dev/null
 
 # Rollout is widened without re-uploading, and the listing reports progress.
@@ -394,7 +421,8 @@ jq -e '.records | length > 0' "$work/recovery-snapshot.json" >/dev/null
 device_credential_after=$(docker run --rm -v "$agent_volume:/state:ro" alpine:3.22 \
   sha256sum /state/device-credential.json | awk '{print $1}')
 test "$device_credential_before" != "$device_credential_after"
-curl -fsS "http://127.0.0.1:$port/api/v1/system/info" |
+curl -fsS -b "$work/cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/system/info" |
   jq -e '.agent_auto_enrollment == true and .agent_enrollment_mode == "open"
     and .port == 7070 and .listen_address == "0.0.0.0:7070"' >/dev/null
 curl -fsS -b "$work/cookies" \
@@ -422,10 +450,21 @@ run_enterprise_client() {
     > "$config_dir/snapshot.json"
   docker rm "$bootstrap_name" >/dev/null
   jq -e '.records | length > 0' "$config_dir/snapshot.json" >/dev/null
+  jq -e '[.records | group_by(.asset_id)[] | select(length > 1)] | length == 0' \
+    "$config_dir/snapshot.json" >/dev/null
+  if [ "$label" = rhel9 ]; then
+    # The minimal UBI image intentionally has no init/service manager. The
+    # collector must degrade in isolation and explain that one unsupported
+    # capability while every other collector and delivery continues.
+    jq -e '.errors == [{"collector":"services","message":"unsupported on this host"}]' \
+      "$config_dir/snapshot.json" >/dev/null
+  else
+    jq -e '.errors | length == 0' "$config_dir/snapshot.json" >/dev/null
+  fi
   docker run --rm -v "$volume:/state:ro" alpine:3.22 \
     sh -c 'test -s /state/device-credential.json && test -s /state/enrollment-claim.json'
   docker volume rm "$volume" >/dev/null
-  echo "E2E PASS: $label"
+  echo "E2E PASS: $label (unique asset IDs; expected collector status)"
 }
 
 run_enterprise_client "invenqor-agent:e2e-centos7" "centos7"
@@ -433,5 +472,123 @@ run_enterprise_client "invenqor-agent:e2e-rhel8" "rhel8"
 run_enterprise_client "invenqor-agent:e2e-rhel9" "rhel9"
 run_enterprise_client "invenqor-agent:e2e-ubuntu2204" "ubuntu2204"
 run_enterprise_client "invenqor-agent:e2e-ubuntu2404" "ubuntu2404"
+
+# Exercise the artifact operators actually receive, its installer and the
+# systemd unit. Directly running the static executable above catches collector
+# portability; this additionally catches archive layout, ownership, service
+# hardening and URL-only enrollment regressions.
+run_packaged_systemd_client() {
+  package_output="$work/packages"
+  package_archive="$package_output/invenqor-agent-linux-x86_64.tar.gz"
+  package_root=/tmp/invenqor-agent-linux-x86_64
+  status_file="$work/packaged-agent-status.json"
+  diagnose_file="$work/packaged-agent-diagnose.txt"
+
+  mkdir -p "$package_output"
+  OUTPUT_DIR="$package_output" \
+    "$root/packaging/build-tar.sh" x86_64-unknown-linux-musl \
+    > "$work/package-build.txt"
+  (cd "$package_output" && sha256sum -c "$(basename "$package_archive").sha256")
+
+  # UBI 8 carries the RHEL 8 systemd/userspace stack. A private cgroup view and
+  # writable /run are required so this tests a real service manager rather
+  # than invoking the unit command by hand.
+  docker run -d --name "$packaged_client" --hostname "$packaged_hostname" \
+    --network "$network" --privileged --cgroupns=host \
+    --tmpfs /run --tmpfs /run/lock \
+    -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+    --stop-signal SIGRTMIN+3 \
+    registry.access.redhat.com/ubi8/ubi:8.10 /sbin/init >/dev/null
+
+  systemd_ready=false
+  for _ in $(seq 1 30); do
+    if docker exec "$packaged_client" systemctl is-system-running --quiet; then
+      systemd_ready=true
+      break
+    fi
+    sleep 1
+  done
+  test "$systemd_ready" = true
+
+  docker cp "$package_archive" "$packaged_client:/tmp/invenqor-agent-linux-x86_64.tar.gz"
+  docker exec "$packaged_client" tar -xzf \
+    /tmp/invenqor-agent-linux-x86_64.tar.gz -C /tmp
+  # Deliberately change only server.url. Open enrollment supplies and persists
+  # the device credential, while all shipped intervals and security defaults
+  # remain untouched.
+  docker exec "$packaged_client" sed -i \
+    's|^# url = .*|url = "http://'"$server"':7070"|' \
+    "$package_root/config/config.toml"
+  docker exec "$packaged_client" grep -Fx \
+    'url = "http://'"$server"':7070"' "$package_root/config/config.toml" >/dev/null
+  docker exec "$packaged_client" "$package_root/scripts/install.sh" \
+    > "$work/packaged-agent-install.txt"
+  grep -q '^Invenqor agent installed\.$' "$work/packaged-agent-install.txt"
+  grep -q '^Verify registration with:$' "$work/packaged-agent-install.txt"
+  if grep -q '^NEXT STEP:' "$work/packaged-agent-install.txt"; then
+    echo "E2E FAIL: packaged config lost server.url before installation" >&2
+    false
+  fi
+
+  docker exec "$packaged_client" cat /etc/invenqor-agent/config.toml \
+    > "$work/packaged-agent-config.toml"
+  cmp -s \
+    <(sed 's|^# url = .*|url = "http://'"$server"':7070"|' \
+      "$root/config/config.toml") \
+    "$work/packaged-agent-config.toml"
+
+  docker exec "$packaged_client" systemctl is-enabled --quiet invenqor-agent.service
+  docker exec "$packaged_client" systemctl is-active --quiet invenqor-agent.service
+  docker exec "$packaged_client" systemctl is-enabled --quiet invenqor-agent-update.path
+  docker exec "$packaged_client" test -x /opt/invenqor-agent/bin/invenqor-agent
+  docker exec --user invenqor-agent "$packaged_client" \
+    test -r /etc/invenqor-agent/config.toml
+  test "$(docker exec "$packaged_client" stat -c '%a:%U:%G' \
+    /etc/invenqor-agent/config.toml)" = "640:root:invenqor-agent"
+
+  delivered=false
+  for _ in $(seq 1 90); do
+    if docker exec "$packaged_client" test -s /var/lib/invenqor-agent/status.json; then
+      docker exec "$packaged_client" cat /var/lib/invenqor-agent/status.json > "$status_file"
+      if jq -e '.enrollment.state == "enrolled" and
+                .delivery.delivered_events >= 1 and
+                .delivery.last_error == null and
+                .collection.records > 0' "$status_file" >/dev/null; then
+        delivered=true
+        break
+      fi
+    fi
+    docker exec "$packaged_client" systemctl is-active --quiet invenqor-agent.service
+    sleep 1
+  done
+  test "$delivered" = true
+
+  packaged_agent_id=$(jq -r .agent_id "$status_file")
+  test -n "$packaged_agent_id"
+  curl -fsS -b "$work/cookies" \
+    "http://127.0.0.1:$port/api/v1/admin/agents" |
+    jq -e --arg id "$packaged_agent_id" --arg hostname "$packaged_hostname" \
+      '.agents[] | select(.agent_id == $id) |
+       .hostname == $hostname and .status == "active"' >/dev/null
+
+  docker exec --user invenqor-agent "$packaged_client" \
+    /opt/invenqor-agent/bin/invenqor-agent \
+    --config /etc/invenqor-agent/config.toml --diagnose > "$diagnose_file"
+  grep -q 'result: OK' "$diagnose_file"
+  grep -q '\[PASS\] registration policy' "$diagnose_file"
+  grep -q '\[PASS\] collection activity' "$diagnose_file"
+
+  # Diagnosis is intentionally run next to the daemon, then the daemon is
+  # checked again to prove no state/lock interaction stopped the real service.
+  docker exec "$packaged_client" systemctl is-active --quiet invenqor-agent.service
+  sleep 2
+  docker exec "$packaged_client" systemctl is-active --quiet invenqor-agent.service
+  test "$(docker exec "$packaged_client" systemctl show \
+    -p NRestarts --value invenqor-agent.service)" = 0
+
+  echo "E2E PASS: packaged RHEL 8 Agent installed, enrolled and delivered under systemd"
+}
+
+run_packaged_systemd_client
 
 echo "E2E PASS: real agent collected and delivered assets to PostgreSQL-backed server"

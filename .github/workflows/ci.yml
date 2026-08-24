@@ -23,6 +23,14 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
+      - name: Test the management console
+        run: npm test
+        working-directory: web
+      - name: Audit production web dependencies
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: web
+      - name: Validate the public OpenAPI contract
+        run: npx --yes @redocly/cli@2.47.0 lint openapi.yaml
       - run: npm run build
         working-directory: web
       - name: Verify the checked-in Server UI matches the React build
@@ -76,12 +84,29 @@ jobs:
           target: ${{ matrix.target }}
           args: --locked --release
       - run: file target/${{ matrix.target }}/release/${{ matrix.artifact }}
-      - name: Publish the Windows GNU release binary for native E2E
+      - name: Build the exact Windows release package for native E2E
         if: matrix.target == 'x86_64-pc-windows-gnu'
-        uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            target-windows-x86_64/x86_64-pc-windows-gnu/release \
+            ci-artifacts
+          cp \
+            target/x86_64-pc-windows-gnu/release/invenqor-agent.exe \
+            target-windows-x86_64/x86_64-pc-windows-gnu/release/invenqor-agent.exe
+          SKIP_SCRIPT_VERIFY=1 OUTPUT_DIR="$PWD/ci-artifacts" \
+            ./packaging/build-zip.sh x86_64-pc-windows-gnu
+          (cd ci-artifacts && sha256sum --strict -c \
+            invenqor-agent-windows-x86_64.zip.sha256)
+      - name: Publish the Windows release ZIP for native E2E
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        uses: actions/upload-artifact@v7
         with:
-          name: invenqor-agent-windows-gnu
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          name: invenqor-agent-windows-package
+          path: |
+            ci-artifacts/invenqor-agent-windows-x86_64.zip
+            ci-artifacts/invenqor-agent-windows-x86_64.zip.sha256
           if-no-files-found: error
           retention-days: 1
 
@@ -97,15 +122,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
-      - name: Download the exact GNU binary shipped in the Windows release ZIP
-        uses: actions/download-artifact@v4
+      - name: Download and verify the exact Windows release ZIP
+        uses: actions/download-artifact@v8
         with:
-          name: invenqor-agent-windows-gnu
-          path: target/release
-      - name: Verify the release binary starts on native Windows
-        run: ./target/release/invenqor-agent.exe --version
+          name: invenqor-agent-windows-package
+          path: target/release-package
+      - name: Verify and extract the Windows release ZIP
+        shell: pwsh
+        run: |
+          $zip = Resolve-Path 'target/release-package/invenqor-agent-windows-x86_64.zip'
+          $sidecar = Get-Content 'target/release-package/invenqor-agent-windows-x86_64.zip.sha256' -Raw
+          $expected = ($sidecar.Trim() -split '\s+')[0].ToUpperInvariant()
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "Windows release ZIP checksum mismatch" }
+          Expand-Archive -LiteralPath $zip -DestinationPath 'target/release-package/extracted'
+      - name: Verify the packaged release binary starts on native Windows
+        run: ./target/release-package/extracted/invenqor-agent-windows-x86_64/bin/invenqor-agent.exe --version
         shell: pwsh
       - run: go build -o invenqor-server.exe ./cmd/invenqor-server
         working-directory: server
-      - run: ./scripts/e2e-windows.ps1
+      - run: ./scripts/e2e-windows.ps1 -AgentPackageRoot ./target/release-package/extracted/invenqor-agent-windows-x86_64
         shell: pwsh

@@ -1,9 +1,10 @@
 # Invenqor Agent
 
 Invenqor는 Linux 자산 수집 Agent와 Go 기반 중앙 Server, React 관리 콘솔을
-제공합니다. Server는 PostgreSQL Primary와 안전한 SQLite 기동 대체 모드,
+제공합니다. Server는 운영용 PostgreSQL과 명시적인 단일 인스턴스 SQLite 모드,
 로컬/Keycloak 인증, RBAC, 자산 정규화·이력·관계, Query DSL과 장애 이벤트
-spool을 포함합니다.
+spool을 포함합니다. PostgreSQL DSN을 지정한 운영 배포는 연결·마이그레이션에
+실패하면 기동과 readiness를 실패시켜 Pod마다 다른 SQLite DB가 생기지 않습니다.
 
 빠른 시작:
 
@@ -19,6 +20,10 @@ open http://127.0.0.1:7070
 [사용자 가이드](docs/USER_GUIDE.md), [관리자 가이드](docs/ADMIN_GUIDE.md),
 [임원 보고서](docs/EXECUTIVE_REPORT.md),
 [자산 API·MCP·키 관리 가이드](docs/API_MCP_GUIDE.md)를 참조하십시오.
+
+Helm 릴리즈 artifact는 `./scripts/package-helm-release.sh`로 생성하고 동봉된
+`.sha256`을 검증한 뒤 `helm upgrade --install`에 `.tgz`를 직접 지정합니다. 기존
+v0.2.14 StatefulSet의 첫 upgrade 주의사항은 Server 설치 가이드에 정리되어 있습니다.
 
 Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 실행되는 자산 수집
 에이전트입니다. Linux의 `/proc`, `/sys`, `/etc`를 우선 사용하고, 사용할 수 없는
@@ -37,8 +42,9 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - 지수 백오프가 적용된 outbound-only HTTPS 전송
 - 웹·관리 API·Agent 통신을 통합한 단일 기본 포트 TCP 7070
 - rustls, 사설 CA, 장비별 mTLS PEM 또는 장비별 bearer token
-- Ed25519 서명·SHA-256·단계적 rollout 기반 Agent 자동 업데이트
-- PostgreSQL advisory migration lock과 공용 Secret을 사용하는 K8s 멀티 파드
+- metadata-bound Ed25519 manifest v2 서명·SHA-256·단계적 rollout 기반 Agent 자동 업데이트
+- PostgreSQL advisory migration lock, 공용 event spool·update RWX 저장소와
+  Pod별 state를 사용하는 K8s 멀티 파드
 - 연결 테스트·암호화 저장을 제공하는 PostgreSQL 및 Keycloak OIDC 설정 화면
 - 재기동 없이 URL-only/Token 보호/차단을 전환하고 등록 Token을 발급·회전·
   폐기하며 IP/CIDR·신뢰 프록시를 통제하는 DB 기반 Agent 등록 설정 화면
@@ -55,6 +61,8 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - 주 메뉴와 설정 하위 메뉴를 URL·사용자별 브라우저 상태에 동기화해 새로고침
   후에도 유지하는 콘솔 탐색
 - 외부 HTTPS 443을 내부 단일 Service 7070으로 연결하는 선택적 Helm Ingress
+- release별 selector와 v0.2.14 immutable selector 이관, 실제 `emptyDir` 선택을
+  지원하는 Helm Chart 및 재현 가능한 `invenqor-<version>.tgz` 패키징
 - 로컬/SSO 역할 원천 분리, 계정 잠금·세션 폐기와 안전장치를 갖춘 사용자 관리
 - 자산 최신성·Agent 건전성·수집 실패·7일 추이를 제공하는 운영 통계 화면
 - 자산·관계·병합/분리·Query·감사·키·설정 API를 실제로 연결한 관리 콘솔
@@ -178,6 +186,13 @@ tar 패키지는 `bin`, 기본 설정, 설치/제거 스크립트, 세 가지 in
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
 ```
+
+GitHub Release에는 Linux x86_64·aarch64와 Windows x86_64 패키지, 각 체크섬,
+오프라인 업데이트 서명 도구를 한 번에 반입할 수 있는
+`invenqor-agents-0.2.15.tar.gz`와
+`invenqor-agents-0.2.15.tar.gz.sha256`도 제공합니다. 묶음 안의
+`sign-agent-update-manifest-v2.py`는 관리 콘솔에 올릴 단일 dual-signature v2
+JSON을 생성합니다.
 
 설치 스크립트는 비로그인 `invenqor-agent` 계정을 만들고 상태 디렉터리만 그
 계정에 쓰기 허용합니다. 기존 설정은 덮어쓰지 않습니다. 제거 스크립트도 감사와

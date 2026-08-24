@@ -226,10 +226,7 @@ func loadOrCreateKey(path string) ([]byte, error) {
 }
 
 func secureDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create bootstrap state directory: %w", err)
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
+	if err := durablefs.EnsurePrivateDirectory(path); err != nil {
 		return fmt.Errorf("secure bootstrap state directory: %w", err)
 	}
 	return nil

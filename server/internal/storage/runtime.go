@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/durablefs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -70,7 +71,6 @@ func Open(ctx context.Context, options Options) (*Runtime, error) {
 	if options.Schema == "" {
 		options.Schema = "public"
 	}
-	var failure *ConnectionFailure
 	if strings.TrimSpace(options.PostgresDSN) != "" {
 		database, postgresFailure := openPostgres(ctx, options)
 		if postgresFailure == nil {
@@ -81,18 +81,25 @@ func Open(ctx context.Context, options Options) (*Runtime, error) {
 				openedAt:        time.Now().UTC(),
 			}, nil
 		}
-		failure = postgresFailure
+		// An explicitly configured PostgreSQL database is the operator's source
+		// of truth. Falling through to a fresh Pod-local SQLite database makes a
+		// broken production Pod look ready while serving an unrelated data set.
+		// Return only the classified, credential-free failure metadata.
+		return nil, fmt.Errorf(
+			"start PostgreSQL: %s (%s)",
+			postgresFailure.Summary,
+			postgresFailure.Code,
+		)
 	}
 	database, err := openSQLite(ctx, options.SQLitePath)
 	if err != nil {
 		return nil, fmt.Errorf("start SQLite fallback database: %w", err)
 	}
 	return &Runtime{
-		db:              database,
-		mode:            ModeSQLiteFallback,
-		sqlitePath:      options.SQLitePath,
-		postgresFailure: failure,
-		openedAt:        time.Now().UTC(),
+		db:         database,
+		mode:       ModeSQLiteFallback,
+		sqlitePath: options.SQLitePath,
+		openedAt:   time.Now().UTC(),
 	}, nil
 }
 
@@ -222,10 +229,7 @@ func openSQLite(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, errors.New("SQLite path is required")
 	}
 	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return nil, fmt.Errorf("create SQLite directory: %w", err)
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
+	if err := durablefs.EnsurePrivateDirectory(parent); err != nil {
 		return nil, fmt.Errorf("secure SQLite directory: %w", err)
 	}
 	database, err := sql.Open("sqlite", path)

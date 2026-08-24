@@ -360,7 +360,7 @@ func heartbeatEnvelope(agentID string) Envelope {
 		SchemaVersion: 1,
 		EventID:       uuid.NewString(),
 		AgentID:       agentID,
-		CreatedAt:     uint64(time.Now().Unix()),
+		CreatedAt:     nextTestEventTimestamp(),
 		Kind:          "heartbeat",
 	}
 }

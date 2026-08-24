@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/classify"
 	"github.com/hkjang/invenqor/server/internal/softwarecatalog"
 )
@@ -31,6 +32,8 @@ type Service struct {
 	now        func() time.Time
 	classifier *classify.Store
 }
+
+const maximumAgentClockSkew = 10 * time.Minute
 
 func NewService(database *sql.DB) *Service {
 	return &Service{
@@ -127,25 +130,68 @@ func (s *Service) Process(
 		}
 	}
 
-	assetIDs := make([]string, 0)
+	var receivedAt apitime.Time
+	if err := tx.QueryRowContext(
+		ctx,
+		"SELECT received_at FROM agent_events WHERE id=$1",
+		eventInternalID,
+	).Scan(&receivedAt); err != nil || !receivedAt.Valid {
+		if err == nil {
+			err = errors.New("agent event received_at is invalid")
+		}
+		return Result{}, fmt.Errorf("read event receive time: %w", err)
+	}
+	futureThreshold := receivedAt.Time.Add(maximumAgentClockSkew)
+	createdAt, timestampClamped := effectiveAgentTimestamp(
+		envelope.CreatedAt, receivedAt.Time,
+	)
+	if envelopeHasFutureRecord(envelope, receivedAt.Time) {
+		timestampClamped = true
+	}
+	if timestampClamped {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO agent_event_errors(
+			 id,agent_event_id,error_code,message
+			 ) VALUES($1,$2,'FUTURE_TIMESTAMP_CLAMPED',$3)`,
+			uuid.NewString(),
+			eventInternalID,
+			"Agent timestamps exceeded the database clock by more than 10 minutes and were clamped to received_at.",
+		); err != nil {
+			return Result{}, fmt.Errorf("record future timestamp diagnostic: %w", err)
+		}
+	}
+	// v0.2.15 introduced collision-free RPM and Windows package IDs. Move a
+	// strictly matching legacy source before applying the delta so a legacy
+	// "removed" followed by the canonical "added" cannot retire and recreate
+	// the representative asset in between.
+	if err := s.migrateLegacyPackageSources(ctx, tx, agent, envelope); err != nil {
+		return s.failEvent(
+			ctx, tx, eventInternalID, agent, envelope, raw, err,
+		)
+	}
+	systemRecordApplied := false
 	if envelope.Snapshot != nil {
 		for _, record := range envelope.Snapshot.Records {
-			assetID, err := s.upsertRecord(
+			assetID, applied, err := s.upsertRecord(
 				ctx, tx, agent, eventInternalID, record, "",
+				createdAt, receivedAt.Time, envelope.EventID,
 			)
 			if err != nil {
 				return s.failEvent(
 					ctx, tx, eventInternalID, agent, envelope, raw, err,
 				)
 			}
-			if err := s.classifyRecord(
-				ctx, tx, agent, rules, assetID, record,
-			); err != nil {
-				return s.failEvent(
-					ctx, tx, eventInternalID, agent, envelope, raw, err,
-				)
+			if applied {
+				if err := s.classifyRecord(
+					ctx, tx, agent, rules, assetID, record,
+				); err != nil {
+					return s.failEvent(
+						ctx, tx, eventInternalID, agent, envelope, raw, err,
+					)
+				}
+				systemRecordApplied = systemRecordApplied || record.Category == "system"
 			}
-			assetIDs = append(assetIDs, assetID)
 		}
 	}
 	for _, change := range envelope.Changes {
@@ -157,6 +203,9 @@ func (s *Service) Process(
 				eventInternalID,
 				change.Category,
 				change.AssetID,
+				createdAt,
+				receivedAt.Time,
+				envelope.EventID,
 			); err != nil {
 				return s.failEvent(
 					ctx, tx, eventInternalID, agent, envelope, raw, err,
@@ -164,22 +213,26 @@ func (s *Service) Process(
 			}
 			continue
 		}
-		assetID, err := s.upsertRecord(
+		assetID, applied, err := s.upsertRecord(
 			ctx, tx, agent, eventInternalID, *change.Record, change.Kind,
+			createdAt, receivedAt.Time, envelope.EventID,
 		)
 		if err != nil {
 			return s.failEvent(
 				ctx, tx, eventInternalID, agent, envelope, raw, err,
 			)
 		}
-		if err := s.classifyRecord(
-			ctx, tx, agent, rules, assetID, *change.Record,
-		); err != nil {
-			return s.failEvent(
-				ctx, tx, eventInternalID, agent, envelope, raw, err,
-			)
+		if applied {
+			if err := s.classifyRecord(
+				ctx, tx, agent, rules, assetID, *change.Record,
+			); err != nil {
+				return s.failEvent(
+					ctx, tx, eventInternalID, agent, envelope, raw, err,
+				)
+			}
+			systemRecordApplied = systemRecordApplied ||
+				change.Record.Category == "system"
 		}
-		assetIDs = append(assetIDs, assetID)
 	}
 	// Raw processes are useful evidence but poor CMDB assets: one database may
 	// expose dozens of PIDs and a Windows workstation may expose hundreds. Build
@@ -232,18 +285,17 @@ func (s *Service) Process(
 			)
 		}
 	}
-	if err := s.proposeDuplicates(ctx, tx, agent, envelope); err != nil {
-		return s.failEvent(
-			ctx, tx, eventInternalID, agent, envelope, raw, err,
-		)
+	if systemRecordApplied {
+		if err := s.proposeDuplicates(ctx, tx, agent, envelope); err != nil {
+			return s.failEvent(
+				ctx, tx, eventInternalID, agent, envelope, raw, err,
+			)
+		}
 	}
 	now := s.now()
-	inventoryAt := any(nil)
-	if envelope.Kind == "inventory" {
-		inventoryAt = now
-	}
+	isInventory := envelope.Kind == "inventory"
 	hostname, osName, architecture, err := agentMetadataWithStoredFallback(
-		ctx, tx, agent, envelope,
+		ctx, tx, agent, envelope, systemRecordApplied,
 	)
 	if err != nil {
 		return s.failEvent(
@@ -253,19 +305,80 @@ func (s *Service) Process(
 	_, err = tx.ExecContext(
 		ctx,
 		`UPDATE agents SET
-			hostname = CASE WHEN $1 = '' THEN hostname ELSE $1 END,
-			os_name = CASE WHEN $2 = '' THEN os_name ELSE $2 END,
-			architecture = CASE WHEN $3 = '' THEN architecture ELSE $3 END,
-			version = CASE WHEN $4 = '' THEN version ELSE $4 END,
+			hostname = CASE
+			  WHEN (last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			        last_event_received_at > $10 OR last_event_created_at < $7 OR
+			        (last_event_created_at = $7 AND
+			         (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			          (last_event_received_at = $8 AND last_event_id < $9))))
+			       AND $1 <> '' THEN $1 ELSE hostname END,
+			os_name = CASE
+			  WHEN (last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			        last_event_received_at > $10 OR last_event_created_at < $7 OR
+			        (last_event_created_at = $7 AND
+			         (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			          (last_event_received_at = $8 AND last_event_id < $9))))
+			       AND $2 <> '' THEN $2 ELSE os_name END,
+			architecture = CASE
+			  WHEN (last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			        last_event_received_at > $10 OR last_event_created_at < $7 OR
+			        (last_event_created_at = $7 AND
+			         (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			          (last_event_received_at = $8 AND last_event_id < $9))))
+			       AND $3 <> '' THEN $3 ELSE architecture END,
+			version = CASE
+			  WHEN (last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			        last_event_received_at > $10 OR last_event_created_at < $7 OR
+			        (last_event_created_at = $7 AND
+			         (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			          (last_event_received_at = $8 AND last_event_id < $9))))
+			       AND $4 <> '' THEN $4 ELSE version END,
 			status = 'active', last_seen_at = $5,
-			last_inventory_at = COALESCE($6, last_inventory_at), updated_at = $5
-		 WHERE id = $7`,
+			last_inventory_at = CASE
+			  WHEN $6 = FALSE THEN last_inventory_at
+			  WHEN last_inventory_at > $10 THEN $7
+			  WHEN last_inventory_at IS NULL OR last_inventory_at < $7 THEN $7
+			  ELSE last_inventory_at
+			END,
+			last_event_created_at = CASE
+			  WHEN last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			       last_event_received_at > $10 OR last_event_created_at < $7 OR
+			       (last_event_created_at = $7 AND
+			        (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			         (last_event_received_at = $8 AND last_event_id < $9)))
+			  THEN $7
+			  ELSE last_event_created_at
+			END,
+			last_event_received_at = CASE
+			  WHEN last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			       last_event_received_at > $10 OR last_event_created_at < $7 OR
+			       (last_event_created_at = $7 AND
+			        (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			         (last_event_received_at = $8 AND last_event_id < $9)))
+			  THEN $8
+			  ELSE last_event_received_at
+			END,
+			last_event_id = CASE
+			  WHEN last_event_created_at IS NULL OR last_event_created_at > $10 OR
+			       last_event_received_at > $10 OR last_event_created_at < $7 OR
+			       (last_event_created_at = $7 AND
+			        (last_event_received_at IS NULL OR last_event_received_at < $8 OR
+			         (last_event_received_at = $8 AND last_event_id < $9)))
+			  THEN $9
+			  ELSE last_event_id
+			END,
+			updated_at = $5
+		 WHERE id = $11`,
 		hostname,
 		osName,
 		architecture,
 		agentVersion,
 		now,
-		inventoryAt,
+		isInventory,
+		createdAt,
+		receivedAt.Time,
+		envelope.EventID,
+		futureThreshold,
 		agent.ID,
 	)
 	if err != nil {
@@ -314,7 +427,8 @@ func (s *Service) failEvent(
 			raw_event, processing_status, processing_error
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', $8)
 		ON CONFLICT(agent_id, event_id) DO UPDATE
-		SET processing_status = 'failed', processing_error = excluded.processing_error`,
+		SET processing_status = 'failed', processing_error = excluded.processing_error
+		WHERE agent_events.processing_status <> 'processed'`,
 		eventID,
 		agent.ID,
 		envelope.EventID,
@@ -327,6 +441,296 @@ func (s *Service) failEvent(
 	return Result{}, cause
 }
 
+func (s *Service) migrateLegacyPackageSources(
+	ctx context.Context,
+	tx *sql.Tx,
+	agent agents.Agent,
+	envelope Envelope,
+) error {
+	records := make([]AssetRecord, 0)
+	if envelope.Snapshot != nil {
+		records = append(records, envelope.Snapshot.Records...)
+	}
+	for _, change := range envelope.Changes {
+		if change.Record != nil &&
+			(change.Kind == "added" || change.Kind == "updated") {
+			records = append(records, *change.Record)
+		}
+	}
+	type candidate struct {
+		record         AssetRecord
+		identityFields []string
+	}
+	groups := make(map[string][]candidate)
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		legacyID, fields, ok := legacyPackageIdentity(record)
+		if !ok {
+			continue
+		}
+		key := record.Category + "\x00" + record.AssetID
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		groups[legacyID] = append(groups[legacyID], candidate{
+			record: record, identityFields: fields,
+		})
+	}
+	for legacyID, candidates := range groups {
+		recordsForLegacy := make([]AssetRecord, len(candidates))
+		fields := candidates[0].identityFields
+		for index := range candidates {
+			recordsForLegacy[index] = candidates[index].record
+		}
+		if err := migrateLegacyPackageSource(
+			ctx, tx, agent, legacyID, recordsForLegacy, fields,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// legacyPackageIdentity accepts only IDs that can be reproduced exactly from
+// the new record payload. This prevents a merely similar package name from
+// aliasing an unrelated representative asset and its manual metadata.
+func legacyPackageIdentity(
+	record AssetRecord,
+) (string, []string, bool) {
+	if record.Category != "software.package" {
+		return "", nil, false
+	}
+	var payload map[string]any
+	if json.Unmarshal(record.Payload, &payload) != nil {
+		return "", nil, false
+	}
+	text := func(key string) string {
+		value, _ := payload[key].(string)
+		return value
+	}
+	manager := text("manager")
+	name := text("name")
+	architecture := text("architecture")
+	if name == "" || architecture == "" {
+		return "", nil, false
+	}
+	switch manager {
+	case "rpm":
+		version := text("version")
+		legacyID := fmt.Sprintf("package:rpm:%s:%s", name, architecture)
+		canonicalID := legacyID + ":" + version
+		if version == "" || record.AssetID != canonicalID {
+			return "", nil, false
+		}
+		return legacyID,
+			[]string{"manager", "name", "architecture", "version"}, true
+	case "windows":
+		scope := text("scope")
+		ownerSID := text("owner_sid")
+		registryKey := text("registry_key")
+		canonicalID := fmt.Sprintf(
+			"package:windows:%s:%s:%s:%s",
+			strings.ToLower(architecture),
+			strings.ToLower(scope),
+			strings.ToLower(ownerSID),
+			strings.ToLower(registryKey),
+		)
+		if scope == "" || registryKey == "" || record.AssetID != canonicalID {
+			return "", nil, false
+		}
+		return fmt.Sprintf("package:windows:%s:%s", name, architecture),
+			[]string{
+				"manager", "name", "architecture", "version", "scope",
+				"registry_key",
+			}, true
+	default:
+		return "", nil, false
+	}
+}
+
+func migrateLegacyPackageSource(
+	ctx context.Context,
+	tx *sql.Tx,
+	agent agents.Agent,
+	legacyID string,
+	candidates []AssetRecord,
+	identityFields []string,
+) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	category := candidates[0].Category
+	for _, candidate := range candidates {
+		var canonicalCount int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM asset_sources
+			 WHERE agent_id=$1 AND category=$2 AND source_asset_id=$3`,
+			agent.ID,
+			category,
+			candidate.AssetID,
+		).Scan(&canonicalCount); err != nil {
+			return fmt.Errorf("check canonical package source: %w", err)
+		}
+		if canonicalCount != 0 {
+			return nil
+		}
+	}
+
+	var sourceID, assetID, assetKey string
+	var rawLegacyPayload any
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT s.id, s.asset_id, s.payload_json, a.asset_key
+		 FROM asset_sources s JOIN assets a ON a.id=s.asset_id
+		 WHERE s.agent_id=$1 AND s.category=$2 AND s.source_asset_id=$3`,
+		agent.ID,
+		category,
+		legacyID,
+	).Scan(&sourceID, &assetID, &rawLegacyPayload, &assetKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read legacy package source: %w", err)
+	}
+	expectedLegacyAssetKey := agent.AgentID + ":" + category + ":" + legacyID
+	if assetKey != expectedLegacyAssetKey {
+		return nil
+	}
+	legacyPayload, err := jsonObject(rawLegacyPayload)
+	if err != nil {
+		return fmt.Errorf("decode legacy package source: %w", err)
+	}
+	matches := make([]AssetRecord, 0, len(candidates))
+	for _, candidate := range candidates {
+		var currentPayload map[string]any
+		if err := json.Unmarshal(candidate.Payload, &currentPayload); err != nil {
+			return fmt.Errorf("decode canonical package source: %w", err)
+		}
+		matched := true
+		for _, field := range identityFields {
+			legacyValue := stringField(legacyPayload, field)
+			currentValue := stringField(currentPayload, field)
+			if stringField(currentPayload, "manager") == "windows" &&
+				(field == "manager" || field == "architecture" ||
+					field == "scope" || field == "registry_key") {
+				matched = strings.EqualFold(legacyValue, currentValue)
+			} else {
+				matched = legacyValue == currentValue
+			}
+			if !matched {
+				break
+			}
+		}
+		// v0.2.14 did not collect owner_sid. Adoption is safe only when the
+		// remaining immutable registry identity selects exactly one canonical
+		// candidate from this first upgraded event. If the legacy payload does
+		// contain a SID, require it as well.
+		if matched {
+			if legacyOwner, present := legacyPayload["owner_sid"]; present {
+				legacySID, _ := legacyOwner.(string)
+				matched = strings.EqualFold(
+					legacySID, stringField(currentPayload, "owner_sid"),
+				)
+			}
+		}
+		if matched {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	record := matches[0]
+	canonicalAssetKey := agent.AgentID + ":" + category + ":" + record.AssetID
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE assets SET asset_key=$1
+		 WHERE id=$2 AND asset_key=$3`,
+		canonicalAssetKey,
+		assetID,
+		expectedLegacyAssetKey,
+	)
+	if err != nil {
+		return fmt.Errorf("migrate legacy package asset key: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("legacy package asset key changed concurrently")
+	}
+	result, err = tx.ExecContext(
+		ctx,
+		`UPDATE asset_sources SET source_asset_id=$1
+		 WHERE id=$2 AND source_asset_id=$3`,
+		record.AssetID,
+		sourceID,
+		legacyID,
+	)
+	if err != nil {
+		return fmt.Errorf("migrate legacy package source ID: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("legacy package source changed concurrently")
+	}
+	return nil
+}
+
+func jsonObject(raw any) (map[string]any, error) {
+	var encoded []byte
+	switch value := raw.(type) {
+	case string:
+		encoded = []byte(value)
+	case []byte:
+		encoded = value
+	default:
+		encoded = []byte(fmt.Sprint(value))
+	}
+	var object map[string]any
+	if err := json.Unmarshal(encoded, &object); err != nil || object == nil {
+		return nil, errors.New("JSON value is not an object")
+	}
+	return object, nil
+}
+
+func stringField(object map[string]any, key string) string {
+	value, _ := object[key].(string)
+	return value
+}
+
+func envelopeHasFutureRecord(envelope Envelope, receivedAt time.Time) bool {
+	isFuture := func(record AssetRecord) bool {
+		_, clamped := effectiveAgentTimestamp(record.CollectedAt, receivedAt)
+		return clamped
+	}
+	if envelope.Snapshot != nil {
+		for _, record := range envelope.Snapshot.Records {
+			if isFuture(record) {
+				return true
+			}
+		}
+	}
+	for _, change := range envelope.Changes {
+		if change.Record != nil && isFuture(*change.Record) {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveAgentTimestamp(raw uint64, receivedAt time.Time) (time.Time, bool) {
+	// Converting an untrusted uint64 directly to int64 can wrap values above
+	// MaxInt64 into pre-epoch dates. Compare the raw range first.
+	if raw > uint64(1<<63-1) {
+		return receivedAt, true
+	}
+	candidate := time.Unix(int64(raw), 0).UTC()
+	if candidate.After(receivedAt.Add(maximumAgentClockSkew)) {
+		return receivedAt, true
+	}
+	return candidate, false
+}
+
 func (s *Service) upsertRecord(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -334,27 +738,66 @@ func (s *Service) upsertRecord(
 	eventID string,
 	record AssetRecord,
 	explicitKind string,
-) (string, error) {
+	sourceEventCreatedAt time.Time,
+	sourceEventReceivedAt time.Time,
+	sourceEventID string,
+) (string, bool, error) {
 	payload := compactJSON(record.Payload)
 	var sourceID, assetID, previous string
 	var deleted any
+	var sourceCollectedAt apitime.Time
+	var lastEventCreatedAt apitime.Time
+	var lastEventReceivedAt apitime.Time
+	var lastEventID string
 	err := tx.QueryRowContext(
 		ctx,
-		`SELECT s.id, s.asset_id, s.payload_json, s.deleted_at
+		`SELECT s.id, s.asset_id, s.payload_json, s.deleted_at, s.collected_at,
+		        s.last_event_created_at, s.last_event_received_at, s.last_event_id
 		 FROM asset_sources s
 		 WHERE s.agent_id = $1 AND s.category = $2 AND s.source_asset_id = $3`,
 		agent.ID,
 		record.Category,
 		record.AssetID,
-	).Scan(&sourceID, &assetID, &previous, &deleted)
+	).Scan(
+		&sourceID,
+		&assetID,
+		&previous,
+		&deleted,
+		&sourceCollectedAt,
+		&lastEventCreatedAt,
+		&lastEventReceivedAt,
+		&lastEventID,
+	)
 	newRecord := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !newRecord {
-		return "", fmt.Errorf("read asset source: %w", err)
+		return "", false, fmt.Errorf("read asset source: %w", err)
 	}
 	now := s.now()
-	collectedAt := time.Unix(int64(record.CollectedAt), 0).UTC()
+	futureThreshold := sourceEventReceivedAt.Add(maximumAgentClockSkew)
+	collectedAt, _ := effectiveAgentTimestamp(
+		record.CollectedAt, sourceEventReceivedAt,
+	)
+	if !newRecord {
+		if !sourceCollectedAt.Valid {
+			return "", false, errors.New("asset source collected_at is invalid")
+		}
+		poisoned := sourceCollectedAt.Time.After(futureThreshold) ||
+			lastEventCreatedAt.Valid && lastEventCreatedAt.Time.After(futureThreshold) ||
+			lastEventReceivedAt.Valid && lastEventReceivedAt.Time.After(futureThreshold)
+		if !poisoned && (collectedAt.Before(sourceCollectedAt.Time) ||
+			lastEventCreatedAt.Valid &&
+				(sourceEventCreatedAt.Before(lastEventCreatedAt.Time) ||
+					sourceEventCreatedAt.Equal(lastEventCreatedAt.Time) &&
+						lastEventReceivedAt.Valid &&
+						(sourceEventReceivedAt.Before(lastEventReceivedAt.Time) ||
+							sourceEventReceivedAt.Equal(lastEventReceivedAt.Time) &&
+								lastEventID >= sourceEventID))) {
+			return "", false, nil
+		}
+	}
 	assetType := assetType(record.Category)
 	name := assetName(record)
+	representativeApplied := true
 	if newRecord {
 		sourceID = uuid.NewString()
 		reusedEnrollmentAsset := false
@@ -373,7 +816,7 @@ func (s *Service) upsertRecord(
 			case errors.Is(err, sql.ErrNoRows):
 				err = nil
 			default:
-				return "", fmt.Errorf(
+				return "", false, fmt.Errorf(
 					"find enrollment asset for inventory: %w",
 					err,
 				)
@@ -394,7 +837,7 @@ func (s *Service) upsertRecord(
 				assetID,
 			)
 			if err != nil {
-				return "", fmt.Errorf("promote enrollment asset: %w", err)
+				return "", false, fmt.Errorf("promote enrollment asset: %w", err)
 			}
 		} else {
 			assetID = uuid.NewString()
@@ -416,7 +859,7 @@ func (s *Service) upsertRecord(
 				collectedAt,
 			)
 			if err != nil {
-				return "", fmt.Errorf("insert representative asset: %w", err)
+				return "", false, fmt.Errorf("insert representative asset: %w", err)
 			}
 		}
 		_, err = tx.ExecContext(
@@ -424,8 +867,11 @@ func (s *Service) upsertRecord(
 			`INSERT INTO asset_sources(
 				id, asset_id, agent_id, category, source_asset_id,
 				source_name, payload_json, collected_at, first_seen_at,
-				last_seen_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8)`,
+				last_seen_at, last_event_created_at, last_event_received_at,
+				last_event_id
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $8, $8, $9, $10, $11
+			)`,
 			sourceID,
 			assetID,
 			agent.ID,
@@ -434,37 +880,59 @@ func (s *Service) upsertRecord(
 			record.Source,
 			payload,
 			collectedAt,
+			sourceEventCreatedAt,
+			sourceEventReceivedAt,
+			sourceEventID,
 		)
 		if err != nil {
-			return "", fmt.Errorf("insert asset source: %w", err)
+			return "", false, fmt.Errorf("insert asset source: %w", err)
 		}
 	} else {
-		_, err = tx.ExecContext(
+		result, updateErr := tx.ExecContext(
 			ctx,
 			`UPDATE asset_sources SET source_name = $1, payload_json = $2,
-			 collected_at = $3, last_seen_at = $3, deleted_at = NULL
-			 WHERE id = $4`,
+			 collected_at = $3, last_seen_at = $3, deleted_at = NULL,
+			 last_event_created_at = $4, last_event_received_at = $5,
+			 last_event_id = $6
+			 WHERE id = $7 AND (collected_at <= $3 OR collected_at > $8)
+			   AND (last_event_created_at IS NULL OR last_event_created_at > $8 OR
+			        last_event_received_at > $8 OR last_event_created_at < $4 OR
+			        (last_event_created_at = $4 AND
+			         (last_event_received_at IS NULL OR last_event_received_at < $5 OR
+			          (last_event_received_at = $5 AND last_event_id < $6))))`,
 			record.Source,
 			payload,
 			collectedAt,
+			sourceEventCreatedAt,
+			sourceEventReceivedAt,
+			sourceEventID,
 			sourceID,
+			futureThreshold,
 		)
-		if err != nil {
-			return "", fmt.Errorf("update asset source: %w", err)
+		if updateErr != nil {
+			return "", false, fmt.Errorf("update asset source: %w", updateErr)
 		}
-		_, err = tx.ExecContext(
+		if changed, _ := result.RowsAffected(); changed == 0 {
+			return "", false, nil
+		}
+		result, err = tx.ExecContext(
 			ctx,
 			`UPDATE assets SET name = $1, attributes_json = $2,
 			 status = 'active', last_seen_at = $3, updated_at = $4,
-			 deleted_at = NULL WHERE id = $5`,
+			 deleted_at = NULL WHERE id = $5
+			 AND (last_seen_at <= $3 OR last_seen_at > $6)`,
 			name,
 			payload,
 			collectedAt,
 			now,
 			assetID,
+			futureThreshold,
 		)
 		if err != nil {
-			return "", fmt.Errorf("update representative asset: %w", err)
+			return "", false, fmt.Errorf("update representative asset: %w", err)
+		}
+		if changed, _ := result.RowsAffected(); changed == 0 {
+			representativeApplied = false
 		}
 	}
 	hash := sha256.Sum256([]byte(payload))
@@ -480,7 +948,7 @@ func (s *Service) upsertRecord(
 		collectedAt,
 	)
 	if err != nil {
-		return "", fmt.Errorf("store asset snapshot: %w", err)
+		return "", false, fmt.Errorf("store asset snapshot: %w", err)
 	}
 	changeType := explicitKind
 	if changeType == "" {
@@ -510,10 +978,10 @@ func (s *Service) upsertRecord(
 			agent.ID,
 		)
 		if err != nil {
-			return "", fmt.Errorf("store asset change: %w", err)
+			return "", false, fmt.Errorf("store asset change: %w", err)
 		}
 	}
-	return assetID, nil
+	return assetID, representativeApplied, nil
 }
 
 func (s *Service) removeRecord(
@@ -523,31 +991,71 @@ func (s *Service) removeRecord(
 	eventID string,
 	category string,
 	sourceAssetID string,
+	eventCreatedAt time.Time,
+	eventReceivedAt time.Time,
+	sourceEventID string,
 ) error {
 	var sourceID, assetID, previous string
+	var lastEventCreatedAt apitime.Time
+	var lastEventReceivedAt apitime.Time
+	var lastEventID string
 	err := tx.QueryRowContext(
 		ctx,
-		`SELECT id, asset_id, payload_json FROM asset_sources
+		`SELECT id, asset_id, payload_json, last_event_created_at,
+		        last_event_received_at, last_event_id
+		 FROM asset_sources
 		 WHERE agent_id = $1 AND category = $2 AND source_asset_id = $3
 		   AND deleted_at IS NULL`,
 		agent.ID,
 		category,
 		sourceAssetID,
-	).Scan(&sourceID, &assetID, &previous)
+	).Scan(
+		&sourceID, &assetID, &previous, &lastEventCreatedAt,
+		&lastEventReceivedAt, &lastEventID,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	futureThreshold := eventReceivedAt.Add(maximumAgentClockSkew)
+	poisoned := lastEventCreatedAt.Valid &&
+		lastEventCreatedAt.Time.After(futureThreshold) ||
+		lastEventReceivedAt.Valid && lastEventReceivedAt.Time.After(futureThreshold)
+	if !poisoned && lastEventCreatedAt.Valid &&
+		(eventCreatedAt.Before(lastEventCreatedAt.Time) ||
+			eventCreatedAt.Equal(lastEventCreatedAt.Time) &&
+				lastEventReceivedAt.Valid &&
+				(eventReceivedAt.Before(lastEventReceivedAt.Time) ||
+					eventReceivedAt.Equal(lastEventReceivedAt.Time) &&
+						lastEventID >= sourceEventID)) {
+		return nil
+	}
 	now := s.now()
-	if _, err := tx.ExecContext(
+	result, err := tx.ExecContext(
 		ctx,
-		`UPDATE asset_sources SET deleted_at = $1 WHERE id = $2`,
+		`UPDATE asset_sources SET deleted_at = $1,
+		 last_event_created_at = $2, last_event_received_at = $3,
+		 last_event_id = $4
+		 WHERE id = $5 AND deleted_at IS NULL
+		   AND (last_event_created_at IS NULL OR last_event_created_at > $6 OR
+		        last_event_received_at > $6 OR last_event_created_at < $2 OR
+		        (last_event_created_at = $2 AND
+		         (last_event_received_at IS NULL OR last_event_received_at < $3 OR
+		          (last_event_received_at = $3 AND last_event_id < $4))))`,
 		now,
+		eventCreatedAt,
+		eventReceivedAt,
+		sourceEventID,
 		sourceID,
-	); err != nil {
+		futureThreshold,
+	)
+	if err != nil {
 		return err
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		return nil
 	}
 	var active int
 	if err := tx.QueryRowContext(
@@ -561,14 +1069,18 @@ func (s *Service) removeRecord(
 	if active > 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(
+	result, err = tx.ExecContext(
 		ctx,
 		`UPDATE assets SET status = 'removed', deleted_at = $1,
-		 updated_at = $1 WHERE id = $2`,
+			updated_at = $1 WHERE id = $2`,
 		now,
 		assetID,
-	); err != nil {
+	)
+	if err != nil {
 		return err
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		return nil
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -767,8 +1279,12 @@ func agentMetadataWithStoredFallback(
 	transaction *sql.Tx,
 	agent agents.Agent,
 	envelope Envelope,
+	useEnvelopeMetadata bool,
 ) (string, string, string, error) {
-	hostname, osName, architecture := agentMetadata(envelope)
+	hostname, osName, architecture := "", "", ""
+	if useEnvelopeMetadata {
+		hostname, osName, architecture = agentMetadata(envelope)
+	}
 	if hostname != "" || osName != "" || architecture != "" {
 		return hostname, osName, architecture, nil
 	}

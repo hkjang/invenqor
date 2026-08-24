@@ -447,27 +447,37 @@ pub async fn run(
 fn service_check() -> Option<Check> {
     #[cfg(windows)]
     {
-        use crate::windows_service::{installed_service_state, ServiceQuery};
+        use crate::windows_service::{installed_service_state, service_name, ServiceQuery};
+        let name = service_name();
         Some(match installed_service_state() {
             ServiceQuery::Known {
                 state: "running", ..
-            } => Check::pass("service", "the invenqor-agent service is running"),
+            } => Check::pass("service", format!("the {name} service is running")),
             ServiceQuery::Known { state, exit_code } => Check::fail(
                 "service",
                 format!(
-                    "the invenqor-agent service is {state} (last exit code {exit_code}); \
+                    "the {name} service is {state} (last exit code {exit_code}); \
                      nothing is being collected while it is not running"
                 ),
-                "Start-Service invenqor-agent, then read the Agent log at \
-                 %ProgramData%\\Invenqor\\state\\agent.log and the Windows \
-                 System event log for the service control manager's own entry.",
+                format!(
+                    "{}, then read the Agent log under the configured state directory \
+                     and the Windows System event log for the service control manager's \
+                     own entry.",
+                    crate::platform::restart_command()
+                ),
             ),
             ServiceQuery::NotInstalled => Check::fail(
                 "service",
-                "the invenqor-agent service is not installed, so nothing collects \
-                 on a schedule",
-                "Run scripts\\install.ps1 from the package in an elevated PowerShell \
-                 session.",
+                format!("the {name} service is not installed, so nothing collects on a schedule"),
+                format!(
+                    "Run scripts\\install.ps1 from the package in an elevated PowerShell \
+                     session{}.",
+                    if name == crate::service_identity::DEFAULT_SERVICE_NAME {
+                        String::new()
+                    } else {
+                        " with its matching -ServiceName value".to_string()
+                    }
+                ),
             ),
             ServiceQuery::Unknown => Check::skip(
                 "service",
@@ -572,9 +582,7 @@ fn update_check(config: &Config) -> Check {
                 "a verified update is staged at {} and is waiting to be installed",
                 pending.display()
             ),
-            "systemd applies it through invenqor-agent-update.path; on OpenRC and \
-             SysV it installs at the next service restart, or run \
-             --apply-pending-update as root now.",
+            pending_update_remedy(),
         );
     }
     Check::pass(
@@ -584,6 +592,18 @@ fn update_check(config: &Config) -> Check {
             config.updates.channel, config.updates.check_interval_seconds
         ),
     )
+}
+
+fn pending_update_remedy() -> &'static str {
+    if cfg!(windows) {
+        "The Windows service normally installs a verified update itself. Read \
+         %ProgramData%\\Invenqor\\state\\agent.log for the self-test or file-swap \
+         error, then run --apply-pending-update from an elevated console."
+    } else {
+        "systemd applies it through invenqor-agent-update.path; on OpenRC and \
+         SysV it installs at the next service restart, or run \
+         --apply-pending-update as root now."
+    }
 }
 
 fn finish(
@@ -1022,6 +1042,18 @@ mod tests {
         assert!(rendered.contains("[SKIP] c"));
         assert!(!report.failed());
         assert!(rendered.contains("OK - the Agent can reach the Server"));
+    }
+
+    #[test]
+    fn pending_update_diagnosis_names_the_platform_activation_path() {
+        let remedy = pending_update_remedy();
+        if cfg!(windows) {
+            assert!(remedy.contains("Windows service"));
+            assert!(remedy.contains("agent.log"));
+        } else {
+            assert!(remedy.contains("systemd"));
+            assert!(remedy.contains("OpenRC"));
+        }
     }
 
     /// The report is normally produced with sudo while the service runs as

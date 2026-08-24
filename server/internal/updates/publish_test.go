@@ -2,7 +2,9 @@ package updates
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -30,13 +32,47 @@ func signingPair(t *testing.T) (ed25519.PrivateKey, string) {
 
 func manifest(signature string) Manifest {
 	return Manifest{
-		Version:      "1.2.3",
-		Channel:      "stable",
-		OS:           "linux",
-		Architecture: "x86_64",
-		Signature:    signature,
-		Rollout:      100,
+		Version:           "1.2.3",
+		Channel:           "stable",
+		OS:                "linux",
+		Architecture:      "x86_64",
+		Signature:         signature,
+		ManifestSignature: signature,
+		SignatureScheme:   SignatureSchemeEd25519,
+		SignatureVersion:  SignatureVersionV2,
+		Rollout:           100,
 	}
+}
+
+func signedManifestV2(
+	t *testing.T,
+	private ed25519.PrivateKey,
+	candidate Manifest,
+	artifact []byte,
+) Manifest {
+	t.Helper()
+	candidate.Signature = base64.StdEncoding.EncodeToString(
+		ed25519.Sign(private, artifact),
+	)
+	candidate.ManifestSignature = signatureForV2(t, private, candidate, artifact)
+	return candidate
+}
+
+func signatureForV2(
+	t *testing.T,
+	private ed25519.PrivateKey,
+	candidate Manifest,
+	artifact []byte,
+) string {
+	t.Helper()
+	digest := sha256.Sum256(artifact)
+	candidate.Size = int64(len(artifact))
+	candidate.SHA256 = hex.EncodeToString(digest[:])
+	message, err := SignatureMessageV2(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(private, message))
 }
 
 // The defect this covers: publishing accepted any 64-byte value as a signature,
@@ -54,10 +90,10 @@ func TestPublishRejectsASignatureThatDoesNotVerify(t *testing.T) {
 	artifact := []byte("agent-binary-bytes")
 
 	// A signature over different bytes: exactly the "signed the wrong file" case.
-	wrong := base64.StdEncoding.EncodeToString(
-		ed25519.Sign(private, []byte("some-other-file")),
+	wrongManifest := signedManifestV2(
+		t, private, manifest(""), []byte("some-other-file"),
 	)
-	_, err = store.Publish(manifest(wrong), strings.NewReader(string(artifact)))
+	_, err = store.Publish(wrongManifest, strings.NewReader(string(artifact)))
 	if !errors.Is(err, ErrSignatureRejected) {
 		t.Fatalf("Publish() error = %v, want ErrSignatureRejected", err)
 	}
@@ -73,13 +109,27 @@ func TestPublishRejectsASignatureThatDoesNotVerify(t *testing.T) {
 		t.Fatal("a rejected publication left its artifact behind")
 	}
 
-	good := base64.StdEncoding.EncodeToString(ed25519.Sign(private, artifact))
-	published, err := store.Publish(manifest(good), strings.NewReader(string(artifact)))
+	wrongManifest = signedManifestV2(t, private, manifest(""), artifact)
+	wrongManifest.ManifestSignature = signatureForV2(
+		t, private, wrongManifest, []byte("different-manifest-identity"),
+	)
+	_, err = store.Publish(wrongManifest, strings.NewReader(string(artifact)))
+	if !errors.Is(err, ErrSignatureRejected) ||
+		!strings.Contains(err.Error(), "v2 manifest signature") {
+		t.Fatalf("Publish() v2 error = %v, want v2 ErrSignatureRejected", err)
+	}
+
+	goodManifest := signedManifestV2(t, private, manifest(""), artifact)
+	published, err := store.Publish(goodManifest, strings.NewReader(string(artifact)))
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
 	if !published.SignatureVerified {
 		t.Fatal("a verified publication did not record that it was verified")
+	}
+	if published.SignatureScheme != SignatureSchemeEd25519 ||
+		published.SignatureVersion != SignatureVersionV2 {
+		t.Fatalf("published signature contract = %+v", published)
 	}
 	if published.Size != int64(len(artifact)) || published.SHA256 == "" {
 		t.Fatalf("published manifest = %+v", published)
@@ -112,12 +162,14 @@ func TestPublishAcceptsASignatureWithLineBreaks(t *testing.T) {
 	parsed, _ := ParsePublicKey(publicKey)
 	store.SetSigningKey(parsed)
 	artifact := "agent-binary"
-	raw := base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte(artifact)))
+	candidate := signedManifestV2(t, private, manifest(""), []byte(artifact))
+	raw := candidate.ManifestSignature
 	// `base64` wraps at 76 columns by default, and an operator pasting the file
 	// contents should not have to know that.
 	wrapped := raw[:40] + "\n" + raw[40:] + "\n"
+	candidate.ManifestSignature = wrapped
 	if _, err := store.Publish(
-		manifest(wrapped), strings.NewReader(artifact),
+		candidate, strings.NewReader(artifact),
 	); err != nil {
 		t.Fatalf("Publish() rejected a wrapped signature: %v", err)
 	}
@@ -137,6 +189,7 @@ func TestPublishValidationMessagesNameTheField(t *testing.T) {
 		{"architecture", func(m *Manifest) { m.Architecture = "riscv" }, "architecture"},
 		{"rollout", func(m *Manifest) { m.Rollout = 140 }, "rollout"},
 		{"signature", func(m *Manifest) { m.Signature = "not-base64!" }, "signature"},
+		{"manifest_signature", func(m *Manifest) { m.ManifestSignature = "" }, "manifest"},
 	}
 	for _, testCase := range cases {
 		candidate := manifest(signature)
@@ -184,7 +237,10 @@ func TestRolloutCanBeWidenedAndHalted(t *testing.T) {
 	published, err := store.Publish(
 		Manifest{
 			Version: "1.2.3", Channel: "stable", OS: "linux",
-			Architecture: "x86_64", Signature: signature, Rollout: 10,
+			Architecture: "x86_64", Signature: signature,
+			ManifestSignature: signature,
+			SignatureScheme:   SignatureSchemeEd25519,
+			SignatureVersion:  SignatureVersionV2, Rollout: 10,
 		},
 		strings.NewReader(artifact),
 	)
@@ -275,7 +331,10 @@ func TestReleasesAreListedNewestFirst(t *testing.T) {
 		if _, err := store.Publish(
 			Manifest{
 				Version: version, Channel: "stable", OS: "linux",
-				Architecture: "x86_64", Signature: signature, Rollout: 100,
+				Architecture: "x86_64", Signature: signature,
+				ManifestSignature: signature,
+				SignatureScheme:   SignatureSchemeEd25519,
+				SignatureVersion:  SignatureVersionV2, Rollout: 100,
 			},
 			strings.NewReader(artifact),
 		); err != nil {
@@ -340,13 +399,13 @@ func TestWindowsAndLinuxReleasesOfOneVersionCoexist(t *testing.T) {
 	store.SetSigningKey(parsed)
 
 	publish := func(osName, architecture, artifact string) (Manifest, error) {
-		signature := base64.StdEncoding.EncodeToString(
-			ed25519.Sign(private, []byte(artifact)),
-		)
-		return store.Publish(Manifest{
+		candidate := Manifest{
 			Version: "1.2.3", Channel: "stable", OS: osName,
-			Architecture: architecture, Signature: signature, Rollout: 100,
-		}, strings.NewReader(artifact))
+			Architecture: architecture, SignatureScheme: SignatureSchemeEd25519,
+			SignatureVersion: SignatureVersionV2, Rollout: 100,
+		}
+		candidate = signedManifestV2(t, private, candidate, []byte(artifact))
+		return store.Publish(candidate, strings.NewReader(artifact))
 	}
 
 	linux, err := publish("linux", "x86_64", "linux-agent")

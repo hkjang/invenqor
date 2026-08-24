@@ -7,6 +7,9 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::time::Duration;
 
+const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_ERROR_RESPONSE_PREFIX_BYTES: usize = 4096;
+
 /// Every failed exchange with the Server carries a stable code so the Agent
 /// log, `--diagnose` and `status.json` all name the same problem, and so an
 /// operator can match it against the Server diagnostics console.
@@ -42,6 +45,11 @@ impl ExchangeFailure {
             "SERVER_RESPONSE_NOT_JSON" => {
                 "A proxy or the console answered instead of the Agent API. Set \
                  server.url to the scheme, host and port only."
+            }
+            "SERVER_RESPONSE_TOO_LARGE" => {
+                "The Server or proxy returned an unexpectedly large control \
+                 response. Verify that server.url reaches Invenqor and inspect \
+                 the proxy response limits."
             }
             "AGENT_ENDPOINT_NOT_FOUND" => {
                 "server.url carries a path or points at another product. Use the \
@@ -303,22 +311,7 @@ impl Transport {
             .send()
             .await
             .map_err(|error| transport_failure(error, OPERATION, PATH))?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
-        let Some(parsed) = parsed else {
-            return Err(ExchangeFailure {
-                code: "SERVER_RESPONSE_NOT_JSON".into(),
-                operation: OPERATION,
-                path: PATH,
-                status: Some(status.as_u16()),
-                server_code: None,
-                server_message: Some(first_line(&body)),
-                request_id: None,
-                cause: None,
-            }
-            .into());
-        };
+        let parsed = decode_json::<serde_json::Value>(response, OPERATION, PATH).await?;
         Ok(parsed
             .get("status")
             .and_then(|value| value.as_str())
@@ -401,16 +394,61 @@ fn header_value(response: &reqwest::Response, name: &str) -> Option<String> {
 /// Decodes a successful response, turning "the Server answered with HTML"
 /// into its own diagnosis instead of an opaque serde error.
 async fn decode_json<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     operation: &'static str,
     path: &'static str,
 ) -> Result<T> {
     let status = response.status().as_u16();
     let request_id = header_value(&response, "x-request-id");
-    let body = response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CONTROL_RESPONSE_BYTES as u64)
+    {
+        return Err(ExchangeFailure {
+            code: "SERVER_RESPONSE_TOO_LARGE".into(),
+            operation,
+            path,
+            status: Some(status),
+            server_code: None,
+            server_message: Some(format!(
+                "response exceeds the {}-byte control-response limit",
+                MAX_CONTROL_RESPONSE_BYTES
+            )),
+            request_id,
+            cause: None,
+        }
+        .into());
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(MAX_CONTROL_RESPONSE_BYTES),
+    );
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| transport_failure(error, operation, path))?;
+        .map_err(|error| transport_failure(error, operation, path))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_CONTROL_RESPONSE_BYTES {
+            return Err(ExchangeFailure {
+                code: "SERVER_RESPONSE_TOO_LARGE".into(),
+                operation,
+                path,
+                status: Some(status),
+                server_code: None,
+                server_message: Some(format!(
+                    "response exceeds the {}-byte control-response limit",
+                    MAX_CONTROL_RESPONSE_BYTES
+                )),
+                request_id,
+                cause: None,
+            }
+            .into());
+        }
+        body.extend_from_slice(&chunk);
+    }
     serde_json::from_slice::<T>(&body).map_err(|error| {
         ExchangeFailure {
             code: "SERVER_RESPONSE_NOT_JSON".into(),
@@ -429,15 +467,24 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn server_rejection(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     operation: &'static str,
     path: &'static str,
 ) -> ExchangeFailure {
     let status = response.status();
     let request_id_header = header_value(&response, "x-request-id");
-    let bytes = response.bytes().await.unwrap_or_default();
-    let limited = &bytes[..bytes.len().min(4096)];
-    let parsed = serde_json::from_slice::<APIErrorEnvelope>(limited).ok();
+    let mut limited = Vec::with_capacity(MAX_ERROR_RESPONSE_PREFIX_BYTES);
+    while limited.len() < MAX_ERROR_RESPONSE_PREFIX_BYTES {
+        let Ok(chunk) = response.chunk().await else {
+            break;
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let remaining = MAX_ERROR_RESPONSE_PREFIX_BYTES - limited.len();
+        limited.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    let parsed = serde_json::from_slice::<APIErrorEnvelope>(&limited).ok();
     let server_code = parsed.as_ref().map(|value| value.error.code.clone());
     let request_id = parsed
         .as_ref()
@@ -465,7 +512,7 @@ async fn server_rejection(
         server_message: parsed
             .as_ref()
             .map(|value| value.error.message.clone())
-            .or_else(|| Some(first_line(&String::from_utf8_lossy(limited)))),
+            .or_else(|| Some(first_line(&String::from_utf8_lossy(&limited)))),
         request_id,
         cause: None,
     }
@@ -525,7 +572,14 @@ fn cause_chain(error: &(dyn StdError + 'static)) -> String {
 fn first_line(value: &str) -> String {
     let line = value.trim().lines().next().unwrap_or_default().trim();
     if line.len() > 200 {
-        format!("{}…", &line[..200])
+        // HTTP error bodies are not necessarily ASCII. Slicing a Korean or
+        // other multi-byte message at byte 200 can land in the middle of a UTF-8
+        // code point and panic, turning the diagnostic path itself into a crash.
+        let mut end = 200;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &line[..end])
     } else {
         line.to_string()
     }
@@ -599,6 +653,52 @@ mod tests {
             timeout_seconds: 2,
             ..ServerConfig::default()
         }
+    }
+
+    #[test]
+    fn long_non_ascii_server_messages_are_truncated_without_panicking() {
+        let message = "등록 정책을 확인하십시오. ".repeat(20);
+        let line = first_line(&message);
+        assert!(line.ends_with('…'));
+        assert!(
+            line.len() <= 203,
+            "truncated line is too large: {}",
+            line.len()
+        );
+        assert!(std::str::from_utf8(line.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn oversized_chunked_control_response_is_rejected_at_the_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let chunk = vec![b'x'; 4096];
+            for _ in 0..=(MAX_CONTROL_RESPONSE_BYTES / chunk.len()) {
+                if write!(stream, "{:x}\r\n", chunk.len())
+                    .and_then(|_| stream.write_all(&chunk))
+                    .and_then(|_| stream.write_all(b"\r\n"))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        let transport = Transport::new(&insecure(format!("http://{address}")))
+            .unwrap()
+            .unwrap();
+        let error = transport.health().await.unwrap_err();
+        server.join().unwrap();
+        let failure = failure_of(&error).expect("classified oversized response");
+        assert_eq!(failure.code, "SERVER_RESPONSE_TOO_LARGE");
     }
 
     #[tokio::test]

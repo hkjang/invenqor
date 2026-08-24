@@ -115,11 +115,14 @@ type Release = {
   base: string;
   version: string;
   channel: string;
+  os: string;
   architecture: string;
   rollout_percent: number;
   allow_downgrade?: boolean;
   notes?: string;
   signature_verified: boolean;
+  signature_scheme?: string;
+  signature_version?: number;
   published_at?: string;
   published_by?: string;
   adopted_agents: number;
@@ -212,8 +215,8 @@ export function OperationsDashboard({
       subtitle="자산 최신성, 수집 건전성, 구성 분포를 한 화면에서 판단합니다."
       action={<button className="secondary" onClick={load}><RefreshCw size={15}/>새로고침</button>}/>
     {systemInfo?.database_mode === "SQLITE_FALLBACK" &&
-      <Notice tone="warning" title="SQLite 대체 모드">
-        운영 PostgreSQL이 연결되지 않았습니다. 설정에서 연결을 검증하십시오.
+      <Notice tone="warning" title="단일 인스턴스 SQLite 모드">
+        PostgreSQL DSN이 지정되지 않았습니다. 운영 전 설정에서 연결을 검증하고 모든 Pod에 같은 DSN을 배포하십시오.
       </Notice>}
     {error && <div className="error">{error}</div>}
     <div className="metrics executive">
@@ -330,36 +333,36 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
     <PageTitle kicker="CONFIGURATION ITEMS" title="자산 인벤토리"
       subtitle="검색부터 생성·수정·계보·관계·병합·분할까지 자산 수명주기를 관리합니다."
       action={<>{can(access, "assets.merge") && <button className="secondary" disabled={selected.length < 2} onClick={merge}><GitMerge size={15}/>선택 병합</button>}
-        <button className="secondary" onClick={() => downloadPath(`/api/v1/assets.csv?${parameters}`)}>
-          <Download size={15}/>CSV 내려받기</button>
+        {can(access, "assets.export") && <button className="secondary" onClick={() => downloadPath(`/api/v1/assets.csv?${parameters}`)}>
+          <Download size={15}/>CSV 내려받기</button>}
         {can(access, "assets.write") && <button className="primary compact" onClick={() => setCreating(true)}><Plus size={15}/>자산 등록</button>}</>}/>
     <div className="filter-bar asset-filters">
-      <div className="search"><Search size={18}/><input placeholder="이름 또는 자산 키" value={query}
+      <div className="search"><Search size={18}/><input aria-label="자산 이름 또는 자산 키 검색" placeholder="이름 또는 자산 키" value={query}
         onChange={event => changeFilter(setQuery)(event.target.value)}/></div>
-      <input placeholder="유형" value={type}
+      <input aria-label="자산 유형" placeholder="유형" value={type}
         onChange={event => {
           changeFilter(setType)(event.target.value);
           if (event.target.value === "process") setIncludeObservations(true);
         }}/>
       {/* Environment and criticality are what classification sets, so the
           inventory has to be filterable by them. */}
-      <select value={environment}
+      <select aria-label="자산 환경" value={environment}
         onChange={event => changeFilter(setEnvironment)(event.target.value)}>
         <option value="">전체 환경</option><option value="production">production</option>
         <option value="staging">staging</option><option value="development">development</option>
         <option value="other">other</option>
       </select>
-      <select value={criticality}
+      <select aria-label="자산 중요도" value={criticality}
         onChange={event => changeFilter(setCriticality)(event.target.value)}>
         <option value="">전체 중요도</option><option value="critical">critical</option>
         <option value="high">high</option><option value="normal">normal</option>
         <option value="low">low</option>
       </select>
-      <select value={status} onChange={event => changeFilter(setStatus)(event.target.value)}>
+      <select aria-label="자산 상태" value={status} onChange={event => changeFilter(setStatus)(event.target.value)}>
         <option value="">전체 상태</option><option value="active">active</option>
         <option value="discovered">discovered</option><option value="deleted">deleted</option>
       </select>
-      <select value={sort} onChange={event => changeFilter(setSort)(event.target.value)}>
+      <select aria-label="자산 정렬" value={sort} onChange={event => changeFilter(setSort)(event.target.value)}>
         <option value="recent">최근 확인 순</option><option value="oldest">오래된 확인 순</option>
         <option value="discovered">최근 발견 순</option><option value="name">이름 순</option>
         <option value="type">유형 순</option><option value="criticality">중요도 순</option>
@@ -369,7 +372,7 @@ export function AssetsPage({csrf, access}: {csrf: string; access: PermissionCont
       <label title="원시 프로세스는 주요 소프트웨어 자동 식별의 근거로 보존됩니다."><input type="checkbox"
         checked={includeObservations} onChange={event => changeFilter(setIncludeObservations)(event.target.checked)}/>
         프로세스 관찰 포함</label>
-      <button className="secondary" onClick={load}><RefreshCw size={15}/></button>
+      <button className="secondary" aria-label="자산 목록 새로고침" onClick={load}><RefreshCw size={15}/></button>
     </div>
     {!includeObservations && <p className="inventory-scope-note">관리 가능한 구성 항목 중심으로 표시합니다. 원시 프로세스는 삭제하지 않고 주요 소프트웨어의 식별 근거로 보존합니다.</p>}
     {error && <div className="error action-message">{error}</div>}
@@ -410,10 +413,10 @@ export function AgentsPage({
   const [error, setError] = React.useState("");
   const [file, setFile] = React.useState<File|null>(null);
   const [version, setVersion] = React.useState("");
+  const [osName, setOSName] = React.useState("linux");
   const [architecture, setArchitecture] = React.useState("x86_64");
   const [channel, setChannel] = React.useState("stable");
-  const [signature, setSignature] = React.useState("");
-  const [signatureFile, setSignatureFile] = React.useState<File|null>(null);
+  const [signatureBundle, setSignatureBundle] = React.useState<File|null>(null);
   const [notes, setNotes] = React.useState("");
   const [allowDowngrade, setAllowDowngrade] = React.useState(false);
   const [rollout, setRollout] = React.useState(10);
@@ -483,24 +486,22 @@ export function AgentsPage({
   };
   const publish = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!file) return;
+    if (!file || !signatureBundle) return;
     const body = new FormData();
     body.set("artifact", file);
     body.set("version", version);
     body.set("channel", channel);
+    body.set("os", osName);
     body.set("architecture", architecture);
     body.set("rollout_percent", String(rollout));
     if (notes) body.set("notes", notes);
-    if (allowDowngrade) body.set("allow_downgrade", "true");
-    // A signature file is what the signing step actually produces, so accept it
-    // directly instead of making the operator base64 it by hand.
-    if (signatureFile) body.set("signature_file", signatureFile);
-    else body.set("signature", signature);
+    body.set("allow_downgrade", String(allowDowngrade));
+    body.set("signature_bundle_file", signatureBundle);
     try {
       await api("/api/v1/admin/agent-updates", {
         method: "POST", headers: {"X-CSRF-Token": csrf}, body,
       });
-      setFile(null); setVersion(""); setSignature(""); setSignatureFile(null);
+      setFile(null); setVersion(""); setSignatureBundle(null);
       setNotes(""); setAllowDowngrade(false);
       await loadReleases();
     } catch (reason) { setError((reason as Error).message); }
@@ -536,29 +537,67 @@ export function AgentsPage({
       <Panel title="서명된 Agent 업데이트 게시" action="최대 128 MiB">
         <form className="compact-form update-form" onSubmit={publish}>
           <label>Artifact<input type="file" onChange={event => setFile(event.target.files?.[0] || null)} required/></label>
-          <label>버전<input value={version} onChange={event => setVersion(event.target.value)} placeholder="0.2.7" required/></label>
-          <label>채널<select value={channel} onChange={event => setChannel(event.target.value)}><option>stable</option><option>beta</option></select></label>
-          <label>아키텍처<select value={architecture} onChange={event => setArchitecture(event.target.value)}><option>x86_64</option><option>aarch64</option></select></label>
-          <label>서명 파일 <small className="optional">.sig 업로드</small>
-            <input type="file" onChange={event => setSignatureFile(event.target.files?.[0] || null)}/></label>
+          <label>서명 Bundle JSON<input type="file" accept="application/json,.json" required
+            onChange={event => {
+              const input = event.currentTarget;
+              const selected = event.target.files?.[0] || null;
+              setSignatureBundle(null);
+              if (!selected) return;
+              selected.text().then(raw => {
+                const bundle = JSON.parse(raw) as Record<string, unknown>;
+                if (bundle.signature_scheme !== "ed25519" || bundle.signature_version !== 2 ||
+                    typeof bundle.version !== "string" ||
+                    (bundle.channel !== "stable" && bundle.channel !== "beta") ||
+                    (bundle.os !== "linux" && bundle.os !== "windows") ||
+                    (bundle.architecture !== "x86_64" && bundle.architecture !== "aarch64") ||
+                    typeof bundle.allow_downgrade !== "boolean" ||
+                    typeof bundle.signature !== "string" || !bundle.signature ||
+                    typeof bundle.manifest_signature !== "string" || !bundle.manifest_signature) {
+                  throw new Error("Ed25519 dual-signature v2 bundle이 아닙니다.");
+                }
+                setVersion(bundle.version); setChannel(bundle.channel); setOSName(bundle.os);
+                setArchitecture(bundle.architecture);
+                setAllowDowngrade(bundle.allow_downgrade);
+                setSignatureBundle(selected);
+                setError("");
+              }).catch(reason => {
+                setSignatureBundle(null);
+                input.value = "";
+                setError(`서명 bundle을 읽을 수 없습니다: ${(reason as Error).message}`);
+              });
+            }}/></label>
+          <label>버전<input value={version} onChange={event => setVersion(event.target.value)}
+            placeholder="0.2.7" disabled={!!signatureBundle} required/></label>
+          <label>채널<select value={channel} disabled={!!signatureBundle}
+            onChange={event => setChannel(event.target.value)}><option>stable</option><option>beta</option></select></label>
+          <label>운영체제<select value={osName} disabled={!!signatureBundle} onChange={event => {
+            const selected = event.target.value;
+            setOSName(selected);
+            if (selected === "windows") setArchitecture("x86_64");
+          }}><option value="linux">Linux</option><option value="windows">Windows</option></select></label>
+          <label>아키텍처<select value={architecture} disabled={!!signatureBundle}
+            onChange={event => setArchitecture(event.target.value)}><option>x86_64</option>{osName === "linux" && <option>aarch64</option>}</select></label>
           <label>최초 Rollout %<input type="number" min="0" max="100" value={rollout}
             onChange={event => setRollout(Number(event.target.value))}/></label>
-          {!signatureFile && <label className="wide">Ed25519 Signature (Base64)
-            <textarea value={signature} onChange={event => setSignature(event.target.value)}
-              placeholder="서명 파일을 올리면 비워 두어도 됩니다" required/></label>}
           <label className="wide">릴리즈 메모<input value={notes}
             onChange={event => setNotes(event.target.value)} placeholder="무엇이 바뀌었는지"/></label>
           <label className="wide inline-check">
             <input type="checkbox" checked={allowDowngrade}
+              disabled={!!signatureBundle}
               onChange={event => setAllowDowngrade(event.target.checked)}/>
             이전 버전으로 되돌리는 롤백 릴리즈
           </label>
-          <button className="primary compact"><Save size={15}/>게시</button>
+          <button className="primary compact" disabled={
+            !file || !signatureBundle || releaseInfo?.signature_verified === false
+          }><Save size={15}/>게시</button>
         </form>
         <p className="hint update-hint">
+          <strong>scripts/sign-agent-update-manifest-v2.py</strong>가 생성한 JSON 하나를 업로드하면
+          구 Agent용 artifact 서명과 v2 manifest 서명, 버전·플랫폼·롤백 정보가 자동으로 채워집니다.
+          롤백 bundle은 helper에 <strong>--allow-downgrade</strong>를 지정해 다시 생성하십시오. {" "}
           {releaseInfo?.signature_verified
             ? "Server에 서명 공개키가 설정되어 있어 게시 시점에 서명을 검증합니다. 잘못된 서명은 여기서 거부됩니다."
-            : "Server에 서명 공개키가 없어 게시 시점 검증을 할 수 없습니다. INVENQOR_UPDATE_PUBLIC_KEY를 설정하면 잘못된 서명을 fleet 전체가 실패하기 전에 잡아냅니다."}
+            : "Server에 서명 공개키가 없어 게시가 잠겨 있습니다. INVENQOR_UPDATE_PUBLIC_KEY를 설정한 뒤 다시 시도하십시오."}
           {" 처음에는 10% 정도로 게시하고 아래에서 단계적으로 넓히십시오."}
         </p>
       </Panel>
@@ -574,11 +613,14 @@ export function AgentsPage({
             : 0;
           return <div key={release.base} className={release.rollout_percent === 0 ? "release halted" : "release"}>
             <div className="release-head">
-              <strong>{release.version}<span>{release.architecture} · {release.channel}</span></strong>
+              <strong>{release.version}<span>{release.os || "linux"} · {release.architecture} · {release.channel}</span></strong>
               <div className="release-flags">
                 {release.signature_verified
                   ? <em className="ok" title="게시 시점에 서명을 검증했습니다.">서명 검증됨</em>
                   : <em title="Server에 공개키가 없어 검증하지 못했습니다.">서명 미검증</em>}
+                <em title="버전·플랫폼·크기·해시·롤백 여부를 함께 보호합니다.">
+                  서명 v{release.signature_version || 1}
+                </em>
                 {release.allow_downgrade && <em className="warn">롤백</em>}
                 {release.rollout_percent === 0 && <em className="warn">중단</em>}
               </div>
@@ -878,23 +920,23 @@ export function AuditPage() {
     {/* Every one of these used to filter only the rows already downloaded, so a
         search for an older event found nothing and read as "no such record". */}
     <div className="filter-bar audit-filters">
-      <div className="search"><Search size={16}/><input value={query}
+      <div className="search"><Search size={16}/><input aria-label="감사 로그 검색" value={query}
         onChange={event => changeFilter(setQuery)(event.target.value)}
         placeholder="행위, 사용자, 자원, request ID, IP, 사유 검색"/></div>
-      <select value={action} onChange={event => changeFilter(setAction)(event.target.value)}>
+      <select aria-label="감사 행위" value={action} onChange={event => changeFilter(setAction)(event.target.value)}>
         <option value="">모든 행위</option>
         {(facets?.actions || []).map(bucket =>
           <option key={bucket.label} value={bucket.label}>
             {bucket.label} ({bucket.count})</option>)}
       </select>
-      <select value={resourceType}
+      <select aria-label="감사 자원 유형" value={resourceType}
         onChange={event => changeFilter(setResourceType)(event.target.value)}>
         <option value="">모든 자원</option>
         {(facets?.resource_types || []).map(bucket =>
           <option key={bucket.label} value={bucket.label}>
             {bucket.label} ({bucket.count})</option>)}
       </select>
-      <select value={result} onChange={event => changeFilter(setResult)(event.target.value)}>
+      <select aria-label="감사 결과" value={result} onChange={event => changeFilter(setResult)(event.target.value)}>
         <option value="">모든 결과</option>
         {(facets?.results || []).map(bucket =>
           <option key={bucket.label} value={bucket.label}>
@@ -1020,24 +1062,24 @@ export function ServerLogsPage() {
       <div><span>확인된 Pod</span><strong>{facets.instances.length}</strong></div>
     </div>
     <div className="filter-bar diagnostic-filters">
-      <div className="search"><Search size={16}/><input value={query}
+      <div className="search"><Search size={16}/><input aria-label="Server 진단 로그 검색" value={query}
         onChange={event => setQuery(event.target.value)}
         onKeyDown={event => event.key === "Enter" && load()}
         placeholder="request ID, Agent ID, 오류 코드, IP 검색"/></div>
-      <select value={level} onChange={event => setLevel(event.target.value)}>
+      <select aria-label="로그 수준" value={level} onChange={event => setLevel(event.target.value)}>
         <option value="">모든 수준</option><option value="error">Error</option>
         <option value="warning">Warning</option><option value="info">Info</option>
       </select>
-      <select value={component} onChange={event => setComponent(event.target.value)}>
+      <select aria-label="로그 구성요소" value={component} onChange={event => setComponent(event.target.value)}>
         <option value="">모든 구성요소</option>
         {facets.components.map(value => <option value={value} key={value}>
           {diagnosticComponentLabels[value] || value}</option>)}
       </select>
-      <select value={instance} onChange={event => setInstance(event.target.value)}>
+      <select aria-label="Server Pod" value={instance} onChange={event => setInstance(event.target.value)}>
         <option value="">모든 Pod</option>
         {facets.instances.map(value => <option value={value} key={value}>{value}</option>)}
       </select>
-      <select value={limit} onChange={event => setLimit(Number(event.target.value))}>
+      <select aria-label="로그 표시 건수" value={limit} onChange={event => setLimit(Number(event.target.value))}>
         <option value="100">100건</option><option value="200">200건</option>
         <option value="500">500건</option>
       </select>
@@ -1157,7 +1199,7 @@ function AssetDetail({id, csrf, access, onClose, onChanged}: {
     {asset && <><div className="detail-actions">
       {can(access, "assets.write") && <button className="secondary" onClick={() => setEditing(true)}>수정</button>}
       {asset.deleted_at
-        ? can(access, "assets.write") && <button className="secondary" onClick={() =>
+        ? can(access, "assets.delete") && <button className="secondary" onClick={() =>
           mutate(() => api(`/api/v1/assets/${id}/restore`, jsonRequest(csrf, {})))}>복원</button>
         : can(access, "assets.delete") && <button className="danger-button" onClick={() => {
           if (window.confirm("이 자산을 삭제 상태로 전환합니까?")) mutate(() =>
@@ -1310,7 +1352,7 @@ function Notice({tone, title, children}: {tone: "info"|"warning"; title: string;
 function SecretReveal({secret, onClose}: {secret: string; onClose: () => void}) {
   return <div className="secret-reveal"><div><strong>새 Secret — 지금 한 번만 표시됩니다</strong><code>{secret}</code></div>
     <button className="secondary" onClick={() => navigator.clipboard.writeText(secret)}><Copy size={16}/>복사</button>
-    <button className="secondary" onClick={onClose}><X size={16}/></button></div>;
+    <button className="secondary" aria-label="Secret 닫기" onClick={onClose}><X size={16}/></button></div>;
 }
 function DataRow({label, value}: {label: string; value: string}) {
   return <div className="data-row"><span>{label}</span><strong>{value}</strong></div>;

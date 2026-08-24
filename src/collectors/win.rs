@@ -305,124 +305,137 @@ pub struct InstalledSoftwareCollector;
 
 const UNINSTALL_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
+pub(crate) fn loaded_user_sids() -> std::collections::BTreeSet<String> {
+    sys::registry_subkeys(sys::HKEY_USERS, "", sys::RegistryView::Native)
+        .into_iter()
+        .filter(|sid| sid.starts_with("S-") && !sid.ends_with("_Classes"))
+        .collect()
+}
+
 impl Collector for InstalledSoftwareCollector {
     fn name(&self) -> &'static str {
         "packages"
     }
 
     fn collect(&self, collected_at: u64) -> Result<Vec<AssetRecord>> {
-        let mut records = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
+        let mut inventory = UninstallInventory::new(collected_at);
         let machine_scopes = [
             (sys::RegistryView::Native, "machine"),
             (sys::RegistryView::Wow6432, "machine-x86"),
         ];
         for (view, scope) in machine_scopes {
-            collect_uninstall_keys(
-                sys::HKEY_LOCAL_MACHINE,
-                UNINSTALL_PATH,
-                view,
-                scope,
-                collected_at,
-                &mut seen,
-                &mut records,
-            );
+            inventory.collect_keys(sys::HKEY_LOCAL_MACHINE, UNINSTALL_PATH, view, scope, None);
         }
         // Per-user installs live under each loaded profile in HKEY_USERS. A
         // service sees every loaded hive, which is what makes this readable at
         // all from a non-interactive context.
-        for sid in sys::registry_subkeys(sys::HKEY_USERS, "", sys::RegistryView::Native) {
-            if sid.ends_with("_Classes") || sid == ".DEFAULT" {
-                continue;
-            }
+        for sid in loaded_user_sids() {
             let path = format!(r"{sid}\{UNINSTALL_PATH}");
-            collect_uninstall_keys(
+            inventory.collect_keys(
                 sys::HKEY_USERS,
                 &path,
                 sys::RegistryView::Native,
                 "user",
-                collected_at,
-                &mut seen,
-                &mut records,
+                Some(&sid),
             );
         }
-        Ok(records)
+        Ok(inventory.records)
     }
 }
 
-fn collect_uninstall_keys(
-    root: isize,
-    path: &str,
-    view: sys::RegistryView,
-    scope: &str,
+struct UninstallInventory {
     collected_at: u64,
-    seen: &mut std::collections::BTreeSet<String>,
-    records: &mut Vec<AssetRecord>,
-) {
-    const FIELDS: &[&str] = &[
-        "DisplayName",
-        "DisplayVersion",
-        "Publisher",
-        "InstallDate",
-        "InstallLocation",
-        "EstimatedSize",
-        "SystemComponent",
-        "ReleaseType",
-        "ParentKeyName",
-        "WindowsInstaller",
-    ];
-    for key in sys::registry_subkeys(root, path, view) {
-        let full = format!("{path}\\{key}");
-        let Some(values) = sys::registry_values(root, &full, view, FIELDS) else {
-            continue;
-        };
-        let text = |name: &str| values.get(name).cloned().and_then(|value| value.text());
-        let number = |name: &str| values.get(name).cloned().and_then(|value| value.number());
-        let Some(display_name) = text("DisplayName") else {
-            continue;
-        };
-        let release_type = text("ReleaseType");
-        let parent_key = text("ParentKeyName");
-        if !crate::windows_inventory::is_reportable_product(&UninstallEntry {
-            display_name: Some(&display_name),
-            system_component: number("SystemComponent") == Some(1),
-            release_type: release_type.as_deref(),
-            parent_key_name: parent_key.as_deref(),
-        }) {
-            continue;
+    seen: std::collections::BTreeSet<String>,
+    records: Vec<AssetRecord>,
+}
+
+impl UninstallInventory {
+    fn new(collected_at: u64) -> Self {
+        Self {
+            collected_at,
+            seen: std::collections::BTreeSet::new(),
+            records: Vec::new(),
         }
-        let version = text("DisplayVersion");
-        let identity = format!(
-            "{}|{}|{}",
-            display_name.to_lowercase(),
-            version.clone().unwrap_or_default().to_lowercase(),
-            scope
-        );
-        if !seen.insert(identity) {
-            continue;
-        }
-        let payload = json!({
-            "manager": "windows",
-            "name": display_name,
-            "version": version,
-            "publisher": text("Publisher"),
-            "architecture": match view {
+    }
+
+    fn collect_keys(
+        &mut self,
+        root: isize,
+        path: &str,
+        view: sys::RegistryView,
+        scope: &str,
+        owner_sid: Option<&str>,
+    ) {
+        const FIELDS: &[&str] = &[
+            "DisplayName",
+            "DisplayVersion",
+            "Publisher",
+            "InstallDate",
+            "InstallLocation",
+            "EstimatedSize",
+            "SystemComponent",
+            "ReleaseType",
+            "ParentKeyName",
+            "WindowsInstaller",
+        ];
+        for key in sys::registry_subkeys(root, path, view) {
+            let full = format!("{path}\\{key}");
+            let Some(values) = sys::registry_values(root, &full, view, FIELDS) else {
+                continue;
+            };
+            let text = |name: &str| values.get(name).cloned().and_then(|value| value.text());
+            let number = |name: &str| values.get(name).cloned().and_then(|value| value.number());
+            let Some(display_name) = text("DisplayName") else {
+                continue;
+            };
+            let release_type = text("ReleaseType");
+            let parent_key = text("ParentKeyName");
+            if !crate::windows_inventory::is_reportable_product(&UninstallEntry {
+                display_name: Some(&display_name),
+                system_component: number("SystemComponent") == Some(1),
+                release_type: release_type.as_deref(),
+                parent_key_name: parent_key.as_deref(),
+            }) {
+                continue;
+            }
+            let version = text("DisplayVersion");
+            let architecture = match view {
                 sys::RegistryView::Native => "x64",
                 sys::RegistryView::Wow6432 => "x86",
-            },
-            "scope": scope,
-            "install_date": text("InstallDate"),
-            "install_location": text("InstallLocation"),
-            "estimated_size_kb": number("EstimatedSize"),
-            "registry_key": key,
-            "installer": if number("WindowsInstaller") == Some(1) { "msi" } else { "other" },
-        });
-        records.push(record(
-            "software.package",
-            "uninstall registry",
-            collected_at,
-            payload,
-        ));
+            };
+            let identity = format!(
+                "{}|{}|{}|{}|{}|{}",
+                display_name.to_lowercase(),
+                version.clone().unwrap_or_default().to_lowercase(),
+                scope,
+                owner_sid.unwrap_or_default().to_lowercase(),
+                key.to_lowercase(),
+                architecture,
+            );
+            if !self.seen.insert(identity) {
+                continue;
+            }
+            let payload = json!({
+                "manager": "windows",
+                "name": display_name,
+                "version": version,
+                "publisher": text("Publisher"),
+                "architecture": architecture,
+                "scope": scope,
+                "owner_sid": owner_sid,
+                "install_date": text("InstallDate"),
+                "install_location": text("InstallLocation"),
+                "estimated_size_kb": number("EstimatedSize"),
+                "registry_key": key,
+                "installer": if number("WindowsInstaller") == Some(1) { "msi" } else { "other" },
+            });
+            self.records.push(record(
+                "software.package",
+                "uninstall registry",
+                self.collected_at,
+                payload,
+            ));
+        }
     }
 }
 

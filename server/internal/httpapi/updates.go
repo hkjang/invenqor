@@ -2,9 +2,9 @@ package httpapi
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -30,7 +30,7 @@ func (s *Server) agentUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, r, 403, "AGENT_ID_MISMATCH", "The agent identity does not match.")
 		return
 	}
-	manifest, err := s.updateStore.Latest(
+	candidates, err := s.updateStore.Candidates(
 		r.URL.Query().Get("channel"),
 		r.URL.Query().Get("os"),
 		r.URL.Query().Get("arch"),
@@ -41,16 +41,25 @@ func (s *Server) agentUpdateManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := r.URL.Query().Get("current_version")
-	// A rollback is the one case where "not newer" is the intent. It stays safe
-	// because the artifact is signed and hash-checked either way.
-	if manifest == nil ||
-		(!newerVersion(current, manifest.Version) &&
-			!(manifest.AllowDowngrade && manifest.Version != current)) {
+	manifest := selectAgentUpdateOffer(candidates, current)
+	if manifest == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, manifest)
+}
+
+func selectAgentUpdateOffer(
+	candidates []updates.Manifest,
+	current string,
+) *updates.Manifest {
+	for index := range candidates {
+		if agentUpdateOfferAllowed(&candidates[index], current) {
+			return &candidates[index]
+		}
+	}
+	return nil
 }
 
 func (s *Server) agentUpdateArtifact(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +86,19 @@ func (s *Server) publishAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, r, 503, "UPDATE_STORE_UNAVAILABLE", "The update store is unavailable.")
 		return
 	}
+	// New v2 publications carry both a bridge artifact signature and a
+	// metadata-bound manifest signature. Accepting either without checking it
+	// would only defer a bad publication to every Agent in the fleet, so the
+	// administrative publish API is unavailable until the pinned public key is
+	// configured. Existing stored releases remain readable for migration.
+	if !s.updateStore.SigningKeyConfigured() {
+		writeAPIError(
+			w, r, http.StatusServiceUnavailable,
+			"UPDATE_SIGNING_KEY_MISSING",
+			"INVENQOR_UPDATE_PUBLIC_KEY is required to publish Agent updates.",
+		)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 130*1024*1024)
 	if err := r.ParseMultipartForm(130 * 1024 * 1024); err != nil {
 		writeAPIError(w, r, 400, "INVALID_UPDATE", "The multipart update is invalid.")
@@ -88,31 +110,26 @@ func (s *Server) publishAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	signature, allowDowngrade, notes, rollout, err := publishOptions(r)
+	options, err := publishOptions(r)
 	if err != nil {
 		writeAPIError(w, r, 400, "INVALID_UPDATE", err.Error())
 		return
 	}
-	// Default the platform fields: a publisher who omits them means "linux, this
-	// architecture", and making them mandatory only invited typos.
-	osName := strings.TrimSpace(r.FormValue("os"))
-	if osName == "" {
-		osName = "linux"
-	}
-	channel := strings.TrimSpace(r.FormValue("channel"))
-	if channel == "" {
-		channel = "stable"
-	}
 	manifest, err := s.updateStore.Publish(updates.Manifest{
-		Version:        strings.TrimSpace(r.FormValue("version")),
-		Channel:        channel,
-		OS:             osName,
-		Architecture:   strings.TrimSpace(r.FormValue("architecture")),
-		Signature:      signature,
-		Rollout:        rollout,
-		AllowDowngrade: allowDowngrade,
-		Notes:          notes,
-		PublishedBy:    principalFromContext(r.Context()).User.Username,
+		Version:           options.Version,
+		Channel:           options.Channel,
+		OS:                options.OS,
+		Architecture:      options.Architecture,
+		SHA256:            options.SHA256,
+		Size:              options.Size,
+		Signature:         options.Signature,
+		ManifestSignature: options.ManifestSignature,
+		SignatureScheme:   updates.SignatureSchemeEd25519,
+		SignatureVersion:  updates.SignatureVersionV2,
+		Rollout:           options.Rollout,
+		AllowDowngrade:    options.AllowDowngrade,
+		Notes:             options.Notes,
+		PublishedBy:       principalFromContext(r.Context()).User.Username,
 	}, io.LimitReader(file, 128*1024*1024+1))
 	if err != nil {
 		// A rejected signature is the one failure worth its own code: it means the
@@ -131,14 +148,67 @@ func (s *Server) publishAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordAdminAudit(r, "agent_update.publish", "agent_update",
-		manifest.Version+"-"+manifest.Architecture, nil, manifest, notes)
+		manifest.Version+"-"+manifest.OS+"-"+manifest.Architecture,
+		nil, manifest, options.Notes)
 	writeJSON(w, 201, manifest)
 }
 
-func newerVersion(current, candidate string) bool {
-	var ca, cb, cc, na, nb, nc int
-	_, err1 := fmt.Sscanf(strings.TrimPrefix(current, "v"), "%d.%d.%d", &ca, &cb, &cc)
-	_, err2 := fmt.Sscanf(strings.TrimPrefix(candidate, "v"), "%d.%d.%d", &na, &nb, &nc)
-	return err1 == nil && err2 == nil &&
-		(na > ca || na == ca && (nb > cb || nb == cb && nc > cc))
+func updateVersionParts(value string) ([3]uint64, bool) {
+	var result [3]uint64
+	pieces := strings.Split(strings.TrimPrefix(value, "v"), ".")
+	if len(pieces) != len(result) {
+		return result, false
+	}
+	for index, piece := range pieces {
+		if piece == "" || strings.IndexFunc(piece, func(char rune) bool {
+			return char < '0' || char > '9'
+		}) >= 0 {
+			return result, false
+		}
+		parsed, err := strconv.ParseUint(piece, 10, 64)
+		if err != nil {
+			return result, false
+		}
+		result[index] = parsed
+	}
+	return result, true
+}
+
+func agentUpdateOfferAllowed(manifest *updates.Manifest, current string) bool {
+	if manifest == nil {
+		return false
+	}
+	currentParts, currentOK := updateVersionParts(current)
+	candidateParts, candidateOK := updateVersionParts(manifest.Version)
+	if !currentOK || !candidateOK {
+		return false
+	}
+	comparison := compareUpdateVersionParts(candidateParts, currentParts)
+	if manifest.AllowDowngrade {
+		// Artifact-only signatures do not authenticate allow_downgrade. Never
+		// send an old stored v1 rollback to any Agent. A v2 rollback is safe only
+		// for an Agent that knows to verify manifest_signature; v0.2.14 and
+		// earlier would trust only the bridge artifact signature and unsigned
+		// rollback flag. Apply this gate even when the target happens to be newer
+		// than an old Agent: an explicitly rollback-marked release is never part
+		// of the legacy bridge path.
+		if manifest.SignatureVersion < updates.SignatureVersionV2 || comparison == 0 {
+			return false
+		}
+		minimumV2, _ := updateVersionParts("0.2.15")
+		return compareUpdateVersionParts(currentParts, minimumV2) >= 0
+	}
+	return comparison > 0
+}
+
+func compareUpdateVersionParts(left, right [3]uint64) int {
+	for index := range left {
+		switch {
+		case left[index] < right[index]:
+			return -1
+		case left[index] > right[index]:
+			return 1
+		}
+	}
+	return 0
 }

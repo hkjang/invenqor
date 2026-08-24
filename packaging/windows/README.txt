@@ -21,10 +21,21 @@ What gets installed
     %ProgramFiles%\Invenqor\invenqor-agent.exe   the service binary
     %ProgramData%\Invenqor\config.toml           configuration
     %ProgramData%\Invenqor\state\                identity, inventory hash, queue
+    %ProgramData%\Invenqor\service-name          installer-managed SCM identity
 
 Both directories are restricted to SYSTEM and Administrators. The state
 directory holds the device credential and the configuration can hold an
 enrollment token, so neither may be readable by ordinary users.
+
+The default service name is invenqor-agent. If policy requires another name,
+install and upgrade with the same validated value:
+
+    .\scripts\install.ps1 -ServiceName 'Invenqor Agent Finance'
+
+The installer persists that identity beside config.toml. Console diagnosis and
+automatic-update restart recover it automatically; do not edit service-name by
+hand. Legacy installations whose SCM command still contains --service and no
+identity file continue to use invenqor-agent.
 
 The service runs as LocalSystem, starts delayed-automatic, and connects outbound
 only - it opens no listening port. It needs LocalSystem to read the Service

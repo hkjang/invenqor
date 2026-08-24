@@ -16,7 +16,7 @@ impl Collector for DiskCollector {
         let mounts = std::fs::read_to_string("/proc/self/mounts")
             .or_else(|_| std::fs::read_to_string("/proc/mounts"))?;
         let mut records = Vec::new();
-        for mount in parse_mounts(&mounts) {
+        for mount in visible_mounts(parse_mounts(&mounts)) {
             let usage = statvfs(Path::new(&mount.target));
             records.push(record(
                 "hardware.filesystem",
@@ -33,6 +33,19 @@ impl Collector for DiskCollector {
         }
         Ok(records)
     }
+}
+
+/// A mount namespace may stack more than one mount on the same target. Only the
+/// last one is visible there, and `filesystem:<mountpoint>` is intentionally the
+/// asset identity. Emitting every layer creates duplicate asset IDs; the ingest
+/// and delta maps then pick different copies depending on iteration order. Keep
+/// the final (topmost) entry and sort by target for a stable snapshot.
+fn visible_mounts(mounts: Vec<Mount>) -> Vec<Mount> {
+    let mut visible = std::collections::BTreeMap::new();
+    for mount in mounts {
+        visible.insert(mount.target.clone(), mount);
+    }
+    visible.into_values().collect()
 }
 
 struct Mount {
@@ -93,5 +106,14 @@ mod tests {
         let values = parse_mounts("/dev/sda /a\\040b ext4 rw,relatime 0 0\n");
         assert_eq!(values[0].target, "/a b");
         assert_eq!(values[0].options, vec!["rw", "relatime"]);
+    }
+
+    #[test]
+    fn stacked_mounts_emit_one_asset_for_the_visible_layer() {
+        let mounts = parse_mounts("/dev/sda1 /data ext4 rw 0 0\nnone /data tmpfs rw,nosuid 0 0\n");
+        let visible = visible_mounts(mounts);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].target, "/data");
+        assert_eq!(visible[0].filesystem, "tmpfs");
     }
 }

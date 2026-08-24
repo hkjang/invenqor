@@ -45,6 +45,11 @@ pub fn configured(config: &CollectorConfig) -> Vec<Arc<dyn Collector>> {
     win::configured(config)
 }
 
+#[cfg(windows)]
+pub fn loaded_windows_user_sids() -> std::collections::BTreeSet<String> {
+    win::loaded_user_sids()
+}
+
 #[cfg(not(windows))]
 pub fn configured(config: &CollectorConfig) -> Vec<Arc<dyn Collector>> {
     let mut result: Vec<Arc<dyn Collector>> = Vec::new();
@@ -216,12 +221,31 @@ fn asset_id(category: &str, payload: &serde_json::Value) -> String {
     };
     match category {
         "process" => format!("process:{}:{}", number("pid"), number("start_ticks")),
-        "software.package" => format!(
-            "package:{}:{}:{}",
-            text("manager"),
-            text("name"),
-            text("architecture")
-        ),
+        "software.package" => {
+            let base = format!(
+                "package:{}:{}:{}",
+                text("manager"),
+                text("name"),
+                text("architecture")
+            );
+            match text("manager") {
+                // RPM permits several versions of install-only packages (kernels
+                // and gpg-pubkey are common examples) at the same time. Version
+                // is therefore part of the package-instance identity there.
+                "rpm" => format!("{base}:{}", text("version")),
+                // The same Windows product can be installed machine-wide and in
+                // several user hives. The registry key is stable across a version
+                // update; scope and SID distinguish those real installations.
+                "windows" => format!(
+                    "package:windows:{}:{}:{}:{}",
+                    text("architecture").to_ascii_lowercase(),
+                    text("scope").to_ascii_lowercase(),
+                    text("owner_sid").to_ascii_lowercase(),
+                    text("registry_key").to_ascii_lowercase()
+                ),
+                _ => base,
+            }
+        }
         "service" => format!("service:{}:{}", text("manager"), text("name")),
         "hardware.filesystem" => format!("filesystem:{}", text("mountpoint")),
         "network.interface" => format!("interface:{}", text("name")),
@@ -306,5 +330,53 @@ mod tests {
             .find(|error| error.collector == "hangs")
             .expect("the skip must be reported");
         assert!(reported.message.contains("skipped"), "{}", reported.message);
+    }
+
+    #[test]
+    fn package_asset_ids_distinguish_coinstalled_rpm_and_windows_instances() {
+        let rpm = |version: &str| {
+            asset_id(
+                "software.package",
+                &serde_json::json!({
+                    "manager": "rpm",
+                    "name": "kernel",
+                    "architecture": "x86_64",
+                    "version": version,
+                }),
+            )
+        };
+        assert_ne!(rpm("0:5.14.0-1"), rpm("0:5.14.0-2"));
+
+        let windows = |name: &str, scope: &str, owner_sid: &str| {
+            asset_id(
+                "software.package",
+                &serde_json::json!({
+                    "manager": "windows",
+                    "name": name,
+                    "architecture": "x64",
+                    "scope": scope,
+                    "owner_sid": owner_sid,
+                    "registry_key": "{00000000-0000-0000-0000-000000000001}",
+                }),
+            )
+        };
+        assert_ne!(
+            windows("Example Product", "machine", ""),
+            windows("Example Product", "user", "S-1-5-21-1")
+        );
+        assert_ne!(
+            windows("Example Product", "user", "S-1-5-21-1"),
+            windows("Example Product", "user", "S-1-5-21-2")
+        );
+        assert_eq!(
+            windows("Old Display Name", "user", "S-1-5-21-1"),
+            windows("Renamed Product", "user", "S-1-5-21-1"),
+            "a mutable display name must not change a registry installation identity"
+        );
+        assert_eq!(
+            windows("Example", "USER", "s-1-5-21-1"),
+            windows("Example", "user", "S-1-5-21-1"),
+            "case-insensitive registry identity components must be normalized"
+        );
     }
 }

@@ -22,7 +22,11 @@ var (
 	ErrInvalid      = errors.New("API key input is invalid")
 	ErrUnauthorized = errors.New("API key is invalid or inactive")
 	ErrNotFound     = errors.New("API key does not exist")
+	ErrConflict     = errors.New("API key changed concurrently")
+	ErrForbidden    = errors.New("API key operation is not allowed")
 )
+
+const scopeMutationAttempts = 8
 
 type Scope struct {
 	Name        string `json:"name"`
@@ -63,6 +67,16 @@ type Credential struct {
 type Created struct {
 	Key    Key    `json:"api_key"`
 	Secret string `json:"secret"`
+}
+
+// Access describes the authenticated user at the service boundary. Regular
+// administrators can manage only their own keys, and plaintext credentials
+// can be issued only for scopes they already hold. Super administrators are
+// the explicit exception to both rules.
+type Access struct {
+	UserID          string
+	SuperAdmin      bool
+	GrantableScopes []string
 }
 
 type Service struct {
@@ -163,6 +177,34 @@ func (s *Service) List(ctx context.Context) ([]Key, error) {
 	return result, rows.Err()
 }
 
+func (s *Service) ListFor(ctx context.Context, access Access) ([]Key, error) {
+	if access.UserID == "" {
+		return nil, ErrForbidden
+	}
+	if access.SuperAdmin {
+		return s.List(ctx)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, name, key_prefix, scopes_json, expires_at,
+		 last_used_at, created_at, updated_at, revoked_at
+		 FROM api_keys WHERE user_id=$1 ORDER BY created_at DESC, id`,
+		access.UserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]Key, 0)
+	for rows.Next() {
+		key, err := scanKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, key)
+	}
+	return result, rows.Err()
+}
+
 func (s *Service) Get(ctx context.Context, id string) (Key, error) {
 	key, err := scanKey(s.db.QueryRowContext(ctx,
 		`SELECT id, user_id, name, key_prefix, scopes_json, expires_at,
@@ -175,27 +217,27 @@ func (s *Service) Get(ctx context.Context, id string) (Key, error) {
 	return key, err
 }
 
+func (s *Service) GetFor(ctx context.Context, id string, access Access) (Key, error) {
+	if access.UserID == "" {
+		return Key{}, ErrForbidden
+	}
+	key, err := s.Get(ctx, id)
+	if err != nil {
+		return Key{}, err
+	}
+	if !access.SuperAdmin && key.UserID != access.UserID {
+		// Do not disclose another user's key identifier to a regular caller.
+		return Key{}, ErrNotFound
+	}
+	return key, nil
+}
+
 func (s *Service) ReplaceScopes(
 	ctx context.Context,
 	id string,
 	scopes []string,
 ) (Key, error) {
-	scopes, err := ValidScopes(scopes)
-	if err != nil {
-		return Key{}, err
-	}
-	bytes, _ := json.Marshal(scopes)
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE api_keys SET scopes_json=$1, updated_at=CURRENT_TIMESTAMP
-		 WHERE id=$2 AND revoked_at IS NULL`, string(bytes), id,
-	)
-	if err != nil {
-		return Key{}, err
-	}
-	if rows, _ := result.RowsAffected(); rows == 0 {
-		return Key{}, ErrNotFound
-	}
-	return s.Get(ctx, id)
+	return s.Update(ctx, id, nil, &scopes)
 }
 
 func (s *Service) AddScopes(
@@ -203,11 +245,13 @@ func (s *Service) AddScopes(
 	id string,
 	additions []string,
 ) (Key, error) {
-	key, err := s.Get(ctx, id)
+	additions, err := ValidScopes(additions)
 	if err != nil {
 		return Key{}, err
 	}
-	return s.ReplaceScopes(ctx, id, append(key.Scopes, additions...))
+	return s.mutateScopes(ctx, id, func(current []string) ([]string, error) {
+		return append(current, additions...), nil
+	})
 }
 
 func (s *Service) RemoveScope(
@@ -215,20 +259,77 @@ func (s *Service) RemoveScope(
 	id string,
 	remove string,
 ) (Key, error) {
-	key, err := s.Get(ctx, id)
-	if err != nil {
+	remove = strings.TrimSpace(remove)
+	if _, err := ValidScopes([]string{remove}); err != nil {
 		return Key{}, err
 	}
-	next := make([]string, 0, len(key.Scopes))
-	for _, scope := range key.Scopes {
-		if scope != remove {
-			next = append(next, scope)
+	return s.mutateScopes(ctx, id, func(current []string) ([]string, error) {
+		next := make([]string, 0, len(current))
+		for _, scope := range current {
+			if scope != remove {
+				next = append(next, scope)
+			}
+		}
+		if len(next) == len(current) {
+			return nil, fmt.Errorf("%w: scope is not assigned", ErrInvalid)
+		}
+		return next, nil
+	})
+}
+
+// mutateScopes uses the stored JSON value as an optimistic version. This is
+// deliberately database-backed instead of guarded by a process mutex: two
+// Server Pods can otherwise read the same scope list and silently overwrite
+// one another's additions or removals.
+func (s *Service) mutateScopes(
+	ctx context.Context,
+	id string,
+	mutate func([]string) ([]string, error),
+) (Key, error) {
+	for range scopeMutationAttempts {
+		var currentJSON string
+		err := s.db.QueryRowContext(
+			ctx,
+			`SELECT scopes_json FROM api_keys
+			 WHERE id=$1 AND revoked_at IS NULL`,
+			id,
+		).Scan(&currentJSON)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Key{}, ErrNotFound
+		}
+		if err != nil {
+			return Key{}, err
+		}
+		var current []string
+		if err := json.Unmarshal([]byte(currentJSON), &current); err != nil {
+			return Key{}, fmt.Errorf("decode API key scopes: %w", err)
+		}
+		next, err := mutate(append([]string(nil), current...))
+		if err != nil {
+			return Key{}, err
+		}
+		next, err = ValidScopes(next)
+		if err != nil {
+			return Key{}, err
+		}
+		nextJSON, _ := json.Marshal(next)
+		result, err := s.db.ExecContext(
+			ctx,
+			`UPDATE api_keys
+			 SET scopes_json=$1, updated_at=CURRENT_TIMESTAMP
+			 WHERE id=$2 AND revoked_at IS NULL AND scopes_json=$3`,
+			string(nextJSON),
+			id,
+			currentJSON,
+		)
+		if err != nil {
+			return Key{}, err
+		}
+		if changed, _ := result.RowsAffected(); changed == 1 {
+			return s.Get(ctx, id)
 		}
 	}
-	if len(next) == len(key.Scopes) {
-		return Key{}, fmt.Errorf("%w: scope is not assigned", ErrInvalid)
-	}
-	return s.ReplaceScopes(ctx, id, next)
+	return Key{}, ErrConflict
 }
 
 func (s *Service) UpdateName(
@@ -236,19 +337,91 @@ func (s *Service) UpdateName(
 	id string,
 	name string,
 ) (Key, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 120 {
+	return s.Update(ctx, id, &name, nil)
+}
+
+// Update applies a name/scopes PATCH in one database statement so validation,
+// revocation, or a database failure cannot leave a partially updated key.
+func (s *Service) Update(
+	ctx context.Context,
+	id string,
+	name *string,
+	scopes *[]string,
+) (Key, error) {
+	if name == nil && scopes == nil {
 		return Key{}, ErrInvalid
 	}
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE api_keys SET name=$1, updated_at=CURRENT_TIMESTAMP
-		 WHERE id=$2 AND revoked_at IS NULL`, name, id,
+	nextName := ""
+	if name != nil {
+		nextName = strings.TrimSpace(*name)
+		if nextName == "" || len(nextName) > 120 {
+			return Key{}, ErrInvalid
+		}
+	}
+	nextScopes := "[]"
+	expectedScopes := "[]"
+	if scopes != nil {
+		validated, err := ValidScopes(*scopes)
+		if err != nil {
+			return Key{}, err
+		}
+		encoded, _ := json.Marshal(validated)
+		nextScopes = string(encoded)
+		if err := s.db.QueryRowContext(
+			ctx,
+			`SELECT scopes_json FROM api_keys
+			 WHERE id=$1 AND revoked_at IS NULL`,
+			id,
+		).Scan(&expectedScopes); errors.Is(err, sql.ErrNoRows) {
+			return Key{}, ErrNotFound
+		} else if err != nil {
+			return Key{}, err
+		}
+	}
+	return s.update(ctx, id, name, nextName, scopes, nextScopes, expectedScopes)
+}
+
+func (s *Service) update(
+	ctx context.Context,
+	id string,
+	name *string,
+	nextName string,
+	scopes *[]string,
+	nextScopes string,
+	expectedScopes string,
+) (Key, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE api_keys SET
+		 name=CASE WHEN $1 THEN $2 ELSE name END,
+		 scopes_json=CASE WHEN $3 THEN $4 ELSE scopes_json END,
+		 updated_at=CURRENT_TIMESTAMP
+		 WHERE id=$5 AND revoked_at IS NULL
+		   AND ($3=FALSE OR scopes_json=$6)`,
+		name != nil,
+		nextName,
+		scopes != nil,
+		nextScopes,
+		id,
+		expectedScopes,
 	)
 	if err != nil {
 		return Key{}, err
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		return Key{}, ErrNotFound
+		var active int
+		if err := s.db.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM api_keys
+			 WHERE id=$1 AND revoked_at IS NULL`,
+			id,
+		).Scan(&active); err != nil {
+			return Key{}, err
+		}
+		if active == 0 {
+			return Key{}, ErrNotFound
+		}
+		return Key{}, ErrConflict
 	}
 	return s.Get(ctx, id)
 }
@@ -257,10 +430,62 @@ func (s *Service) Rotate(
 	ctx context.Context,
 	id string,
 	grace time.Duration,
+	access Access,
 ) (Created, error) {
 	if grace < 0 || grace > 7*24*time.Hour {
 		return Created{}, ErrInvalid
 	}
+	if access.UserID == "" {
+		return Created{}, ErrForbidden
+	}
+	var expectedHash, rawScopes string
+	var ownerID sql.NullString
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT key_hash, user_id, scopes_json FROM api_keys
+		 WHERE id=$1 AND revoked_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
+		id,
+	).Scan(&expectedHash, &ownerID, &rawScopes); errors.Is(err, sql.ErrNoRows) {
+		return Created{}, ErrNotFound
+	} else if err != nil {
+		return Created{}, err
+	}
+	if !ownerID.Valid {
+		return Created{}, ErrForbidden
+	}
+	if !access.SuperAdmin && ownerID.String != access.UserID {
+		return Created{}, ErrNotFound
+	}
+	var scopes []string
+	if err := json.Unmarshal([]byte(rawScopes), &scopes); err != nil {
+		return Created{}, fmt.Errorf("decode API key scopes: %w", err)
+	}
+	if !access.SuperAdmin && !canGrantAll(access.GrantableScopes, scopes) {
+		return Created{}, ErrForbidden
+	}
+	return s.rotate(ctx, id, grace, expectedHash)
+}
+
+func canGrantAll(grantable []string, requested []string) bool {
+	allowed := make(map[string]struct{}, len(grantable))
+	for _, scope := range grantable {
+		allowed[scope] = struct{}{}
+	}
+	for _, scope := range requested {
+		if _, ok := allowed[scope]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) rotate(
+	ctx context.Context,
+	id string,
+	grace time.Duration,
+	expectedHash string,
+) (Created, error) {
 	secret, prefix, hash, err := newSecret()
 	if err != nil {
 		return Created{}, err
@@ -271,14 +496,28 @@ func (s *Service) Rotate(
 		 previous_key_hash=key_hash, previous_valid_until=$1,
 		 key_hash=$2, key_prefix=$3, updated_at=$4
 		 WHERE id=$5 AND revoked_at IS NULL
-		 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
-		now.Add(grace), hash, prefix, now, id,
+		 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+		 AND key_hash=$6`,
+		now.Add(grace), hash, prefix, now, id, expectedHash,
 	)
 	if err != nil {
 		return Created{}, err
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
-		return Created{}, ErrNotFound
+		var active int
+		if err := s.db.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM api_keys
+			 WHERE id=$1 AND revoked_at IS NULL
+			   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`,
+			id,
+		).Scan(&active); err != nil {
+			return Created{}, err
+		}
+		if active == 0 {
+			return Created{}, ErrNotFound
+		}
+		return Created{}, ErrConflict
 	}
 	key, err := s.Get(ctx, id)
 	return Created{Key: key, Secret: secret}, err

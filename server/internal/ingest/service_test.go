@@ -3,14 +3,76 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/agents"
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
+
+func TestLateFailureCannotOverwriteProcessedEvent(t *testing.T) {
+	runtime, agent, service := testService(t)
+	envelope := heartbeatEnvelope(agent.AgentID)
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO agent_events(
+		 id,agent_id,event_id,schema_version,kind,snapshot_hash,raw_event,
+		 processing_status,processed_at
+		 ) VALUES($1,$2,$3,$4,$5,$6,$7,'processed',CURRENT_TIMESTAMP)`,
+		uuid.NewString(),
+		agent.ID,
+		envelope.EventID,
+		envelope.SchemaVersion,
+		envelope.Kind,
+		envelope.SnapshotHash,
+		string(raw),
+	); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := runtime.DB().BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("late failure from another Pod")
+	if _, err := service.failEvent(
+		context.Background(),
+		transaction,
+		uuid.NewString(),
+		agent,
+		envelope,
+		raw,
+		cause,
+	); !errors.Is(err, cause) {
+		t.Fatalf("failEvent() error = %v", err)
+	}
+	var status string
+	var processingError any
+	if err := runtime.DB().QueryRow(
+		`SELECT processing_status,processing_error
+		 FROM agent_events WHERE agent_id=$1 AND event_id=$2`,
+		agent.ID,
+		envelope.EventID,
+	).Scan(&status, &processingError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "processed" || processingError != nil {
+		t.Fatalf(
+			"late failure changed completed event to %q (%v)",
+			status,
+			processingError,
+		)
+	}
+}
 
 func TestInventoryIsIdempotentAndPreservesRawEvent(t *testing.T) {
 	t.Parallel()
@@ -220,6 +282,7 @@ func TestStoredMetadataFallbackSkipsLookupForCompleteAgent(t *testing.T) {
 			Hostname: "complete-host", OSName: "Windows 11", Architecture: "x86_64",
 		},
 		heartbeatEnvelope(uuid.NewString()),
+		false,
 	)
 	if err != nil || hostname != "" || osName != "" || architecture != "" {
 		t.Fatalf(
@@ -309,6 +372,587 @@ func TestUpdatedChangeKeepsAssetHistory(t *testing.T) {
 		"change_type = 'updated'",
 		1,
 	)
+}
+
+func TestOlderInventoryCannotRegressSourceClassificationOrAgentMetadata(
+	t *testing.T,
+) {
+	runtime, agent, service := testService(t)
+	base := uint64(time.Now().Add(-time.Hour).Unix())
+	newSystem := record(
+		"system-source",
+		"system",
+		`{"hostname":"new-host","os_family":"windows","os_name":"Windows 11 Enterprise","architecture":"x86_64"}`,
+	)
+	newSystem.CollectedAt = base + 200
+	newPackage := record(
+		"package-source",
+		"software.package",
+		`{"manager":"test","name":"new-package","version":"2","architecture":"x86_64"}`,
+	)
+	newPackage.CollectedAt = base + 200
+	newer := inventoryEnvelope(agent.AgentID, []AssetRecord{newSystem, newPackage})
+	newer.CreatedAt = base + 200
+	newer.Snapshot.CollectedAt = base + 200
+	processEnvelopeVersion(t, service, agent, newer, "2.0.0")
+
+	if _, err := runtime.DB().Exec(
+		`UPDATE assets SET environment='production', criticality='critical',
+		 custom_fields_json='{"owner":"operations"}', classification_source='manual'
+		 WHERE id=(SELECT asset_id FROM asset_sources
+		           WHERE source_asset_id='package-source')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	oldSystem := record(
+		"system-source",
+		"system",
+		`{"hostname":"old-host","os_family":"windows","os_name":"Windows 7","architecture":"x86"}`,
+	)
+	oldSystem.CollectedAt = base + 100
+	oldPackage := record(
+		"package-source",
+		"software.package",
+		`{"manager":"test","name":"old-package","version":"1","architecture":"x86"}`,
+	)
+	oldPackage.CollectedAt = base + 100
+	older := inventoryEnvelope(agent.AgentID, []AssetRecord{oldSystem, oldPackage})
+	older.CreatedAt = base + 100
+	older.Snapshot.CollectedAt = base + 100
+	processEnvelopeVersion(t, service, agent, older, "1.0.0")
+
+	var sourcePayload, assetName, environment, criticality, customFields string
+	if err := runtime.DB().QueryRow(
+		`SELECT s.payload_json,a.name,a.environment,a.criticality,a.custom_fields_json
+		 FROM asset_sources s JOIN assets a ON a.id=s.asset_id
+		 WHERE s.source_asset_id='package-source'`,
+	).Scan(
+		&sourcePayload, &assetName, &environment, &criticality, &customFields,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(sourcePayload, string(newPackage.Payload)) ||
+		assetName != "new-package" || environment != "production" ||
+		criticality != "critical" ||
+		!sameJSON(customFields, `{"owner":"operations"}`) {
+		t.Fatalf(
+			"stale inventory regressed package = %s/%q/%q/%q/%s",
+			sourcePayload, assetName, environment, criticality, customFields,
+		)
+	}
+	var hostname, osName, architecture, agentVersion string
+	if err := runtime.DB().QueryRow(
+		`SELECT hostname,os_name,architecture,version FROM agents WHERE id=$1`,
+		agent.ID,
+	).Scan(&hostname, &osName, &architecture, &agentVersion); err != nil {
+		t.Fatal(err)
+	}
+	if hostname != "new-host" || osName != "Windows 11 Enterprise" ||
+		architecture != "x86_64" || agentVersion != "2.0.0" {
+		t.Fatalf(
+			"stale metadata = %q/%q/%q/%q",
+			hostname, osName, architecture, agentVersion,
+		)
+	}
+	assertCount(t, runtime, "asset_snapshots", 2)
+
+	staleRemoval := inventoryEnvelope(agent.AgentID, nil)
+	staleRemoval.CreatedAt = base + 150
+	staleRemoval.Changes = []AssetChange{{
+		Kind: "removed", AssetID: "package-source", Category: "software.package",
+	}}
+	processEnvelope(t, service, agent, staleRemoval)
+	assertCountWhere(
+		t, runtime, "asset_sources",
+		"source_asset_id='package-source' AND deleted_at IS NULL", 1,
+	)
+	assertCountWhere(t, runtime, "asset_changes", "change_type='removed'", 0)
+}
+
+func TestExactAgentAndServerTimestampTieUsesEventIDDeterministically(
+	t *testing.T,
+) {
+	runtime, agent, service := testService(t)
+	// SQLite CURRENT_TIMESTAMP is second-granular, but a slow CI runner could
+	// still cross a boundary. Pin the DB receive clock so this is an exact tuple
+	// tie and verifies the final deterministic event_id comparison itself.
+	if _, err := runtime.DB().Exec(
+		`CREATE TRIGGER pin_agent_event_received_at
+		 AFTER INSERT ON agent_events
+		 BEGIN
+		   UPDATE agent_events SET received_at='2030-01-01 00:00:00'
+		   WHERE id=NEW.id;
+		 END`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	timestamp := uint64(time.Now().Add(-time.Minute).Unix())
+	highID := "ffffffff-ffff-4fff-bfff-ffffffffffff"
+	lowID := "00000000-0000-4000-8000-000000000001"
+	firstRecord := record(
+		"system-source",
+		"system",
+		`{"hostname":"tie-old","os_family":"windows","os_name":"Windows 7","architecture":"x86"}`,
+	)
+	firstRecord.CollectedAt = timestamp
+	first := inventoryEnvelope(agent.AgentID, []AssetRecord{firstRecord})
+	first.EventID = lowID
+	first.CreatedAt = timestamp
+	first.Snapshot.CollectedAt = timestamp
+	processEnvelopeVersion(t, service, agent, first, "1.0.0")
+
+	winnerRecord := record(
+		"system-source",
+		"system",
+		`{"hostname":"tie-new","os_family":"windows","os_name":"Windows 11","architecture":"x86_64"}`,
+	)
+	winnerRecord.CollectedAt = timestamp
+	winner := inventoryEnvelope(agent.AgentID, []AssetRecord{winnerRecord})
+	winner.EventID = highID
+	winner.CreatedAt = timestamp
+	winner.Snapshot.CollectedAt = timestamp
+	processEnvelopeVersion(t, service, agent, winner, "9.0.0")
+
+	var payload, hostname, version, lastEventID string
+	if err := runtime.DB().QueryRow(
+		`SELECT s.payload_json,a.hostname,a.version,a.last_event_id
+		 FROM asset_sources s JOIN agents a ON a.id=s.agent_id
+		 WHERE s.source_asset_id='system-source'`,
+	).Scan(&payload, &hostname, &version, &lastEventID); err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(payload, string(winnerRecord.Payload)) || hostname != "tie-new" ||
+		version != "9.0.0" || lastEventID != highID {
+		t.Fatalf(
+			"event ID did not deterministically resolve exact tuple tie = %s/%q/%q/%q",
+			payload,
+			hostname,
+			version,
+			lastEventID,
+		)
+	}
+
+	staleRemoval := inventoryEnvelope(agent.AgentID, nil)
+	staleRemoval.EventID = lowID[:len(lowID)-1] + "2"
+	staleRemoval.CreatedAt = timestamp
+	staleRemoval.Changes = []AssetChange{{
+		Kind: "removed", AssetID: "system-source", Category: "system",
+	}}
+	processEnvelope(t, service, agent, staleRemoval)
+	assertCountWhere(
+		t,
+		runtime,
+		"asset_sources",
+		"source_asset_id='system-source' AND deleted_at IS NULL",
+		1,
+	)
+}
+
+func TestFutureAgentClockIsClampedDiagnosedAndPoisonedWatermarkHeals(
+	t *testing.T,
+) {
+	runtime, agent, service := testService(t)
+	future := ^uint64(0)
+	futureRecord := record(
+		"system-source",
+		"system",
+		`{"hostname":"future-host","os_name":"Future OS","architecture":"future"}`,
+	)
+	futureRecord.CollectedAt = future
+	futureEnvelope := inventoryEnvelope(agent.AgentID, []AssetRecord{futureRecord})
+	futureEnvelope.CreatedAt = future
+	futureEnvelope.Snapshot.CollectedAt = future
+	processEnvelopeVersion(t, service, agent, futureEnvelope, "future-version")
+	assertCountWhere(
+		t,
+		runtime,
+		"agent_event_errors",
+		"error_code='FUTURE_TIMESTAMP_CLAMPED'",
+		1,
+	)
+
+	poison := time.Now().Add(365 * 24 * time.Hour).UTC()
+	if _, err := runtime.DB().Exec(
+		`UPDATE asset_sources SET collected_at=$1,last_seen_at=$1,
+		 last_event_created_at=$1,last_event_received_at=$1
+		 WHERE source_asset_id='system-source'`,
+		poison,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DB().Exec(
+		`UPDATE assets SET last_seen_at=$1 WHERE asset_key LIKE '%:system:system-source'`,
+		poison,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DB().Exec(
+		`UPDATE agents SET hostname='poison-host',version='poison-version',
+		 last_inventory_at=$1,last_event_created_at=$1,last_event_received_at=$1
+		 WHERE id=$2`,
+		poison,
+		agent.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	normalRecord := record(
+		"system-source",
+		"system",
+		`{"hostname":"healed-host","os_name":"Windows 11","architecture":"x86_64"}`,
+	)
+	normal := inventoryEnvelope(agent.AgentID, []AssetRecord{normalRecord})
+	processEnvelopeVersion(t, service, agent, normal, "healed-version")
+
+	var payload, hostname, version string
+	var collectedAt, sourceEventAt, agentEventAt apitime.Time
+	if err := runtime.DB().QueryRow(
+		`SELECT s.payload_json,s.collected_at,s.last_event_created_at,
+		        a.hostname,a.version,a.last_event_created_at
+		 FROM asset_sources s JOIN agents a ON a.id=s.agent_id
+		 WHERE s.source_asset_id='system-source'`,
+	).Scan(
+		&payload,
+		&collectedAt,
+		&sourceEventAt,
+		&hostname,
+		&version,
+		&agentEventAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	threshold := time.Now().Add(maximumAgentClockSkew + time.Minute)
+	if !sameJSON(payload, string(normalRecord.Payload)) || hostname != "healed-host" ||
+		version != "healed-version" || !collectedAt.Valid ||
+		collectedAt.Time.After(threshold) || !sourceEventAt.Valid ||
+		sourceEventAt.Time.After(threshold) || !agentEventAt.Valid ||
+		agentEventAt.Time.After(threshold) {
+		t.Fatalf(
+			"poisoned clock did not heal = %s/%q/%q/%v/%v/%v",
+			payload,
+			hostname,
+			version,
+			collectedAt,
+			sourceEventAt,
+			agentEventAt,
+		)
+	}
+}
+
+func TestCanonicalPackageIDsPreserveLegacyAssetIdentityAndManualMetadata(
+	t *testing.T,
+) {
+	testCases := []struct {
+		name             string
+		legacyID         string
+		canonicalID      string
+		legacyPayload    string
+		canonicalPayload string
+	}{
+		{
+			name:             "RPM version instance",
+			legacyID:         "package:rpm:kernel:x86_64",
+			canonicalID:      "package:rpm:kernel:x86_64:0:5.14.0-503.el9_5",
+			legacyPayload:    `{"manager":"rpm","name":"kernel","version":"0:5.14.0-503.el9_5","architecture":"x86_64"}`,
+			canonicalPayload: `{"manager":"rpm","name":"kernel","version":"0:5.14.0-503.el9_5","architecture":"x86_64"}`,
+		},
+		{
+			name:             "Windows registry instance without legacy owner SID",
+			legacyID:         "package:windows:Contoso Agent:x64",
+			canonicalID:      "package:windows:x64:user:s-1-5-21-1000:{contoso-agent}",
+			legacyPayload:    `{"manager":"windows","name":"Contoso Agent","version":"4.2","architecture":"x64","scope":"user","registry_key":"{CONTOSO-AGENT}"}`,
+			canonicalPayload: `{"manager":"windows","name":"Contoso Agent","version":"4.2","architecture":"x64","scope":"user","owner_sid":"S-1-5-21-1000","registry_key":"{CONTOSO-AGENT}"}`,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, agent, service := testService(t)
+			base := uint64(time.Now().Add(-time.Hour).Unix())
+			legacy := record(
+				testCase.legacyID, "software.package", testCase.legacyPayload,
+			)
+			legacy.CollectedAt = base + 100
+			first := inventoryEnvelope(agent.AgentID, []AssetRecord{legacy})
+			first.CreatedAt = base + 100
+			first.Snapshot.CollectedAt = base + 100
+			processEnvelope(t, service, agent, first)
+
+			var sourceID, assetID string
+			if err := runtime.DB().QueryRow(
+				`SELECT id,asset_id FROM asset_sources WHERE source_asset_id=$1`,
+				testCase.legacyID,
+			).Scan(&sourceID, &assetID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.DB().Exec(
+				`UPDATE assets SET environment='production',criticality='critical',
+				 custom_fields_json='{"owner":"asset-team"}',
+				 classification_source='manual' WHERE id=$1`,
+				assetID,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			canonical := record(
+				testCase.canonicalID, "software.package", testCase.canonicalPayload,
+			)
+			canonical.CollectedAt = base + 200
+			upgrade := inventoryEnvelope(agent.AgentID, nil)
+			upgrade.CreatedAt = base + 200
+			upgrade.Changes = []AssetChange{
+				{Kind: "removed", AssetID: testCase.legacyID, Category: "software.package"},
+				{
+					Kind: "added", AssetID: canonical.AssetID,
+					Category: canonical.Category, Record: &canonical,
+				},
+			}
+			processEnvelope(t, service, agent, upgrade)
+
+			assertCount(t, runtime, "assets", 1)
+			assertCount(t, runtime, "asset_sources", 1)
+			var gotSourceID, gotAssetID, sourceAssetID, assetKey string
+			var environment, criticality, customFields string
+			if err := runtime.DB().QueryRow(
+				`SELECT s.id,s.asset_id,s.source_asset_id,a.asset_key,
+				        a.environment,a.criticality,a.custom_fields_json
+				 FROM asset_sources s JOIN assets a ON a.id=s.asset_id`,
+			).Scan(
+				&gotSourceID, &gotAssetID, &sourceAssetID, &assetKey,
+				&environment, &criticality, &customFields,
+			); err != nil {
+				t.Fatal(err)
+			}
+			wantAssetKey := agent.AgentID + ":software.package:" + testCase.canonicalID
+			if gotSourceID != sourceID || gotAssetID != assetID ||
+				sourceAssetID != testCase.canonicalID || assetKey != wantAssetKey ||
+				environment != "production" || criticality != "critical" ||
+				!sameJSON(customFields, `{"owner":"asset-team"}`) {
+				t.Fatalf(
+					"legacy migration = %q/%q/%q/%q/%q/%q/%s",
+					gotSourceID, gotAssetID, sourceAssetID, assetKey,
+					environment, criticality, customFields,
+				)
+			}
+			assertCountWhere(
+				t, runtime, "asset_changes",
+				"asset_id='"+assetID+"' AND change_type='removed'", 0,
+			)
+		})
+	}
+}
+
+func TestLegacyPackageAliasRequiresMatchingStoredIdentity(t *testing.T) {
+	runtime, agent, service := testService(t)
+	legacy := record(
+		"package:windows:Contoso Agent:x64",
+		"software.package",
+		`{"manager":"windows","name":"Contoso Agent","version":"4.2","architecture":"x64","scope":"machine","registry_key":"{OLD-KEY}"}`,
+	)
+	processEnvelope(t, service, agent, inventoryEnvelope(agent.AgentID, []AssetRecord{legacy}))
+	canonical := record(
+		"package:windows:x64:machine::{new-key}",
+		"software.package",
+		`{"manager":"windows","name":"Contoso Agent","version":"4.2","architecture":"x64","scope":"machine","owner_sid":"","registry_key":"{NEW-KEY}"}`,
+	)
+	processEnvelope(t, service, agent, inventoryEnvelope(agent.AgentID, []AssetRecord{canonical}))
+	assertCount(t, runtime, "assets", 2)
+	assertCount(t, runtime, "asset_sources", 2)
+}
+
+func TestLegacyWindowsPackageWithoutOwnerSIDRejectsAmbiguousAdoption(
+	t *testing.T,
+) {
+	runtime, agent, service := testService(t)
+	base := uint64(time.Now().Add(-time.Hour).Unix())
+	legacy := record(
+		"package:windows:Contoso User Tool:x64",
+		"software.package",
+		`{"manager":"windows","name":"Contoso User Tool","version":"4.2","architecture":"x64","scope":"user","registry_key":"{SHARED-KEY}"}`,
+	)
+	legacy.CollectedAt = base + 100
+	first := inventoryEnvelope(agent.AgentID, []AssetRecord{legacy})
+	first.CreatedAt = base + 100
+	first.Snapshot.CollectedAt = base + 100
+	processEnvelope(t, service, agent, first)
+
+	canonical := make([]AssetRecord, 0, 2)
+	for _, sid := range []string{"s-1-5-21-1000", "s-1-5-21-2000"} {
+		record := record(
+			"package:windows:x64:user:"+sid+":{shared-key}",
+			"software.package",
+			fmt.Sprintf(
+				`{"manager":"windows","name":"Contoso User Tool","version":"4.2","architecture":"x64","scope":"user","owner_sid":%q,"registry_key":"{SHARED-KEY}"}`,
+				strings.ToUpper(sid),
+			),
+		)
+		record.CollectedAt = base + 200
+		canonical = append(canonical, record)
+	}
+	upgrade := inventoryEnvelope(agent.AgentID, nil)
+	upgrade.CreatedAt = base + 200
+	upgrade.Changes = []AssetChange{{
+		Kind: "removed", AssetID: legacy.AssetID, Category: legacy.Category,
+	}}
+	for index := range canonical {
+		upgrade.Changes = append(upgrade.Changes, AssetChange{
+			Kind: "added", AssetID: canonical[index].AssetID,
+			Category: canonical[index].Category, Record: &canonical[index],
+		})
+	}
+	processEnvelope(t, service, agent, upgrade)
+
+	assertCount(t, runtime, "assets", 3)
+	assertCount(t, runtime, "asset_sources", 3)
+	assertCountWhere(
+		t,
+		runtime,
+		"asset_sources",
+		"source_asset_id='package:windows:Contoso User Tool:x64' AND deleted_at IS NOT NULL",
+		1,
+	)
+}
+
+func TestLegacyWindowsNativeAndX86InstancesPreserveSeparateIdentityAndHistory(
+	t *testing.T,
+) {
+	runtime, agent, service := testService(t)
+	base := uint64(time.Now().Add(-time.Hour).Unix())
+	type packageCase struct {
+		architecture string
+		scope        string
+		owner        string
+	}
+	packages := []packageCase{
+		{architecture: "x64", scope: "machine", owner: "native-team"},
+		{architecture: "x86", scope: "machine-x86", owner: "x86-team"},
+	}
+	legacyRecords := make([]AssetRecord, 0, len(packages))
+	for _, item := range packages {
+		legacy := record(
+			"package:windows:Contoso Agent:"+item.architecture,
+			"software.package",
+			fmt.Sprintf(
+				`{"manager":"windows","name":"Contoso Agent","version":"7.0","architecture":%q,"scope":%q,"registry_key":"{SHARED-KEY}"}`,
+				item.architecture,
+				item.scope,
+			),
+		)
+		legacy.CollectedAt = base + 100
+		legacyRecords = append(legacyRecords, legacy)
+	}
+	first := inventoryEnvelope(agent.AgentID, legacyRecords)
+	first.CreatedAt = base + 100
+	first.Snapshot.CollectedAt = base + 100
+	processEnvelope(t, service, agent, first)
+
+	type preserved struct {
+		sourceID string
+		assetID  string
+		history  int
+	}
+	preservedByArchitecture := make(map[string]preserved, len(packages))
+	for _, item := range packages {
+		legacyID := "package:windows:Contoso Agent:" + item.architecture
+		var saved preserved
+		if err := runtime.DB().QueryRow(
+			`SELECT s.id,s.asset_id,
+			        (SELECT COUNT(*) FROM asset_changes c WHERE c.asset_id=s.asset_id)
+			 FROM asset_sources s WHERE s.source_asset_id=$1`,
+			legacyID,
+		).Scan(&saved.sourceID, &saved.assetID, &saved.history); err != nil {
+			t.Fatal(err)
+		}
+		if saved.history == 0 {
+			t.Fatalf("legacy %s asset has no history to preserve", item.architecture)
+		}
+		if _, err := runtime.DB().Exec(
+			`UPDATE assets SET environment='production',criticality='critical',
+			 custom_fields_json=$1,classification_source='manual' WHERE id=$2`,
+			fmt.Sprintf(`{"owner":%q}`, item.owner),
+			saved.assetID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		preservedByArchitecture[item.architecture] = saved
+	}
+
+	upgrade := inventoryEnvelope(agent.AgentID, nil)
+	upgrade.CreatedAt = base + 200
+	for _, item := range packages {
+		legacyID := "package:windows:Contoso Agent:" + item.architecture
+		canonicalID := fmt.Sprintf(
+			"package:windows:%s:%s::{shared-key}",
+			item.architecture,
+			item.scope,
+		)
+		canonical := record(
+			canonicalID,
+			"software.package",
+			fmt.Sprintf(
+				`{"manager":"windows","name":"Contoso Agent","version":"7.0","architecture":%q,"scope":%q,"owner_sid":"","registry_key":"{SHARED-KEY}"}`,
+				item.architecture,
+				item.scope,
+			),
+		)
+		canonical.CollectedAt = base + 200
+		upgrade.Changes = append(upgrade.Changes,
+			AssetChange{Kind: "removed", AssetID: legacyID, Category: "software.package"},
+			AssetChange{
+				Kind: "added", AssetID: canonicalID,
+				Category: "software.package", Record: &canonical,
+			},
+		)
+	}
+	processEnvelope(t, service, agent, upgrade)
+
+	assertCount(t, runtime, "assets", 2)
+	assertCount(t, runtime, "asset_sources", 2)
+	for _, item := range packages {
+		canonicalID := fmt.Sprintf(
+			"package:windows:%s:%s::{shared-key}",
+			item.architecture,
+			item.scope,
+		)
+		want := preservedByArchitecture[item.architecture]
+		var sourceID, assetID, environment, criticality, customFields string
+		var history, removedHistory int
+		if err := runtime.DB().QueryRow(
+			`SELECT s.id,s.asset_id,a.environment,a.criticality,a.custom_fields_json,
+			        (SELECT COUNT(*) FROM asset_changes c WHERE c.asset_id=a.id),
+			        (SELECT COUNT(*) FROM asset_changes c
+			          WHERE c.asset_id=a.id AND c.change_type='removed')
+			 FROM asset_sources s JOIN assets a ON a.id=s.asset_id
+			 WHERE s.source_asset_id=$1`,
+			canonicalID,
+		).Scan(
+			&sourceID,
+			&assetID,
+			&environment,
+			&criticality,
+			&customFields,
+			&history,
+			&removedHistory,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if sourceID != want.sourceID || assetID != want.assetID ||
+			environment != "production" || criticality != "critical" ||
+			!sameJSON(customFields, fmt.Sprintf(`{"owner":%q}`, item.owner)) ||
+			history < want.history || removedHistory != 0 {
+			t.Fatalf(
+				"%s migration lost identity/metadata/history: %q/%q/%q/%q/%s/%d/%d",
+				item.architecture,
+				sourceID,
+				assetID,
+				environment,
+				criticality,
+				customFields,
+				history,
+				removedHistory,
+			)
+		}
+	}
 }
 
 func TestFirstInventoryPromotesEnrollmentHostWithoutDuplicateAsset(
@@ -416,7 +1060,7 @@ func testService(t *testing.T) (*storage.Runtime, agents.Agent, *Service) {
 }
 
 func inventoryEnvelope(agentID string, records []AssetRecord) Envelope {
-	now := uint64(time.Now().Unix())
+	now := nextTestEventTimestamp()
 	var snapshot *Snapshot
 	if records != nil {
 		snapshot = &Snapshot{
@@ -437,6 +1081,22 @@ func inventoryEnvelope(agentID string, records []AssetRecord) Envelope {
 	}
 }
 
+var testEventClock struct {
+	sync.Mutex
+	last uint64
+}
+
+func nextTestEventTimestamp() uint64 {
+	testEventClock.Lock()
+	defer testEventClock.Unlock()
+	now := uint64(time.Now().Unix())
+	if now <= testEventClock.last {
+		now = testEventClock.last + 1
+	}
+	testEventClock.last = now
+	return now
+}
+
 func record(id string, category string, payload string) AssetRecord {
 	return AssetRecord{
 		AssetID: id, Category: category, Source: "test",
@@ -450,13 +1110,23 @@ func processEnvelope(
 	agent agents.Agent,
 	envelope Envelope,
 ) {
+	processEnvelopeVersion(t, service, agent, envelope, "test")
+}
+
+func processEnvelopeVersion(
+	t *testing.T,
+	service *Service,
+	agent agents.Agent,
+	envelope Envelope,
+	agentVersion string,
+) {
 	t.Helper()
 	if err := envelope.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(envelope)
 	if _, err := service.Process(
-		context.Background(), agent, envelope, raw, "test",
+		context.Background(), agent, envelope, raw, agentVersion,
 	); err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}

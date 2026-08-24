@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -40,7 +41,15 @@ var (
 	ErrOIDCUnreachable   = errors.New("Keycloak issuer could not be reached")
 )
 
-const keycloakSettingKey = "auth.keycloak"
+const (
+	keycloakSettingKey             = "auth.keycloak"
+	keycloakClientSecretSettingKey = "auth.keycloak.client_secret"
+	keycloakClientSecretPurpose    = "oidc.client_secret"
+)
+
+type oidcClientSecretEnvelope struct {
+	Sealed string `json:"sealed"`
+}
 
 type OIDCSettings struct {
 	Enabled              bool              `json:"enabled"`
@@ -105,7 +114,8 @@ func (settings OIDCSettings) validateIssuer() error {
 		return errors.New("Keycloak URL is required")
 	}
 	issuer, err := url.Parse(settings.EffectiveIssuer())
-	if err != nil || issuer.Scheme != "https" || issuer.Host == "" {
+	if err != nil || issuer.Scheme != "https" || issuer.Host == "" ||
+		issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
 		return errors.New("Keycloak issuer must be an HTTPS URL")
 	}
 	if strings.TrimSpace(settings.ClientID) == "" {
@@ -128,16 +138,13 @@ func (settings OIDCSettings) Validate() error {
 		return err
 	}
 	redirect, err := url.Parse(settings.RedirectURI)
-	if err != nil ||
-		!containsString([]string{"https", "http"}, redirect.Scheme) ||
-		redirect.Host == "" {
+	if err != nil || !secureBrowserEndpoint(redirect) || redirect.Fragment != "" {
 		return errors.New("Keycloak redirect URI is invalid")
 	}
 	if strings.TrimSpace(settings.LogoutRedirectURI) != "" {
 		logoutRedirect, logoutErr := url.Parse(settings.LogoutRedirectURI)
-		if logoutErr != nil ||
-			!containsString([]string{"https", "http"}, logoutRedirect.Scheme) ||
-			logoutRedirect.Host == "" {
+		if logoutErr != nil || !secureBrowserEndpoint(logoutRedirect) ||
+			logoutRedirect.Fragment != "" {
 			return errors.New("Keycloak logout redirect URI is invalid")
 		}
 	}
@@ -237,12 +244,14 @@ func (service *OIDCService) Settings(ctx context.Context) (OIDCSettings, error) 
 	return settings, nil
 }
 
-func (service *OIDCService) ClientSecretConfigured() (bool, error) {
-	values, err := service.bootstrapStore.Load()
+func (service *OIDCService) ClientSecretConfigured(
+	ctx context.Context,
+) (bool, error) {
+	secret, err := service.clientSecret(ctx)
 	if err != nil {
 		return false, err
 	}
-	return values.KeycloakClientSecret != "", nil
+	return strings.TrimSpace(secret) != "", nil
 }
 
 func (service *OIDCService) SaveSettings(
@@ -258,22 +267,16 @@ func (service *OIDCService) SaveSettings(
 	if err := service.validateRoleMappings(ctx, settings); err != nil {
 		return err
 	}
-	values, err := service.bootstrapStore.Load()
+	existingSecret, err := service.clientSecret(ctx)
 	if err != nil {
 		return err
 	}
 	if settings.Enabled {
-		if clientSecret == nil && strings.TrimSpace(values.KeycloakClientSecret) == "" {
+		if clientSecret == nil && strings.TrimSpace(existingSecret) == "" {
 			return ErrOIDCSecret
 		}
 		if clientSecret != nil && strings.TrimSpace(*clientSecret) == "" {
 			return ErrOIDCSecret
-		}
-	}
-	if clientSecret != nil {
-		values.KeycloakClientSecret = *clientSecret
-		if err := service.bootstrapStore.Save(values); err != nil {
-			return err
 		}
 	}
 	bytes, err := json.Marshal(settings)
@@ -305,6 +308,38 @@ func (service *OIDCService) SaveSettings(
 		actor.ID,
 	); err != nil {
 		return fmt.Errorf("save Keycloak settings: %w", err)
+	}
+	if clientSecret != nil {
+		sealed, sealErr := service.bootstrapStore.SealString(
+			keycloakClientSecretPurpose,
+			*clientSecret,
+		)
+		if sealErr != nil {
+			return fmt.Errorf("encrypt Keycloak client secret: %w", sealErr)
+		}
+		envelope, encodeErr := json.Marshal(oidcClientSecretEnvelope{
+			Sealed: sealed,
+		})
+		if encodeErr != nil {
+			return fmt.Errorf("encode Keycloak client secret: %w", encodeErr)
+		}
+		if _, secretErr := transaction.ExecContext(
+			ctx,
+			`INSERT INTO settings(
+				key, value_json, secret, apply_mode, version, updated_by
+			 ) VALUES ($1, $2, TRUE, 'immediate', 1, $3)
+			 ON CONFLICT (key) DO UPDATE SET
+				value_json = excluded.value_json,
+				secret = TRUE,
+				version = settings.version + 1,
+				updated_by = excluded.updated_by,
+				updated_at = CURRENT_TIMESTAMP`,
+			keycloakClientSecretSettingKey,
+			string(envelope),
+			actor.ID,
+		); secretErr != nil {
+			return fmt.Errorf("save Keycloak client secret: %w", secretErr)
+		}
 	}
 	if err := service.audit.Record(ctx, transaction, audit.Entry{
 		ActorType:    "user",
@@ -365,14 +400,10 @@ func (service *OIDCService) AutomaticSettings(
 		return OIDCSettings{}, err
 	}
 	applicationURL, err := url.Parse(strings.TrimSpace(input.ApplicationURL))
-	if err != nil ||
-		!containsString([]string{"https", "http"}, applicationURL.Scheme) ||
-		applicationURL.Host == "" ||
-		applicationURL.User != nil {
+	if err != nil || !secureBrowserEndpoint(applicationURL) ||
+		applicationURL.RawQuery != "" || applicationURL.Fragment != "" {
 		return OIDCSettings{}, errors.New("InvenQor application URL is invalid")
 	}
-	applicationURL.RawQuery = ""
-	applicationURL.Fragment = ""
 	applicationURL.Path = strings.TrimRight(applicationURL.Path, "/")
 	base := strings.TrimRight(applicationURL.String(), "/")
 
@@ -404,6 +435,28 @@ func (service *OIDCService) AutomaticSettings(
 	settings.LastConnectionTestAt = &now
 	settings.LastConnectionOK = true
 	return settings, nil
+}
+
+// secureBrowserEndpoint permits plaintext HTTP only for a loopback deployment,
+// where TLS is commonly terminated outside the developer machine. Redirects
+// to any other HTTP host would leak authorization responses or logout state.
+func secureBrowserEndpoint(endpoint *url.URL) bool {
+	if endpoint == nil || endpoint.Host == "" || endpoint.User != nil {
+		return false
+	}
+	switch strings.ToLower(endpoint.Scheme) {
+	case "https":
+		return true
+	case "http":
+		host := endpoint.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		address := net.ParseIP(host)
+		return address != nil && address.IsLoopback()
+	default:
+		return false
+	}
 }
 
 func (service *OIDCService) LogoutURL(
@@ -686,11 +739,11 @@ func (service *OIDCService) provider(
 	if err := settings.Validate(); err != nil {
 		return OIDCSettings{}, nil, nil, err
 	}
-	values, err := service.bootstrapStore.Load()
+	clientSecret, err := service.clientSecret(ctx)
 	if err != nil {
 		return OIDCSettings{}, nil, nil, err
 	}
-	if values.KeycloakClientSecret == "" {
+	if strings.TrimSpace(clientSecret) == "" {
 		return OIDCSettings{}, nil, nil, ErrOIDCSecret
 	}
 	oidcContext, err := oidcHTTPContext(ctx, settings.PrivateCAPEM)
@@ -705,12 +758,95 @@ func (service *OIDCService) provider(
 	}
 	oauthConfig := &oauth2.Config{
 		ClientID:     settings.ClientID,
-		ClientSecret: values.KeycloakClientSecret,
+		ClientSecret: clientSecret,
 		Endpoint:     provider.Endpoint(),
 		RedirectURL:  settings.RedirectURI,
 		Scopes:       settings.Scopes,
 	}
 	return settings, provider, oauthConfig, nil
+}
+
+// clientSecret reads the encrypted shared setting first. Releases before this
+// storage existed kept the secret in bootstrap.enc, which is a Pod-local file
+// in the StatefulSet. When such a value is found, migrate it with an
+// insert-if-absent and then read the winner back. The shared master key mounted
+// into every Pod makes the ciphertext usable without storing plaintext in
+// PostgreSQL.
+func (service *OIDCService) clientSecret(ctx context.Context) (string, error) {
+	secret, found, err := service.sharedClientSecret(ctx)
+	if err != nil || found {
+		return secret, err
+	}
+	values, err := service.bootstrapStore.Load()
+	if err != nil {
+		return "", err
+	}
+	if values.KeycloakClientSecret == "" {
+		return "", nil
+	}
+	sealed, err := service.bootstrapStore.SealString(
+		keycloakClientSecretPurpose,
+		values.KeycloakClientSecret,
+	)
+	if err != nil {
+		return "", fmt.Errorf("encrypt legacy Keycloak client secret: %w", err)
+	}
+	envelope, err := json.Marshal(oidcClientSecretEnvelope{Sealed: sealed})
+	if err != nil {
+		return "", fmt.Errorf("encode legacy Keycloak client secret: %w", err)
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		`INSERT INTO settings(key, value_json, secret, apply_mode, version)
+		 VALUES ($1, $2, TRUE, 'immediate', 1)
+		 ON CONFLICT (key) DO NOTHING`,
+		keycloakClientSecretSettingKey,
+		string(envelope),
+	); err != nil {
+		return "", fmt.Errorf("migrate legacy Keycloak client secret: %w", err)
+	}
+	secret, found, err = service.sharedClientSecret(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", errors.New("migrated Keycloak client secret is unavailable")
+	}
+	return secret, nil
+}
+
+func (service *OIDCService) sharedClientSecret(
+	ctx context.Context,
+) (string, bool, error) {
+	var raw any
+	err := service.db.QueryRowContext(
+		ctx,
+		`SELECT value_json FROM settings
+		 WHERE key = $1 AND secret = TRUE`,
+		keycloakClientSecretSettingKey,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read Keycloak client secret: %w", err)
+	}
+	encoded, err := jsonBytes(raw)
+	if err != nil {
+		return "", true, fmt.Errorf("decode Keycloak client secret setting: %w", err)
+	}
+	var envelope oidcClientSecretEnvelope
+	if err := json.Unmarshal(encoded, &envelope); err != nil || envelope.Sealed == "" {
+		return "", true, errors.New("decode Keycloak client secret setting")
+	}
+	secret, err := service.bootstrapStore.OpenString(
+		keycloakClientSecretPurpose,
+		envelope.Sealed,
+	)
+	if err != nil {
+		return "", true, fmt.Errorf("decrypt Keycloak client secret: %w", err)
+	}
+	return secret, true, nil
 }
 
 func (service *OIDCService) provisionUser(
@@ -719,25 +855,43 @@ func (service *OIDCService) provisionUser(
 	subject string,
 	claims map[string]any,
 ) (User, error) {
+	issuer := normalizedOIDCIssuer(settings.EffectiveIssuer())
 	var user User
 	var active, notDeleted bool
-	err := service.db.QueryRowContext(
-		ctx,
-		`SELECT u.id, u.username, u.display_name, u.email, u.super_admin,
-		        u.active, CASE WHEN u.deleted_at IS NULL THEN TRUE ELSE FALSE END
-		 FROM users u
-		 JOIN external_identities e ON e.user_id = u.id
-		 WHERE e.provider = 'keycloak' AND e.subject = $1`,
-		subject,
-	).Scan(
-		&user.ID,
-		&user.Username,
-		&user.DisplayName,
-		&user.Email,
-		&user.SuperAdmin,
-		&active,
-		&notDeleted,
-	)
+	lookup := func() error {
+		return service.db.QueryRowContext(
+			ctx,
+			`SELECT u.id, u.username, u.display_name, u.email, u.super_admin,
+			        u.active, CASE WHEN u.deleted_at IS NULL THEN TRUE ELSE FALSE END
+			 FROM users u
+			 JOIN external_identities e ON e.user_id = u.id
+			 WHERE e.provider = 'keycloak' AND e.issuer = $1 AND e.subject = $2`,
+			issuer,
+			subject,
+		).Scan(
+			&user.ID,
+			&user.Username,
+			&user.DisplayName,
+			&user.Email,
+			&user.SuperAdmin,
+			&active,
+			&notDeleted,
+		)
+	}
+	err := lookup()
+	if errors.Is(err, sql.ErrNoRows) {
+		migrated, migrationErr := service.migrateLegacyOIDCIdentity(
+			ctx,
+			issuer,
+			subject,
+		)
+		if migrationErr != nil {
+			return User{}, migrationErr
+		}
+		if migrated {
+			err = lookup()
+		}
+	}
 	if err == nil {
 		if !active || !notDeleted {
 			return User{}, ErrOIDCUserInactive
@@ -763,8 +917,9 @@ func (service *OIDCService) provisionUser(
 			ctx,
 			`UPDATE external_identities
 			 SET claims_json = $1, last_login_at = CURRENT_TIMESTAMP
-			 WHERE provider = 'keycloak' AND subject = $2`,
+			 WHERE provider = 'keycloak' AND issuer = $2 AND subject = $3`,
 			string(claimsJSON),
+			issuer,
 			subject,
 		); updateErr != nil {
 			return User{}, fmt.Errorf("update Keycloak identity: %w", updateErr)
@@ -857,10 +1012,11 @@ func (service *OIDCService) provisionUser(
 	if _, err := transaction.ExecContext(
 		ctx,
 		`INSERT INTO external_identities(
-			id, user_id, provider, subject, claims_json, last_login_at
-		) VALUES ($1, $2, 'keycloak', $3, $4, CURRENT_TIMESTAMP)`,
+			id, user_id, provider, issuer, subject, claims_json, last_login_at
+		) VALUES ($1, $2, 'keycloak', $3, $4, $5, CURRENT_TIMESTAMP)`,
 		uuid.NewString(),
 		user.ID,
+		issuer,
 		subject,
 		string(claimsJSON),
 	); err != nil {
@@ -888,6 +1044,76 @@ func (service *OIDCService) provisionUser(
 		return User{}, fmt.Errorf("commit Keycloak user provisioning: %w", err)
 	}
 	return user, nil
+}
+
+// migrateLegacyOIDCIdentity upgrades the v0.2.14 identity row, which did not
+// have an issuer column, only when its persisted and cryptographically
+// verified ID-token claims prove which issuer originally owned the subject.
+// A row with missing or different issuer claims is intentionally left alone:
+// after a realm/configuration change, trusting only a repeated `sub` would let
+// the new realm take over the old local account.
+func (service *OIDCService) migrateLegacyOIDCIdentity(
+	ctx context.Context,
+	issuer string,
+	subject string,
+) (bool, error) {
+	transaction, err := service.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin legacy Keycloak identity migration: %w", err)
+	}
+	defer transaction.Rollback()
+	var identityID string
+	var rawClaims any
+	err = transaction.QueryRowContext(
+		ctx,
+		`SELECT id, claims_json FROM external_identities
+		 WHERE provider='keycloak' AND issuer='' AND subject=$1`,
+		subject,
+	).Scan(&identityID, &rawClaims)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read legacy Keycloak identity: %w", err)
+	}
+	claimsJSON, err := jsonBytes(rawClaims)
+	if err != nil {
+		return false, fmt.Errorf("decode legacy Keycloak identity claims: %w", err)
+	}
+	var storedClaims map[string]any
+	if err := json.Unmarshal(claimsJSON, &storedClaims); err != nil {
+		return false, fmt.Errorf("decode legacy Keycloak identity claims: %w", err)
+	}
+	storedIssuer := normalizedOIDCIssuer(claimString(storedClaims, "iss"))
+	if storedIssuer == "" || storedIssuer != issuer {
+		return false, nil
+	}
+	result, err := transaction.ExecContext(
+		ctx,
+		`UPDATE external_identities SET issuer=$1
+		 WHERE id=$2 AND provider='keycloak' AND issuer='' AND subject=$3`,
+		issuer,
+		identityID,
+		subject,
+	)
+	if err != nil {
+		return false, fmt.Errorf("migrate legacy Keycloak identity: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("confirm legacy Keycloak identity migration: %w", err)
+	}
+	if rows != 1 {
+		return false, nil
+	}
+	if err := transaction.Commit(); err != nil {
+		return false, fmt.Errorf("commit legacy Keycloak identity migration: %w", err)
+	}
+	return true, nil
+}
+
+func normalizedOIDCIssuer(value string) string {
+	return strings.TrimRight(strings.TrimSpace(value), "/")
 }
 
 func replaceKeycloakRoles(
@@ -1060,7 +1286,42 @@ func allowedEmail(email string, domains []string) bool {
 }
 
 func safeReturnTo(value string) bool {
-	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//")
+	if value == "" {
+		return false
+	}
+	candidate := value
+	// Decode repeatedly so a double-encoded backslash or authority prefix
+	// cannot become dangerous only after another proxy/browser decoding pass.
+	for {
+		decoded, err := url.PathUnescape(candidate)
+		if err != nil {
+			return false
+		}
+		if decoded == candidate {
+			break
+		}
+		candidate = decoded
+	}
+	for _, current := range []string{value, candidate} {
+		if strings.Contains(current, `\`) ||
+			!strings.HasPrefix(current, "/") ||
+			strings.HasPrefix(current, "//") {
+			return false
+		}
+		for _, character := range current {
+			if character < 0x20 || character == 0x7f {
+				return false
+			}
+		}
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" ||
+		parsed.User != nil || parsed.Opaque != "" {
+		return false
+	}
+	return strings.HasPrefix(parsed.Path, "/") &&
+		!strings.HasPrefix(parsed.Path, "//") &&
+		!strings.Contains(parsed.Path, `\`)
 }
 
 func containsString(values []string, target string) bool {

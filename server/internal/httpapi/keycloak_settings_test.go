@@ -89,7 +89,7 @@ func TestKeycloakAutoConfigureDiscoversAndPersistsMinimumSettings(
 		!settings.LastConnectionOK {
 		t.Fatalf("stored automatic settings = %#v", settings)
 	}
-	configured, err := server.oidcService.ClientSecretConfigured()
+	configured, err := server.oidcService.ClientSecretConfigured(context.Background())
 	if err != nil || !configured {
 		t.Fatalf("client secret configured = %v, error = %v", configured, err)
 	}

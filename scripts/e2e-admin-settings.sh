@@ -55,11 +55,9 @@ for _ in $(seq 1 40); do
   sleep 1
 done
 
-curl -fsS "http://127.0.0.1:$port/health/database" |
-  jq -e '.mode == "POSTGRES_ACTIVE"' >/dev/null
 curl -fsS "http://127.0.0.1:$port/api/v1/system/info" |
   jq -e --arg version "$expected_version" \
-    '.server_version == $version and .database_mode == "POSTGRES_ACTIVE"' >/dev/null
+    '.server_version == $version and (.database_mode | not)' >/dev/null
 
 login=$(
   curl -fsS -c "$work/admin.cookies" \
@@ -70,6 +68,13 @@ login=$(
 csrf=$(printf '%s' "$login" | jq -r .csrf_token)
 printf '%s' "$login" |
   jq -e '.user.super_admin == true and (.user.permissions | index("users.manage") != null)' >/dev/null
+curl -fsS -b "$work/admin.cookies" \
+  "http://127.0.0.1:$port/health/database" |
+  jq -e '.mode == "POSTGRES_ACTIVE"' >/dev/null
+curl -fsS -b "$work/admin.cookies" \
+  "http://127.0.0.1:$port/api/v1/admin/system/info" |
+  jq -e --arg version "$expected_version" \
+    '.server_version == $version and .database_mode == "POSTGRES_ACTIVE"' >/dev/null
 
 postgres_status=$(
   curl -fsS -b "$work/admin.cookies" \

@@ -1,7 +1,7 @@
 replicaCount: 2
 image:
   repository: ghcr.io/hkjang/invenqor-server
-  tag: "0.2.14"
+  tag: "0.2.15"
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP
@@ -10,7 +10,7 @@ ingress:
   enabled: false
   className: ""
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: 20m
+    nginx.ingress.kubernetes.io/proxy-body-size: 130m
     nginx.ingress.kubernetes.io/proxy-read-timeout: "90"
   hosts:
     - host: invenqor.example.com
@@ -19,12 +19,20 @@ ingress:
           pathType: Prefix
   tls: []
 persistence:
+  # true creates one RWO state PVC per Pod; false uses ephemeral emptyDir.
+  # This mode is immutable after the StatefulSet is installed.
   enabled: true
   size: 5Gi
 updates:
   size: 2Gi
   accessMode: ReadWriteMany
   storageClassName: ""
+eventSpool:
+  enabled: true
+  size: 5Gi
+  accessMode: ReadWriteMany
+  storageClassName: ""
+  existingClaim: ""
 postgresDsnSecret:
   name: invenqor-database
   key: dsn

@@ -2,6 +2,8 @@ use crate::collectors::{collect_all, configured, Collector};
 use crate::config::Config;
 use crate::health::StatusReport;
 use crate::identity::HostIdentity;
+#[cfg(any(windows, test))]
+use crate::model::AssetRecord;
 use crate::model::{unix_time, Envelope, EnvelopeKind, Snapshot};
 use crate::storage::StateStore;
 use crate::transport::{failure_of, Transport};
@@ -107,9 +109,32 @@ impl Agent {
     }
 
     pub async fn collect_once(&mut self) -> Result<Snapshot> {
-        let snapshot = collect_all(&self.identity.agent_id, self.collectors.clone()).await;
+        #[cfg(windows)]
+        let loaded_user_sids_before = crate::collectors::loaded_windows_user_sids();
+        let collected = collect_all(&self.identity.agent_id, self.collectors.clone()).await;
+        #[cfg(windows)]
+        let mut snapshot = collected;
+        #[cfg(not(windows))]
+        let snapshot = collected;
         let previous_hash = self.store.previous_hash();
         let previous_inventory = self.store.previous_inventory()?;
+        #[cfg(windows)]
+        {
+            // A profile can load between package collection and this check. It
+            // is authoritative only when it stayed loaded for the whole cycle;
+            // otherwise an empty observation could be mistaken for uninstalling
+            // every per-user package on that profile.
+            let loaded_after = crate::collectors::loaded_windows_user_sids();
+            let stable_loaded_sids = loaded_user_sids_before
+                .intersection(&loaded_after)
+                .cloned()
+                .collect();
+            retain_unloaded_windows_user_packages(
+                &mut snapshot.records,
+                &previous_inventory,
+                &stable_loaded_sids,
+            );
+        }
         // A failed collector must not turn all of its assets into false removals.
         let allow_removals = snapshot.errors.is_empty();
         let changes = StateStore::diff(&previous_inventory, &snapshot.records, allow_removals);
@@ -459,6 +484,46 @@ impl Agent {
     }
 }
 
+/// HKEY_USERS contains only profiles whose hives are currently loaded. A user
+/// logging off is not an uninstall event, so preserve that SID's last package
+/// records until its hive is loaded again and can authoritatively report the
+/// current contents.
+#[cfg(any(windows, test))]
+fn retain_unloaded_windows_user_packages(
+    current: &mut Vec<AssetRecord>,
+    previous: &[AssetRecord],
+    loaded_sids: &std::collections::BTreeSet<String>,
+) {
+    let mut current_ids: std::collections::BTreeSet<String> = current
+        .iter()
+        .map(|record| record.asset_id.clone())
+        .collect();
+    for record in previous {
+        if record.category != "software.package" || current_ids.contains(&record.asset_id) {
+            continue;
+        }
+        let manager = record
+            .payload
+            .get("manager")
+            .and_then(|value| value.as_str());
+        let scope = record.payload.get("scope").and_then(|value| value.as_str());
+        let owner_sid = record
+            .payload
+            .get("owner_sid")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if manager == Some("windows")
+            && scope == Some("user")
+            && !owner_sid.is_empty()
+            && !loaded_sids.contains(owner_sid)
+        {
+            current.push(record.clone());
+            current_ids.insert(record.asset_id.clone());
+        }
+    }
+    current.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
+}
+
 fn auth_mode(config: &Config) -> &'static str {
     if config.server.url.is_none() {
         return "none";
@@ -543,5 +608,46 @@ async fn wait_or_shutdown(duration: Duration) -> bool {
             _ = tokio::time::sleep(duration) => false,
             _ = tokio::signal::ctrl_c() => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn user_package(asset_id: &str, sid: &str) -> AssetRecord {
+        AssetRecord {
+            asset_id: asset_id.into(),
+            category: "software.package".into(),
+            source: "uninstall registry".into(),
+            collected_at: 1,
+            payload: json!({
+                "manager": "windows",
+                "scope": "user",
+                "owner_sid": sid,
+                "name": "Example"
+            }),
+        }
+    }
+
+    #[test]
+    fn unloaded_windows_profile_is_not_mistaken_for_an_uninstall() {
+        let sid = "S-1-5-21-100";
+        let previous = vec![user_package("package-a", sid)];
+        let mut current = Vec::new();
+        retain_unloaded_windows_user_packages(&mut current, &previous, &Default::default());
+        assert_eq!(current, previous);
+
+        let mut current = Vec::new();
+        retain_unloaded_windows_user_packages(
+            &mut current,
+            &previous,
+            &[sid.to_string()].into_iter().collect(),
+        );
+        assert!(
+            current.is_empty(),
+            "a loaded hive is authoritative and may report a real uninstall"
+        );
     }
 }

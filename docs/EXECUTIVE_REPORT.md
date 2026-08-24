@@ -1,30 +1,33 @@
 <div class="document-cover">
   <p class="eyebrow">INVENQOR AGENT · EXECUTIVE BRIEF</p>
   <h1>임원 보고서</h1>
-  <p class="subtitle">Linux·Windows 자산과 주요 소프트웨어 가시성 확보를 위한 Agent v0.2.14·Server v0.2.14 도입 가치, 통제 경계와 단계별 확산 제안</p>
+  <p class="subtitle">Linux·Windows 자산과 주요 소프트웨어 가시성 확보를 위한 Agent v0.2.15·Server v0.2.15 도입 가치, 통제 경계와 단계별 확산 제안</p>
   <div class="meta">
-    <p><strong>대상 릴리즈</strong> Agent v0.2.14 · Server v0.2.14</p>
+    <p><strong>대상 릴리즈</strong> Agent v0.2.15 · Server v0.2.15</p>
     <p><strong>보고서 버전</strong> 1.0</p>
-    <p><strong>기준일</strong> 2026-08-21</p>
+    <p><strong>기준일</strong> 2026-08-24</p>
     <p><strong>의사결정 등급</strong> 제한 운영 승인 검토</p>
   </div>
 </div>
 
-## v0.2.14 주요 소프트웨어 Intelligence 확장 요약
+## v0.2.15 주요 소프트웨어 Intelligence 확장 요약
 
 이번 릴리즈는 Linux·Windows 수집 Agent를 중앙 자산 Intelligence 서비스로 확장합니다.
 PostgreSQL 기반 대표 자산, 원천 추적, 변경 이력, 관계, 안전한 Query DSL과
-역할 기반 관리 콘솔을 제공합니다. PostgreSQL이 준비되지 않은 초기 도입은
-SQLite로 시작할 수 있고, 운영 중 DB 장애에는 검증된 Agent 이벤트를 암호화
-상태 영역의 내구성 spool에 보존합니다.
+역할 기반 관리 콘솔을 제공합니다. PostgreSQL DSN을 지정하지 않은 단일 인스턴스
+초기 도입은 SQLite로 시작할 수 있습니다. 운영 배포는 PostgreSQL 연결·migration
+실패 시 fail-closed로 기동을 중단하고, 운영 중 DB 장애에는 검증된 Agent 이벤트를
+모든 Server Pod가 공유하는 RWX spool에 원자적으로 보존합니다. 한 Pod가 종료돼도
+생존 Pod가 replay lock을 인계받아 자동 재처리합니다.
 
 운영 단순화를 위해 모든 웹·API·Agent 통신을 TCP 7070 하나로 통합했고,
-Kubernetes 2개 이상 Pod에서 PostgreSQL migration과 세션을 공유하도록
-개선했습니다. Agent는 Ed25519 서명, SHA-256, 단계적 rollout을 검증하는
+Kubernetes 2개 이상 Pod에서 PostgreSQL migration·세션, event spool과 update
+저장소를 공유하도록 개선했습니다. Agent는 Ed25519 서명, SHA-256, 단계적
+rollout을 검증하는
 자동 업데이트 체계를 제공하며 폐쇄망용 Server+PostgreSQL Docker image
 tar.gz도 함께 배포합니다.
 
-v0.2.14는 프로세스를 많이 수집하고도 “어떤 주요 제품을 관리하는가”에 답하기
+v0.2.15는 프로세스를 많이 수집하고도 “어떤 주요 제품을 관리하는가”에 답하기
 어려웠던 문제를 해결합니다. Server 내장 카탈로그가 같은 호스트의 프로세스,
 서비스, 설치 패키지를 교차 검증해 51개 주요 인프라·PC·운영 제품을 자동 식별합니다.
 제품별 설치·실행 상태, 버전, 호스트 연결과 판별 증거를 제공하고 일반 화면에서는
@@ -34,6 +37,13 @@ Teams·Zoom, Java·.NET, MECM·Tanium·BigFix, Elastic Agent·Wazuh까지 포함
 Windows PC 표준화와 Endpoint 운영에도 적용할 수 있습니다. Chrome·Java 같은 범용
 process 단독 신호는 제품으로 승격하지 않아 자산 수와 영향 범위의 과대 계산을
 줄입니다.
+
+이번 릴리즈는 운영 자동화의 신뢰 경계도 강화합니다. Windows Agent는 서명·hash·
+플랫폼·실행 검증을 마친 update를 서비스 권한으로 적용하고 SCM이 새 실행 파일로
+복구 재시작합니다. 여러 Server Pod는 Keycloak Client Secret을 공용 암호화 저장소로
+공유하며, API Key scope·회전과 Agent Event 최종 상태를 PostgreSQL의 조건부 갱신으로
+보호합니다. 자산 연계와 AI 도구는 최신 MCP `2026-07-28`과 기존 client를 동시에
+지원하므로 fleet과 연계 시스템을 한 번에 교체할 필요가 없습니다.
 
 Windows Agent가 정상 inventory를 보냈는데도 “운영체제 확인 전”으로 보이던 문제도
 해결했습니다. 직접 원인은 Windows의 최상위 `os_name`과 Linux식 `os_release`만
@@ -66,7 +76,7 @@ CMDB·자동화·AI 활용을 위해 자산 REST API와 읽기 전용 MCP 도구
 
 ## 1. 의사결정 요약
 
-Invenqor Agent v0.2.14는 Linux 서버와 Windows PC·서버의 운영체제, 하드웨어 자원, 네트워크,
+Invenqor Agent v0.2.15는 Linux 서버와 Windows PC·서버의 운영체제, 하드웨어 자원, 네트워크,
 프로세스, 설치 소프트웨어, 서비스, 계정과 컨테이너 환경을 플랫폼 권한 모델에
 맞춰 수집하는 경량 에이전트입니다. Linux는 비특권 전용 계정, Windows는 SCM과
 모든 사용자 설치 범위를 읽기 위한 LocalSystem 서비스를 사용합니다. 외부 언어 런타임 없이 Linux x86_64/aarch64와
@@ -114,7 +124,7 @@ Invenqor Agent는 이 문제를 해결하기 위한 **신뢰 가능한 원천 �
 데이터를 경영·보안 의사결정으로 바꾸려면 중앙 정규화, 정책, 대시보드와
 업무 프로세스가 추가로 필요합니다.
 
-## 3. v0.2.14가 제공하는 범위
+## 3. v0.2.15가 제공하는 범위
 
 <div class="kpi-grid">
   <div class="kpi"><strong>10개</strong>기본 수집기 영역</div>
@@ -154,7 +164,8 @@ Invenqor Agent는 이 문제를 해결하기 위한 **신뢰 가능한 원천 �
 - 운영 기본값은 HTTPS 전용이며 격리 테스트에서만 HTTP를 명시 허용
 - 사설 CA, 장비별 mTLS PEM, bearer token 지원
 - Agent inbound 포트, 원격 셸, 임의 명령 실행 없음
-- 자동 업데이트는 Ed25519 서명·SHA-256·원자 교체·이전 바이너리 보존 적용
+- 자동 업데이트는 metadata-bound Ed25519 manifest v2 서명·SHA-256·제한된 실행
+  자기 점검·원자 교체·이전 바이너리 보존 적용
 - 프로세스 명령행 기본 미수집
 - 설정과 상태 파일의 제한된 권한
 
@@ -197,13 +208,13 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 | 운영성 | 관리 화면의 원시 process 제외 후 구성 항목 감소율 | 제품 누락 없이 조사 소음 감소 |
 
 효과 금액은 현재 인력 단가, 서버 수, 감사 빈도, 사고 조사 시간을 입력해
-산출해야 합니다. v0.2.14 자료만으로 절감액이나 ROI를 단정하지 않습니다.
+산출해야 합니다. v0.2.15 자료만으로 절감액이나 ROI를 단정하지 않습니다.
 
 ## 6. 위험과 통제 계획
 
 ### 6.1 주요 위험
 
-| 위험 | 영향 | v0.2.14 상태 | 필수 통제 |
+| 위험 | 영향 | v0.2.15 상태 | 필수 통제 |
 |---|---|---|---|
 | 중앙 시스템 장애 | 최신 데이터 지연 | DB spool·자동 재처리 | PostgreSQL HA·백업·SLO 운영 |
 | 자산정보 과다 노출 | 공격 표면·개인정보 유출 | 계정/네트워크/프로세스 수집 | 분류, RBAC, 암호화, 조회 감사, 보존 |
@@ -212,7 +223,7 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 | Open 등록 경계 오설정 | 비인가 장비 등록 | DB 정책과 IP/CIDR allowlist 적용 | 신뢰 프록시를 제한하고 외부는 Token 보호 |
 | 큐 포화 | 신규 변경 event 생성 실패 | 기존 데이터 보존 후 실패 | 70/90% 경보, 게이트웨이 SLO |
 | 부분 수집 오류 | 실제 삭제 탐지 지연 | 삭제 보수 억제 | 오류율 경보와 운영 예외 처리 |
-| 공급망 증적 부족 | 패키지 진위 검증 한계 | SHA-256만 제공 | 조직 서명, SBOM/provenance 로드맵 |
+| 공급망 증적 부족 | 배포 패키지 진위 검증 한계 | Package checksum, 별도 자동 업데이트 v2 서명 | 조직 package 서명, SBOM/provenance 로드맵 |
 | 자동 업데이트 오배포 | 서비스 중단·공급망 위험 | Ed25519·SHA-256·단계적 rollout | 승인 키 분리, canary, 이전 바이너리 복구 시험 |
 | 플랫폼 편차 | 일부 필드 누락 | 점진적 기능 저하 | 대표 OS Pilot과 예외 기준 |
 | 제품 자동 식별 오탐·미탐 | 잘못된 영향 범위 또는 누락 | 보수적 내장 카탈로그·evidence·확신도 제공 | 80% 미만 검토, 표본 대조, 카탈로그 버전 변경 검증 |
@@ -303,18 +314,22 @@ Pilot 전에 기준값을 측정하고, 목표값은 조직 규모와 현재 성
 정확한 TCO는 Pilot에서 호스트당 이벤트 크기, 변경 빈도, 큐 증가율, 저장 보존
 기간과 운영 투입시간을 측정한 뒤 산출합니다.
 
-## 10. 릴리즈 품질 증적
+## 10. 릴리즈 품질 게이트
 
-Agent v0.2.14·Server v0.2.14 릴리즈 시 확인된 항목:
+Agent v0.2.15·Server v0.2.15는 동일 commit에서 다음 자동 검증이 모두 성공한
+경우에만 릴리즈합니다.
 
 - Rust format 검사
 - Clippy 경고 0 기준
-- Rust·React 단위 테스트와 전체 Go 테스트 통과
+- Rust·React 단위 테스트와 전체 Go 테스트
 - Linux x86_64/aarch64 musl release build와 Windows x86_64 GNU cross build
-- Windows runner에서 배포용 GNU Agent·Server 자동 등록, 네이티브 수집·전송 E2E
+- Windows runner에서 배포 ZIP을 사용자 지정 SCM 서비스로 설치하고 GNU Agent·
+  Server 자동 등록, 상태·진단, 네이티브 수집·전송·제거를 확인하는 E2E
 - Linux 아카이브 2개와 Windows 배포본 1개의 SHA-256 검증
-- CentOS 7, Red Hat UBI 8/9, Ubuntu 22.04/24.04, Alpine 실제 E2E
-- Server 2-Pod 공용 정책·자산·진단 로그 교차 조회 E2E
+- CentOS 7, Red Hat UBI 8/9, Ubuntu 22.04/24.04, Alpine 실제 수집·전송 E2E와
+  배포용 Linux archive의 RHEL 8 systemd 설치·daemon·update path E2E
+- Server 2-Pod 공용 정책·자산·진단 로그 교차 조회, DB 장애 중 공용 RWX spool
+  수락, Pod 제거 후 replay·재확장 E2E
 - 실제 PostgreSQL에 Windows 형식 inventory를 전송해 OS 표시와 SQL Server/IIS
   제품·host·설치/실행 상태·다중 evidence 계약 검증
 - 조회 전용 DB projection으로 제품 검색·집계·페이징을 처리하고, Server 멀티 Pod가
@@ -326,7 +341,7 @@ Agent v0.2.14·Server v0.2.14 릴리즈 시 확인된 항목:
 - 오프라인 Docker image tar.gz 재적재·기동 검증
 - GitHub Actions CI
 
-이 증적은 소프트웨어 기본 품질을 지지하지만 침투 테스트, 독립 보안성 평가,
+이 품질 게이트는 소프트웨어 기본 품질을 확인하지만 침투 테스트, 독립 보안성 평가,
 성능/용량 인증, 전 배포판 호환성 인증을 대체하지 않습니다.
 
 ## 11. 임원 승인 요청 항목
@@ -347,7 +362,7 @@ Agent v0.2.14·Server v0.2.14 릴리즈 시 확인된 항목:
 
 ## 12. 결론
 
-Invenqor Agent v0.2.14는 Linux·Windows 자산 가시성의 가장 아래층인 **현장
+Invenqor Agent v0.2.15는 Linux·Windows 자산 가시성의 가장 아래층인 **현장
 수집과 신뢰성 있는 전달**에 더해, 원시 관찰을 주요 소프트웨어 제품과 host 관계로
 바꾸는 자동 정규화를 제공합니다. 비특권·outbound-only·부분 실패 격리·내구성
 큐와 설명 가능한 evidence 설계는 통제된 Pilot을 시작하기에 합리적입니다.

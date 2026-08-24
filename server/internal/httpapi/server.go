@@ -151,8 +151,7 @@ func (s *Server) routes() {
 	s.router.Get("/", webui.Handler().ServeHTTP)
 	s.router.Get("/health/live", s.live)
 	s.router.Get("/health/ready", s.ready)
-	s.router.Get("/health/database", s.databaseHealth)
-	s.router.Get("/api/v1/system/info", s.systemInfo)
+	s.router.Get("/api/v1/system/info", s.publicSystemInfo)
 	s.router.Get("/api/v1/bootstrap/status", s.bootstrapStatus)
 	s.router.Post("/api/v1/bootstrap/admin", s.createInitialAdmin)
 	s.router.Post("/api/v1/auth/local/login", s.localLogin)
@@ -227,6 +226,14 @@ func (s *Server) routes() {
 			s.disableTOTP,
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
+			"/health/database",
+			s.databaseHealth,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/system/info",
+			s.adminSystemInfo,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/settings/keycloak",
 			s.getKeycloakSettings,
 		)
@@ -285,16 +292,22 @@ func (s *Server) routes() {
 		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/assets", s.listAssets,
 		)
-		protected.With(s.requirePermission("assets.read")).Get(
+		protected.With(s.requirePermission("assets.export")).Get(
 			"/api/v1/assets.csv", s.exportAssets,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
 			"/api/v1/assets/software-products", s.listSoftwareProducts,
 		)
-		protected.With(s.requirePermission("assets.read")).Get(
+		protected.With(
+			s.requirePermission("assets.read"),
+			s.requirePermission("agents.read"),
+		).Get(
 			"/api/v1/dashboard/statistics", s.dashboardStatistics,
 		)
-		protected.With(s.requirePermission("assets.read")).Get(
+		protected.With(
+			s.requirePermission("assets.read"),
+			s.requirePermission("relations.read"),
+		).Get(
 			"/api/v1/assets/visualization", s.assetVisualization,
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
@@ -328,7 +341,7 @@ func (s *Server) routes() {
 		protected.With(s.requireCSRF, s.requirePermission("assets.delete")).Delete(
 			"/api/v1/assets/{assetID}", s.deleteAsset,
 		)
-		protected.With(s.requireCSRF, s.requirePermission("assets.write")).Post(
+		protected.With(s.requireCSRF, s.requirePermission("assets.delete")).Post(
 			"/api/v1/assets/{assetID}/restore", s.restoreAsset,
 		)
 		protected.With(s.requirePermission("assets.read")).Get(
@@ -575,7 +588,18 @@ func (s *Server) databaseHealth(response http.ResponseWriter, request *http.Requ
 	writeJSON(response, status, payload)
 }
 
-func (s *Server) systemInfo(response http.ResponseWriter, request *http.Request) {
+// publicSystemInfo intentionally exposes only what the login screen needs.
+// Database topology, bind addresses and enrollment policy belong to the
+// authenticated settings view rather than an unauthenticated fingerprinting
+// endpoint.
+func (s *Server) publicSystemInfo(response http.ResponseWriter, _ *http.Request) {
+	writeJSON(response, http.StatusOK, map[string]any{
+		"product":        "Invenqor",
+		"server_version": version.Version,
+	})
+}
+
+func (s *Server) adminSystemInfo(response http.ResponseWriter, request *http.Request) {
 	policy, _, policyErr := s.loadAgentEnrollmentPolicy(request.Context())
 	enrollmentEnabled := s.agentEnrollmentEnabled
 	enrollmentMode := s.agentEnrollmentMode()
@@ -664,6 +688,7 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 		}
 		wrapped := middleware.NewWrapResponseWriter(response, request.ProtoMajor)
 		next.ServeHTTP(wrapped, request)
+		duration := time.Since(started).Milliseconds()
 		s.logger.Info(
 			"http_request",
 			"request_id", middleware.GetReqID(request.Context()),
@@ -671,10 +696,47 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 			"path", request.URL.Path,
 			"status", wrapped.Status(),
 			"bytes", wrapped.BytesWritten(),
-			"duration_ms", time.Since(started).Milliseconds(),
+			"duration_ms", duration,
 			"remote_ip", request.RemoteAddr,
 		)
+		// Persist structured access logs in the shared database so the
+		// management console can search requests from every Pod. Successful
+		// liveness/readiness probes and static UI assets would consume the
+		// bounded retention almost immediately, so retain API/Agent traffic and
+		// every failed request instead.
+		if shouldPersistRequestLog(request.URL.Path, wrapped.Status()) {
+			level := "info"
+			if wrapped.Status() >= http.StatusInternalServerError {
+				level = "error"
+			} else if wrapped.Status() >= http.StatusBadRequest {
+				level = "warning"
+			}
+			s.recordDiagnostic(request, diagnostics.Event{
+				Level:     level,
+				Component: "http",
+				EventCode: "HTTP_REQUEST",
+				Message:   "The Server completed an HTTP request.",
+				RequestID: requestID,
+				SourceIP:  clientIP(request),
+				Details: map[string]any{
+					"method":      request.Method,
+					"path":        request.URL.Path,
+					"status":      wrapped.Status(),
+					"bytes":       wrapped.BytesWritten(),
+					"duration_ms": duration,
+				},
+			})
+		}
 	})
+}
+
+func shouldPersistRequestLog(path string, status int) bool {
+	if status >= http.StatusBadRequest {
+		return true
+	}
+	return path != "/" &&
+		!strings.HasPrefix(path, "/assets/") &&
+		path != "/health/live" && path != "/health/ready"
 }
 
 func writeJSON(response http.ResponseWriter, status int, payload any) {

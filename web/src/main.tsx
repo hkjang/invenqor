@@ -5,7 +5,7 @@ import {
   Copy, KeyRound, LogOut, Menu, Package, Palette, RefreshCw, Search, Settings,
   ScrollText, ShieldCheck, Trash2, UserCog, Users, X,
 } from "lucide-react";
-import { api } from "./api";
+import { api, csrfTokenFromCookie } from "./api";
 import { SettingsPage, UsersPage } from "./adminPages";
 import {AccountSecurityPage, type AccountSecurity} from "./accountPage";
 import {
@@ -171,34 +171,41 @@ function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete }: {
   </main>;
 }
 
-const navigation: {id: Page; label: string; icon: React.ElementType; permission: string}[] = [
-  {id:"dashboard",label:"운영 현황",icon:LayoutDashboard,permission:"assets.read"},
-  {id:"assets",label:"자산",icon:Boxes,permission:"assets.read"},
-  {id:"software",label:"주요 소프트웨어",icon:Package,permission:"assets.read"},
-  {id:"visualization",label:"시각화",icon:ChartPie,permission:"assets.read"},
-  {id:"agents",label:"Agent",icon:Activity,permission:"agents.read"},
-  {id:"query",label:"Query DSL",icon:Search,permission:"queries.execute"},
-  {id:"settings",label:"설정",icon:Settings,permission:"settings.read"},
-  {id:"users",label:"사용자",icon:Users,permission:"users.read"},
-  {id:"keys",label:"API · MCP 키",icon:KeyRound,permission:"api_keys.manage"},
-  {id:"audit",label:"감사 로그",icon:ShieldCheck,permission:"audit.read"},
-  {id:"logs",label:"Server 로그",icon:ScrollText,permission:"audit.read"},
-  {id:"account",label:"내 보안",icon:UserCog,permission:""},
+type NavigationItem = {
+  id: Page;
+  label: string;
+  icon: React.ElementType;
+  permissions: string[];
+};
+const navigation: NavigationItem[] = [
+  {id:"dashboard",label:"운영 현황",icon:LayoutDashboard,permissions:["assets.read","agents.read"]},
+  {id:"assets",label:"자산",icon:Boxes,permissions:["assets.read"]},
+  {id:"software",label:"주요 소프트웨어",icon:Package,permissions:["assets.read"]},
+  {id:"visualization",label:"시각화",icon:ChartPie,permissions:["assets.read","relations.read"]},
+  {id:"agents",label:"Agent",icon:Activity,permissions:["agents.read"]},
+  {id:"query",label:"Query DSL",icon:Search,permissions:["queries.execute"]},
+  {id:"settings",label:"설정",icon:Settings,permissions:["settings.read"]},
+  {id:"users",label:"사용자",icon:Users,permissions:["users.read"]},
+  {id:"keys",label:"API · MCP 키",icon:KeyRound,permissions:["api_keys.manage"]},
+  {id:"audit",label:"감사 로그",icon:ShieldCheck,permissions:["audit.read"]},
+  {id:"logs",label:"Server 로그",icon:ScrollText,permissions:["audit.read"]},
+  {id:"account",label:"내 보안",icon:UserCog,permissions:[]},
 ];
+
+const canOpenNavigationItem = (item: NavigationItem, user: User) =>
+  user.super_admin || item.permissions.every(permission => user.permissions.includes(permission));
 
 const canOpenPage = (page: Page, user: User) => {
   if (page === "account" || page === "preferences") return true;
   const item = navigation.find(candidate => candidate.id === page);
-  return !!item && (
-    !item.permission ||
-    user.super_admin ||
-    user.permissions.includes(item.permission)
-  );
+  return !!item && canOpenNavigationItem(item, user);
 };
 
 function App() {
   const [user, setUser] = React.useState<User|null>(null);
-  const [csrf, setCsrf] = React.useState(sessionStorage.getItem("csrf") || "");
+  const [csrf, setCsrf] = React.useState(
+    () => csrfTokenFromCookie() || sessionStorage.getItem("csrf") || "",
+  );
   const [page, setPage] = React.useState<Page>(
     () => parseConsoleHash(window.location.hash).page || "dashboard",
   );
@@ -210,9 +217,17 @@ function App() {
   const [preferences, setPreferences] = React.useState<UserPreferences>(defaultPreferences);
   const [security,setSecurity]=React.useState<AccountSecurity|undefined>(undefined);
   const loadIdentity=React.useCallback(()=>api<{user:User; security?:AccountSecurity}>("/api/v1/auth/me")
-    .then(v=>{setUser(v.user); setSecurity(v.security);}).catch(()=>{}),[]);
+    .then(v=>{
+      setUser(v.user); setSecurity(v.security);
+      const currentCsrf = csrfTokenFromCookie();
+      if (currentCsrf) { setCsrf(currentCsrf); sessionStorage.setItem("csrf", currentCsrf); }
+    }).catch(()=>{}),[]);
   React.useEffect(()=>{ void loadIdentity(); },[loadIdentity]);
-  React.useEffect(()=>{ api<SystemInfo>("/api/v1/system/info").then(setSystemInfo).catch(()=>{}); },[]);
+  React.useEffect(()=>{
+    const canReadSettings = user?.super_admin || user?.permissions.includes("settings.read");
+    const path = canReadSettings ? "/api/v1/admin/system/info" : "/api/v1/system/info";
+    api<SystemInfo>(path).then(setSystemInfo).catch(()=>{});
+  },[user?.id]);
   React.useEffect(()=>{
     api<{keycloak:boolean; keycloak_incomplete?:boolean}>("/api/v1/auth/methods")
       .then(v=>{ setKeycloakEnabled(v.keycloak); setKeycloakIncomplete(!!v.keycloak_incomplete); })
@@ -228,11 +243,7 @@ function App() {
     const remembered = loadLastPage(user.id);
     const preferred = loaded.start_page as Page;
     const candidate = routed || remembered || preferred;
-    const fallback = navigation.find(item =>
-      !item.permission ||
-      user.super_admin ||
-      user.permissions.includes(item.permission)
-    )?.id || "account";
+    const fallback = navigation.find(item => canOpenNavigationItem(item, user))?.id || "account";
     const next = canOpenPage(candidate, user) ? candidate : fallback;
     setPage(next);
     saveLastPage(user.id, next);
@@ -265,7 +276,7 @@ function App() {
   }, [preferences]);
   if (bootstrap?.required) return <BootstrapSetup onComplete={() => setBootstrap({required:false})}/>;
   if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
-  const visibleNavigation=navigation.filter(item=>!item.permission||user.super_admin||user.permissions.includes(item.permission));
+  const visibleNavigation=navigation.filter(item=>canOpenNavigationItem(item,user));
   const personalPage=page==="account"||page==="preferences";
   const activePage=personalPage||visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;
   const navigate=(next:Page)=>{
@@ -284,12 +295,12 @@ function App() {
     if(result.logout_url) window.location.assign(result.logout_url);
   };
   return <div className="app-shell">
-    <aside className={mobile?"sidebar open":"sidebar"}>
-      <div className="brand"><div className="brand-mark small">IQ</div><div><strong>INVENQOR</strong><span>CONTROL PLANE</span></div><button className="mobile-close" onClick={()=>setMobile(false)}><X/></button></div>
-      <nav>{visibleNavigation.map(item=><button key={item.id} className={activePage===item.id?"active":""} onClick={()=>navigate(item.id)}><item.icon size={19}/>{item.label}</button>)}</nav>
-      <div className="user-card"><div className="avatar">{(user.display_name||user.username)[0].toUpperCase()}</div><div><strong>{user.display_name||user.username}</strong><span>{user.super_admin?"최고 관리자":"사용자"}</span></div><button onClick={logout} title="로그아웃"><LogOut size={17}/></button></div>
+    <aside id="console-navigation" aria-label="관리 콘솔 메뉴" className={mobile?"sidebar open":"sidebar"}>
+      <div className="brand"><div className="brand-mark small">IQ</div><div><strong>INVENQOR</strong><span>CONTROL PLANE</span></div><button className="mobile-close" aria-label="메뉴 닫기" onClick={()=>setMobile(false)}><X/></button></div>
+      <nav aria-label="주요 메뉴">{visibleNavigation.map(item=><button key={item.id} className={activePage===item.id?"active":""} aria-current={activePage===item.id?"page":undefined} onClick={()=>navigate(item.id)}><item.icon size={19}/>{item.label}</button>)}</nav>
+      <div className="user-card"><div className="avatar">{(user.display_name||user.username)[0].toUpperCase()}</div><div><strong>{user.display_name||user.username}</strong><span>{user.super_admin?"최고 관리자":"사용자"}</span></div><button onClick={logout} aria-label="로그아웃"><LogOut size={17}/></button></div>
     </aside>
-    <main className="content"><header><button className="menu" onClick={()=>setMobile(true)}><Menu/></button><div><span className="crumb">INVENQOR / {activePage==="preferences"?"개인화":visibleNavigation.find(n=>n.id===activePage)?.label || "접근 권한 없음"}</span></div><div className="header-meta"><ProductVersion info={systemInfo} compact/><div className="live"><i/> LIVE</div>
+    <main className="content"><header><button className="menu" aria-label="메뉴 열기" aria-controls="console-navigation" aria-expanded={mobile} onClick={()=>setMobile(true)}><Menu/></button><div><span className="crumb">INVENQOR / {activePage==="preferences"?"개인화":visibleNavigation.find(n=>n.id===activePage)?.label || "접근 권한 없음"}</span></div><div className="header-meta"><ProductVersion info={systemInfo} compact/><div className="live"><i/> LIVE</div>
       <ProfileMenu user={user} onNavigate={navigate} onLogout={logout}/></div></header>
       <PageErrorBoundary key={activePage}>
       {!activePage&&<Empty icon={ShieldCheck} text="이 계정에 콘솔 접근 권한이 없습니다."/>}
@@ -300,8 +311,10 @@ function App() {
       {activePage==="visualization"&&<VisualizationPage/>}
       {activePage==="agents"&&<AgentsPage csrf={csrf} systemInfo={systemInfo}
         access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
-      {activePage==="query"&&<QueryPage csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo} userID={user.id}/>}
-      {activePage==="users"&&<UsersPage csrf={csrf} currentUserID={user.id}/>}
+      {activePage==="query"&&<QueryPage csrf={csrf}/>} {activePage==="settings"&&<SettingsPage csrf={csrf} systemInfo={systemInfo} userID={user.id}
+        access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
+      {activePage==="users"&&<UsersPage csrf={csrf} currentUserID={user.id}
+        access={{permissions:user.permissions,superAdmin:user.super_admin}}/>}
       {activePage==="keys"&&<ApiKeys csrf={csrf}/>} {activePage==="audit"&&<AuditPage/>}
       {activePage==="logs"&&<ServerLogsPage/>}
       {activePage==="account"&&<AccountSecurityPage csrf={csrf} security={security}
@@ -325,6 +338,7 @@ function ProfileMenu({
 }) {
   const [open, setOpen] = React.useState(false);
   const container = React.useRef<HTMLDivElement>(null);
+  const menuID = React.useId();
   React.useEffect(() => {
     const close = (event: MouseEvent) => {
       if (!container.current?.contains(event.target as Node)) setOpen(false);
@@ -345,13 +359,14 @@ function ProfileMenu({
   };
   return <div className="profile-context" ref={container}>
     <button className="profile-trigger" onClick={() => setOpen(value => !value)}
-      aria-haspopup="menu" aria-expanded={open}>
+      aria-label={`${user.display_name || user.username} 프로필 메뉴`}
+      aria-haspopup="menu" aria-controls={menuID} aria-expanded={open}>
       <span className="avatar">{(user.display_name || user.username)[0].toUpperCase()}</span>
       <span className="profile-trigger-copy"><strong>{user.display_name || user.username}</strong>
         <small>{user.super_admin ? "최고 관리자" : "사용자"}</small></span>
       <ChevronDown size={15}/>
     </button>
-    {open && <div className="profile-menu" role="menu">
+    {open && <div className="profile-menu" id={menuID} role="menu">
       <div className="profile-menu-identity"><strong>{user.display_name || user.username}</strong>
         <span>@{user.username}</span></div>
       <button role="menuitem" onClick={() => navigate("account")}><UserCog size={16}/>
@@ -400,16 +415,16 @@ function ApiKeys({csrf}:{csrf:string}){
   ]),[]);
   React.useEffect(()=>{load().catch(e=>setError((e as Error).message))},[load]);
   const create=async(e:React.FormEvent)=>{e.preventDefault();setError("");try{const v=await api<{api_key:ApiKey;secret:string}>("/api/v1/admin/api-keys",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({name,scopes:selected,...(expires?{expires_at:new Date(expires).toISOString()}:{})})});setSecret(v.secret);setName("");await load()}catch(reason){setError((reason as Error).message)}};
-  const replaceScopes=async(key:ApiKey,scope:string)=>{try{if(key.scopes.includes(scope)){await api(`/api/v1/admin/api-keys/${key.id}/scopes/${encodeURIComponent(scope)}`,{method:"DELETE",headers:{"X-CSRF-Token":csrf}})}else{await api(`/api/v1/admin/api-keys/${key.id}/scopes`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({scopes:[scope]})})}await load()}catch(reason){setError((reason as Error).message)}};
-  const rename=async(key:ApiKey)=>{const name=window.prompt("새 키 이름",key.name);if(!name||name===key.name)return;try{await api(`/api/v1/admin/api-keys/${key.id}`,{method:"PATCH",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({name})});await api(`/api/v1/admin/api-keys/${key.id}`);await load()}catch(reason){setError((reason as Error).message)}};
-  const rotate=async(key:ApiKey)=>{const value=window.prompt("구 키 유예시간(초, 0~604800)", "3600");if(value===null)return;try{const v=await api<{secret:string}>(`/api/v1/admin/api-keys/${key.id}/rotate`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({grace_seconds:Number(value)})});setSecret(v.secret);await load()}catch(reason){setError((reason as Error).message)}};
-  const revoke=async(key:ApiKey)=>{if(!window.confirm(`${key.name} 키를 즉시 폐기합니까?`))return;try{await api(`/api/v1/admin/api-keys/${key.id}`,{method:"DELETE",headers:{"X-CSRF-Token":csrf}});await load()}catch(reason){setError((reason as Error).message)}};
+  const replaceScopes=async(key:ApiKey,scope:string)=>{setError("");try{if(key.scopes.includes(scope)){await api(`/api/v1/admin/api-keys/${key.id}/scopes/${encodeURIComponent(scope)}`,{method:"DELETE",headers:{"X-CSRF-Token":csrf}})}else{await api(`/api/v1/admin/api-keys/${key.id}/scopes`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({scopes:[scope]})})}await load()}catch(reason){setError((reason as Error).message)}};
+  const rename=async(key:ApiKey)=>{const name=window.prompt("새 키 이름",key.name);if(!name||name===key.name)return;setError("");try{const value=await api<{api_key:ApiKey}>(`/api/v1/admin/api-keys/${key.id}`,{method:"PATCH",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({name})});setKeys(current=>current.map(candidate=>candidate.id===key.id?value.api_key:candidate))}catch(reason){setError((reason as Error).message)}};
+  const rotate=async(key:ApiKey)=>{const value=window.prompt("구 키 유예시간(초, 0~604800)", "3600");if(value===null)return;setError("");try{const v=await api<{secret:string}>(`/api/v1/admin/api-keys/${key.id}/rotate`,{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrf},body:JSON.stringify({grace_seconds:Number(value)})});setSecret(v.secret);await load()}catch(reason){setError((reason as Error).message)}};
+  const revoke=async(key:ApiKey)=>{if(!window.confirm(`${key.name} 키를 즉시 폐기합니까?`))return;setError("");try{await api(`/api/v1/admin/api-keys/${key.id}`,{method:"DELETE",headers:{"X-CSRF-Token":csrf}});await load()}catch(reason){setError((reason as Error).message)}};
   const active=keys.filter(key=>!key.revoked_at);
   const revoked=keys.filter(key=>!!key.revoked_at);
   const visibleKeys=showRevoked?keys:active;
   const expiringSoon=active.filter(key=>keyExpiryTone(key.expires_at||"")==="warn");
   return <section><PageTitle kicker="MACHINE IDENTITY" title="API · MCP 키" subtitle="연계 시스템과 AI Agent의 최소권한 키를 생성하고 회전합니다."/>
-    {secret&&<div className="secret-reveal"><div><strong>새 Secret — 지금 한 번만 표시됩니다</strong><code>{secret}</code></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(secret)}><Copy size={17}/> 복사</button><button className="secondary" onClick={()=>setSecret("")}><X size={17}/></button></div>}
+    {secret&&<div className="secret-reveal"><div><strong>새 Secret — 지금 한 번만 표시됩니다</strong><code>{secret}</code></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(secret)}><Copy size={17}/> 복사</button><button className="secondary" aria-label="Secret 닫기" onClick={()=>setSecret("")}><X size={17}/></button></div>}
     {error&&<div className="error">{error}</div>}
     <div className="key-layout"><Panel title="새 키 발급" action="원문 비저장"><form className="key-form" onSubmit={create}><label>키 이름<input value={name} onChange={e=>setName(e.target.value)} placeholder="예: cmdb-readonly" required/></label><label>만료 시각<input type="datetime-local" value={expires} onChange={e=>setExpires(e.target.value)}/></label><fieldset><legend>Scope</legend>{catalog.map(scope=><label className="scope-check" key={scope.name}><input type="checkbox" checked={selected.includes(scope.name)} onChange={()=>setSelected(selected.includes(scope.name)?selected.filter(v=>v!==scope.name):[...selected,scope.name])}/><span><strong>{scope.name}</strong><small>{scope.description}</small></span></label>)}</fieldset><button className="primary compact" disabled={!selected.length}>키 생성</button></form></Panel>
     <Panel title={`${active.length}개 활성 키`}
@@ -426,8 +441,8 @@ function ApiKeys({csrf}:{csrf:string}){
             ?`최근 사용 ${formatRelative(key.last_used_at)}`
             :"아직 사용된 적 없음"}</small></span></div>
           <div><button title="이름 변경" onClick={()=>rename(key)} disabled={!!key.revoked_at}>이름</button>
-            <button title="회전" onClick={()=>rotate(key)} disabled={!!key.revoked_at}><RefreshCw size={16}/></button>
-            <button title="폐기" onClick={()=>revoke(key)} disabled={!!key.revoked_at}><Trash2 size={16}/></button></div></div>
+            <button aria-label={`${key.name} 키 회전`} title="회전" onClick={()=>rotate(key)} disabled={!!key.revoked_at}><RefreshCw size={16}/></button>
+            <button aria-label={`${key.name} 키 폐기`} title="폐기" onClick={()=>revoke(key)} disabled={!!key.revoked_at}><Trash2 size={16}/></button></div></div>
         <div className="scope-pills">{catalog.map(scope=><button key={scope.name} className={key.scopes.includes(scope.name)?"on":""} disabled={!!key.revoked_at} onClick={()=>replaceScopes(key,scope.name)}>{scope.name}</button>)}</div>
         <div className="key-meta">
           {key.revoked_at

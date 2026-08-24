@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hkjang/invenqor/server/internal/storage"
@@ -57,5 +58,18 @@ func TestStoreFiltersSharedDiagnosticsAndRedactsSecrets(t *testing.T) {
 		items[0].Details["error"] !=
 			"postgres://user:[REDACTED]@database/invenqor" {
 		t.Fatalf("diagnostic was not redacted: %#v", items[0])
+	}
+}
+
+func TestSanitizeRedactsAPIKeysAndCompleteBearerCredentials(t *testing.T) {
+	apiKey := "ivq_sk_prefix_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+	value := "key=" + apiKey + " Authorization: Bearer opaque_token.with-parts=="
+	sanitized := Sanitize(value)
+	if strings.Contains(sanitized, apiKey) ||
+		strings.Contains(sanitized, "opaque_token.with-parts==") {
+		t.Fatalf("Sanitize() leaked a credential: %q", sanitized)
+	}
+	if strings.Count(sanitized, "[REDACTED]") != 2 {
+		t.Fatalf("Sanitize() = %q, want both credentials redacted", sanitized)
 	}
 }

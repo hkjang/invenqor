@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,35 @@ func TestAPIKeyScopeLifecycleRotationAndRevocation(t *testing.T) {
 	if err != nil || credential.KeyID != created.Key.ID {
 		t.Fatalf("Authenticate() = %#v, %v", credential, err)
 	}
+	invalidName := "must-not-be-partially-saved"
+	invalidScopes := []string{"root.everything"}
+	if _, err := service.Update(
+		context.Background(),
+		created.Key.ID,
+		&invalidName,
+		&invalidScopes,
+	); !errors.Is(err, apikeys.ErrInvalid) {
+		t.Fatalf("Update() invalid scope error = %v", err)
+	}
+	unchanged, err := service.Get(context.Background(), created.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Name != "automation" {
+		t.Fatalf("invalid atomic update changed name to %q", unchanged.Name)
+	}
+	updatedName := "automation-renamed"
+	replacementScopes := []string{"assets.read", "mcp.access"}
+	updatedTogether, err := service.Update(
+		context.Background(),
+		created.Key.ID,
+		&updatedName,
+		&replacementScopes,
+	)
+	if err != nil || updatedTogether.Name != updatedName ||
+		len(updatedTogether.Scopes) != 2 {
+		t.Fatalf("atomic Update() = %#v, %v", updatedTogether, err)
+	}
 
 	updated, err := service.AddScopes(
 		context.Background(), created.Key.ID, []string{"agents.read"},
@@ -61,6 +91,7 @@ func TestAPIKeyScopeLifecycleRotationAndRevocation(t *testing.T) {
 
 	rotated, err := service.Rotate(
 		context.Background(), created.Key.ID, time.Hour,
+		apikeys.Access{UserID: userID, SuperAdmin: true},
 	)
 	if err != nil || rotated.Secret == created.Secret {
 		t.Fatalf("Rotate() = %#v, %v", rotated, err)
@@ -77,6 +108,84 @@ func TestAPIKeyScopeLifecycleRotationAndRevocation(t *testing.T) {
 	}
 	if _, err := service.Authenticate(context.Background(), rotated.Secret); !errors.Is(err, apikeys.ErrUnauthorized) {
 		t.Fatalf("revoked key error = %v", err)
+	}
+}
+
+func TestConcurrentAPIKeyScopeAdditionsDoNotLoseUpdates(t *testing.T) {
+	runtime, err := storage.Open(context.Background(), storage.Options{
+		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	userID := uuid.NewString()
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO users(
+		 id, username, normalized_username, display_name, active, super_admin
+		 ) VALUES ($1,'concurrent.owner','concurrent.owner','Concurrent Owner',TRUE,TRUE)`,
+		userID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	services := []*apikeys.Service{
+		apikeys.NewService(runtime.DB()),
+		apikeys.NewService(runtime.DB()),
+		apikeys.NewService(runtime.DB()),
+		apikeys.NewService(runtime.DB()),
+	}
+	additions := []string{
+		"agents.read",
+		"assets.read",
+		"assets.write",
+		"relations.read",
+	}
+	for iteration := range 25 {
+		created, err := services[0].Create(
+			context.Background(),
+			userID,
+			"concurrent-scope-update",
+			[]string{"mcp.access"},
+			nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		errorsByWorker := make(chan error, len(additions))
+		var workers sync.WaitGroup
+		for index, scope := range additions {
+			workers.Add(1)
+			go func(service *apikeys.Service, addition string) {
+				defer workers.Done()
+				<-start
+				_, err := service.AddScopes(
+					context.Background(),
+					created.Key.ID,
+					[]string{addition},
+				)
+				errorsByWorker <- err
+			}(services[index], scope)
+		}
+		close(start)
+		workers.Wait()
+		close(errorsByWorker)
+		for err := range errorsByWorker {
+			if err != nil {
+				t.Fatalf("iteration %d concurrent AddScopes() error = %v", iteration, err)
+			}
+		}
+		key, err := services[0].Get(context.Background(), created.Key.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(key.Scopes) != len(additions)+1 {
+			t.Fatalf(
+				"iteration %d scopes = %v, want all concurrent additions",
+				iteration,
+				key.Scopes,
+			)
+		}
 	}
 }
 

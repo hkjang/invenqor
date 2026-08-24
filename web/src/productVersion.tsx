@@ -1,8 +1,8 @@
 export type SystemInfo = {
-  database_mode: string;
+  database_mode?: string;
   server_version: string;
-  commit: string;
-  build_time: string;
+  commit?: string;
+  build_time?: string;
   agent_auto_enrollment?: boolean;
   agent_enrollment_mode?: "open"|"token"|"disabled";
   agent_enrollment_source?: "database"|"startup-environment";

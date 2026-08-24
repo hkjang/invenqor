@@ -25,10 +25,18 @@ type Manifest struct {
 	OS           string `json:"os"`
 	Architecture string `json:"architecture"`
 	SHA256       string `json:"sha256"`
-	Signature    string `json:"signature"`
-	DownloadURL  string `json:"download_url"`
-	Size         int64  `json:"size"`
-	Rollout      int    `json:"rollout_percent"`
+	// Signature remains the artifact-only Ed25519 signature understood by
+	// pre-v2 Agents. ManifestSignature authenticates the canonical v2 metadata.
+	Signature         string `json:"signature"`
+	ManifestSignature string `json:"manifest_signature,omitempty"`
+	// SignatureScheme and SignatureVersion are always explicit on the wire.
+	// Releases written before manifest signing existed are normalized to the
+	// legacy artifact-only Ed25519 contract when they are read.
+	SignatureScheme  string `json:"signature_scheme"`
+	SignatureVersion int    `json:"signature_version"`
+	DownloadURL      string `json:"download_url"`
+	Size             int64  `json:"size"`
+	Rollout          int    `json:"rollout_percent"`
 	// AllowDowngrade lets an operator move a fleet back to an earlier build. A
 	// rollback is the one case where "not newer" is the point, and it stays safe
 	// because the artifact is still signed and hash-checked.
@@ -57,10 +65,7 @@ type Store struct {
 }
 
 func Open(root string) (*Store, error) {
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("create update store: %w", err)
-	}
-	if err := os.Chmod(root, 0o700); err != nil {
+	if err := durablefs.EnsurePrivateDirectory(root); err != nil {
 		return nil, err
 	}
 	return &Store{root: root, now: func() time.Time { return time.Now().UTC() }}, nil
@@ -95,29 +100,62 @@ func (s *Store) Publish(manifest Manifest, source io.Reader) (Manifest, error) {
 	if manifest.Rollout < 0 || manifest.Rollout > 100 {
 		return Manifest{}, errors.New("the rollout percent must be 0 to 100")
 	}
-	signature, err := DecodeSignature(manifest.Signature)
-	if err != nil {
-		return Manifest{}, err
+	if manifest.SignatureScheme != SignatureSchemeEd25519 ||
+		manifest.SignatureVersion != SignatureVersionV2 {
+		return Manifest{}, fmt.Errorf(
+			"new releases require signature_scheme %q and signature_version %d",
+			SignatureSchemeEd25519, SignatureVersionV2,
+		)
 	}
-	manifest.Signature = base64.StdEncoding.EncodeToString(signature)
+	legacySignature, err := DecodeSignature(manifest.Signature)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("decode legacy artifact signature: %w", err)
+	}
+	manifestSignature, err := DecodeSignature(manifest.ManifestSignature)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("decode v2 manifest signature: %w", err)
+	}
+	manifest.Signature = base64.StdEncoding.EncodeToString(legacySignature)
+	manifest.ManifestSignature = base64.StdEncoding.EncodeToString(manifestSignature)
 
 	base := manifest.Version + "-" + manifest.OS + "-" + manifest.Architecture
-	// Read the artifact into a temporary file first: the signature has to be
-	// checked against the exact bytes an agent will download, and a rejected
-	// publication must leave nothing behind.
+	// Read the artifact into a temporary file first: its exact size and digest
+	// are part of the v2 signature contract, and a rejected publication must
+	// leave nothing behind.
 	staged, hash, size, err := s.stageArtifact(base, source)
 	if err != nil {
 		return Manifest{}, err
 	}
 	defer os.Remove(staged)
 
+	if manifest.Size != 0 && manifest.Size != size {
+		return Manifest{}, fmt.Errorf(
+			"the signature bundle size does not match the artifact: %w",
+			ErrSignatureRejected,
+		)
+	}
+	if manifest.SHA256 != "" && manifest.SHA256 != hash {
+		return Manifest{}, fmt.Errorf(
+			"the signature bundle sha256 does not match the artifact: %w",
+			ErrSignatureRejected,
+		)
+	}
+	manifest.SHA256 = hash
+	manifest.Size = size
+	signedMessage, err := SignatureMessageV2(manifest)
+	if err != nil {
+		return Manifest{}, err
+	}
 	if s.SigningKeyConfigured() {
 		artifactBytes, readErr := os.ReadFile(staged)
 		if readErr != nil {
 			return Manifest{}, readErr
 		}
-		if err := s.verifySignature(signature, artifactBytes); err != nil {
-			return Manifest{}, err
+		if err := s.verifySignature(legacySignature, artifactBytes); err != nil {
+			return Manifest{}, fmt.Errorf("legacy artifact signature: %w", err)
+		}
+		if err := s.verifySignature(manifestSignature, signedMessage); err != nil {
+			return Manifest{}, fmt.Errorf("v2 manifest signature: %w", err)
 		}
 		manifest.SignatureVerified = true
 	}
@@ -125,30 +163,62 @@ func (s *Store) Publish(manifest Manifest, source io.Reader) (Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	artifact := filepath.Join(s.root, base+".bin")
-	if _, err := os.Stat(artifact); err == nil {
-		return Manifest{}, fmt.Errorf(
-			"%s for %s is already published; publish a new version or adjust its rollout",
-			manifest.Version, manifest.Architecture,
-		)
-	}
-	if err := os.Link(staged, artifact); err != nil {
-		return Manifest{}, err
-	}
-	if err := durablefs.SyncDirectory(s.root); err != nil {
-		return Manifest{}, err
-	}
-	manifest.SHA256 = hash
-	manifest.Size = size
+	manifestPath := filepath.Join(s.root, base+".json")
 	manifest.DownloadURL = "/v1/agent/updates/" + base + "/artifact"
 	if manifest.PublishedAt.IsZero() {
 		manifest.PublishedAt = s.now()
 	}
 	bytes, _ := json.MarshalIndent(manifest, "", "  ")
-	if err := atomicWrite(filepath.Join(s.root, base+".json"), append(bytes, '\n'), 0o600); err != nil {
-		_ = os.Remove(artifact)
+	err = s.withFileLock(func() error {
+		artifactExists := fileExists(artifact)
+		manifestExists := fileExists(manifestPath)
+		if artifactExists && manifestExists {
+			return fmt.Errorf(
+				"%s for %s is already published; publish a new version or adjust its rollout",
+				manifest.Version, manifest.Architecture,
+			)
+		}
+		// A process can crash after committing the artifact but before the
+		// manifest. Conversely, an externally damaged store can contain only a
+		// manifest. Recover either half-commit while holding the shared lock.
+		if artifactExists {
+			if removeErr := os.Remove(artifact); removeErr != nil {
+				return removeErr
+			}
+		}
+		if manifestExists {
+			if removeErr := os.Remove(manifestPath); removeErr != nil {
+				return removeErr
+			}
+		}
+		if artifactExists || manifestExists {
+			if syncErr := durablefs.SyncDirectory(s.root); syncErr != nil {
+				return syncErr
+			}
+		}
+		if linkErr := os.Link(staged, artifact); linkErr != nil {
+			return linkErr
+		}
+		if syncErr := durablefs.SyncDirectory(s.root); syncErr != nil {
+			_ = os.Remove(artifact)
+			return syncErr
+		}
+		if writeErr := atomicWrite(manifestPath, append(bytes, '\n'), 0o600); writeErr != nil {
+			_ = os.Remove(artifact)
+			_ = durablefs.SyncDirectory(s.root)
+			return writeErr
+		}
+		return nil
+	})
+	if err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // SetRollout changes how much of the fleet a published release reaches without
@@ -164,17 +234,29 @@ func (s *Store) SetRollout(base string, rollout int) (Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := filepath.Join(s.root, base+".json")
-	bytes, err := os.ReadFile(path)
-	if err != nil {
-		return Manifest{}, err
-	}
 	var manifest Manifest
-	if err := json.Unmarshal(bytes, &manifest); err != nil {
-		return Manifest{}, err
-	}
-	manifest.Rollout = rollout
-	encoded, _ := json.MarshalIndent(manifest, "", "  ")
-	if err := replaceFile(path, append(encoded, '\n'), 0o600); err != nil {
+	err := s.withFileLock(func() error {
+		bytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		artifact := filepath.Join(s.root, base+".bin")
+		if _, statErr := os.Stat(artifact); statErr != nil {
+			// Never preserve or rewrite a manifest whose artifact vanished. This
+			// also repairs a half-damaged shared store before returning the error.
+			_ = os.Remove(path)
+			_ = durablefs.SyncDirectory(s.root)
+			return fmt.Errorf("release artifact is missing: %w", statErr)
+		}
+		if decodeErr := json.Unmarshal(bytes, &manifest); decodeErr != nil {
+			return decodeErr
+		}
+		normalizeSignatureContract(&manifest)
+		manifest.Rollout = rollout
+		encoded, _ := json.MarshalIndent(manifest, "", "  ")
+		return replaceFile(path, append(encoded, '\n'), 0o600)
+	})
+	if err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
@@ -188,11 +270,13 @@ func (s *Store) Retire(base string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.Remove(filepath.Join(s.root, base+".json")); err != nil {
-		return err
-	}
-	_ = os.Remove(filepath.Join(s.root, base+".bin"))
-	return durablefs.SyncDirectory(s.root)
+	return s.withFileLock(func() error {
+		if err := os.Remove(filepath.Join(s.root, base+".json")); err != nil {
+			return err
+		}
+		_ = os.Remove(filepath.Join(s.root, base+".bin"))
+		return durablefs.SyncDirectory(s.root)
+	})
 }
 
 // Releases lists every published build, newest first.
@@ -213,6 +297,7 @@ func (s *Store) Releases() ([]Release, error) {
 		if err != nil || json.Unmarshal(bytes, &manifest) != nil {
 			continue
 		}
+		normalizeSignatureContract(&manifest)
 		releases = append(releases, Release{
 			Manifest: manifest,
 			Base:     strings.TrimSuffix(entry.Name(), ".json"),
@@ -306,6 +391,20 @@ func replaceFile(path string, bytes []byte, mode os.FileMode) error {
 }
 
 func (s *Store) Latest(channel, osName, architecture, agentID string) (*Manifest, error) {
+	matches, err := s.Candidates(channel, osName, architecture, agentID)
+	if err != nil || len(matches) == 0 {
+		return nil, err
+	}
+	return &matches[0], nil
+}
+
+// Candidates returns rollout-eligible manifests newest first. The HTTP layer
+// still has to apply the requesting Agent's protocol/version capability gate;
+// returning the ordered set prevents a rollback that is unsafe for a legacy
+// Agent from hiding a lower normal bridge upgrade.
+func (s *Store) Candidates(
+	channel, osName, architecture, agentID string,
+) ([]Manifest, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entries, err := os.ReadDir(s.root)
@@ -322,6 +421,7 @@ func (s *Store) Latest(channel, osName, architecture, agentID string) (*Manifest
 		if err != nil || json.Unmarshal(bytes, &manifest) != nil {
 			continue
 		}
+		normalizeSignatureContract(&manifest)
 		if manifest.Channel == channel && manifest.OS == osName &&
 			manifest.Architecture == architecture &&
 			manifest.Rollout > 0 &&
@@ -332,10 +432,7 @@ func (s *Store) Latest(channel, osName, architecture, agentID string) (*Manifest
 	sort.Slice(matches, func(i, j int) bool {
 		return compareVersion(matches[i].Version, matches[j].Version) > 0
 	})
-	if len(matches) == 0 {
-		return nil, nil
-	}
-	return &matches[0], nil
+	return matches, nil
 }
 
 func (s *Store) Artifact(base string) (string, error) {

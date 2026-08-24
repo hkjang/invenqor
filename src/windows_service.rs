@@ -7,24 +7,23 @@
 //!
 //! Restarting after an update is the interesting part. A service cannot stop and
 //! start itself - the SCM will not process a start for a service that is still
-//! stopping - so the accepted pattern is to stop with a failure exit code and let
-//! the SCM's recovery action bring it back. The installer configures that
-//! recovery action; `request_restart` triggers it.
+//! stopping - so the process terminates without reporting SERVICE_STOPPED and
+//! lets the SCM's recovery action bring it back. This works immediately after a
+//! fresh install: SERVICE_FAILURE_ACTIONS_FLAG is documented to take effect only
+//! after the next system start, while unexpected process termination triggers
+//! recovery independently of that flag.
 
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::OnceLock;
 
-pub const SERVICE_NAME: &str = "invenqor-agent";
-
-/// The exit code the service reports when it wants the SCM to restart it. Any
-/// non-zero code triggers the configured recovery action; a distinct value makes
-/// an intentional restart-for-update tellable from a crash in the event log.
-pub const EXIT_CODE_RESTART_FOR_UPDATE: u32 = 0x2A;
+pub const SERVICE_NAME: &str = crate::service_identity::DEFAULT_SERVICE_NAME;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
-static EXIT_CODE: AtomicU32 = AtomicU32::new(0);
+static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+static ACTIVE_SERVICE_NAME: OnceLock<String> = OnceLock::new();
 /// SERVICE_STATUS_HANDLE is a handle - pointer-sized. Declaring it as a 32-bit
 /// value truncated it on x64, so SetServiceStatus was called with a corrupted
 /// handle, every status report failed, the Service Control Manager never saw
@@ -84,6 +83,35 @@ fn wide(value: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Sets the service identity before the SCM dispatcher or any diagnostic query
+/// is opened. Main resolves this from the explicit service command line or the
+/// protected marker next to config.toml. A second, different value indicates an
+/// internal bootstrap error and is refused rather than querying the wrong SCM
+/// object.
+pub fn configure_service_name(value: &str) -> Result<()> {
+    crate::service_identity::validate_service_name(value)?;
+    if let Some(current) = ACTIVE_SERVICE_NAME.get() {
+        anyhow::ensure!(
+            current == value,
+            "Windows service identity is already configured as {current}"
+        );
+        return Ok(());
+    }
+    ACTIVE_SERVICE_NAME
+        .set(value.to_string())
+        .map_err(|_| anyhow::anyhow!("configure Windows service identity"))
+}
+
+/// The service name used consistently by dispatch, status diagnostics and the
+/// external restart path. The default preserves every pre-v0.2.15 install whose
+/// SCM command line only contains the legacy `--service` switch.
+pub fn service_name() -> &'static str {
+    ACTIVE_SERVICE_NAME
+        .get()
+        .map(String::as_str)
+        .unwrap_or(SERVICE_NAME)
+}
+
 /// True once the SCM has asked the service to stop, or the updater has asked for
 /// a restart. The collection loop checks it so a stop is honoured promptly rather
 /// than at the end of a fifteen-minute sleep.
@@ -91,11 +119,11 @@ pub fn stop_requested() -> bool {
     STOP_REQUESTED.load(Ordering::SeqCst)
 }
 
-/// Asks the SCM to restart this service, by stopping with the recovery-triggering
-/// exit code. Used after an update has been swapped into place: the new binary is
-/// on disk but this process is still the old one.
+/// Asks the SCM to restart this service. The service callback deliberately does
+/// not report SERVICE_STOPPED for this path, so recovery is triggered even on a
+/// fresh install before SERVICE_FAILURE_ACTIONS_FLAG becomes effective.
 pub fn request_restart() {
-    EXIT_CODE.store(EXIT_CODE_RESTART_FOR_UPDATE, Ordering::SeqCst);
+    RESTART_REQUESTED.store(true, Ordering::SeqCst);
     STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
@@ -153,9 +181,13 @@ type ServiceBody = fn() -> i32;
 static BODY: std::sync::OnceLock<ServiceBody> = std::sync::OnceLock::new();
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
-    let handle = RegisterServiceCtrlHandlerW(wide(SERVICE_NAME).as_ptr(), control_handler);
+    let name = service_name();
+    let handle = RegisterServiceCtrlHandlerW(wide(name).as_ptr(), control_handler);
     if handle == 0 {
-        tracing::error!("RegisterServiceCtrlHandlerW failed; the service cannot report its state");
+        tracing::error!(
+            service_name = name,
+            "RegisterServiceCtrlHandlerW failed; the service cannot report its state"
+        );
         return;
     }
     SERVICE_HANDLE.store(handle, Ordering::SeqCst);
@@ -165,19 +197,25 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         Some(body) => body(),
         None => 1,
     };
-    let exit_code = if code == 0 {
-        EXIT_CODE.load(Ordering::SeqCst)
+    if should_report_stopped(RESTART_REQUESTED.load(Ordering::SeqCst)) {
+        report(SERVICE_STOPPED, code.max(0) as u32, 0);
     } else {
-        code as u32
-    };
-    report(SERVICE_STOPPED, exit_code, 0);
+        // Returning from the callback lets the service process exit. Reporting
+        // even a non-zero SERVICE_STOPPED here would rely on failureflag=1,
+        // which Windows does not honor until the next boot.
+        tracing::info!("update restart requested; leaving service state running so SCM recovery restarts the new binary");
+    }
+}
+
+fn should_report_stopped(restart_requested: bool) -> bool {
+    !restart_requested
 }
 
 /// Hands the process to the SCM. Returns false when this process was not started
 /// as a service, so the caller can fall back to running in the foreground.
 pub fn dispatch(body: ServiceBody) -> bool {
     let _ = BODY.set(body);
-    let name = wide(SERVICE_NAME);
+    let name = wide(service_name());
     let table = [
         ServiceTableEntryW {
             name: name.as_ptr(),
@@ -205,18 +243,17 @@ pub fn restart_service_externally() -> Result<()> {
         manager != 0,
         "could not open the service control manager; run this from an elevated console"
     );
+    let name = service_name();
     let service = unsafe {
         OpenServiceW(
             manager,
-            wide(SERVICE_NAME).as_ptr(),
+            wide(name).as_ptr(),
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS,
         )
     };
     if service == 0 {
         unsafe { CloseServiceHandle(manager) };
-        anyhow::bail!(
-            "the {SERVICE_NAME} service is not installed, so there is nothing to restart"
-        );
+        anyhow::bail!("the {name} service is not installed, so there is nothing to restart");
     }
     let result = (|| -> Result<()> {
         let mut status = blank_status();
@@ -232,10 +269,11 @@ pub fn restart_service_externally() -> Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
+        let restart_command = crate::platform::restart_command();
         anyhow::ensure!(
             unsafe { StartServiceW(service, 0, std::ptr::null()) } != 0,
-            "the service stopped but did not start again; start it with \
-             `Start-Service {SERVICE_NAME}` and check the event log"
+            "the service stopped but did not start again; run `{restart_command}` \
+             and check the event log"
         );
         Ok(())
     })();
@@ -273,7 +311,7 @@ pub fn installed_service_state() -> ServiceQuery {
         return ServiceQuery::Unknown;
     }
     let service =
-        unsafe { OpenServiceW(manager, wide(SERVICE_NAME).as_ptr(), SERVICE_QUERY_STATUS) };
+        unsafe { OpenServiceW(manager, wide(service_name()).as_ptr(), SERVICE_QUERY_STATUS) };
     if service == 0 {
         let missing = unsafe { GetLastError() } == ERROR_SERVICE_DOES_NOT_EXIST;
         unsafe { CloseServiceHandle(manager) };
@@ -327,4 +365,15 @@ pub enum ServiceQuery {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLastError() -> u32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_report_stopped;
+
+    #[test]
+    fn intentional_update_restart_never_reports_a_clean_stopped_state() {
+        assert!(should_report_stopped(false));
+        assert!(!should_report_stopped(true));
+    }
 }

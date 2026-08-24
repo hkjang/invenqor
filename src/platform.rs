@@ -62,14 +62,18 @@ pub fn service_account() -> &'static str {
 }
 
 /// The command an operator runs to restart the service on this platform.
-pub fn restart_command() -> &'static str {
+pub fn restart_command() -> String {
     #[cfg(windows)]
     {
-        "Restart-Service invenqor-agent"
+        // A service name can legally contain an apostrophe. Double it inside a
+        // PowerShell single-quoted literal so copied diagnostic output remains
+        // data and cannot become another command.
+        let name = crate::windows_service::service_name().replace('\'', "''");
+        format!("Restart-Service -Name '{name}'")
     }
     #[cfg(not(windows))]
     {
-        "sudo systemctl restart invenqor-agent"
+        "sudo systemctl restart invenqor-agent".to_string()
     }
 }
 
@@ -233,8 +237,10 @@ mod tests {
             assert!(default_install_path()
                 .extension()
                 .is_some_and(|v| v == "exe"));
+            assert!(restart_command().contains("Restart-Service"));
         } else {
             assert!(default_config_path().starts_with("/etc"));
+            assert!(restart_command().contains("systemctl"));
         }
     }
 

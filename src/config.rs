@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
@@ -212,15 +214,30 @@ impl Config {
             self.updates.check_interval_seconds >= 300,
             "updates.check_interval_seconds must be at least 300"
         );
+        anyhow::ensure!(
+            matches!(self.updates.channel.as_str(), "stable" | "beta"),
+            "updates.channel must be stable or beta"
+        );
         if self.updates.enabled {
             anyhow::ensure!(self.server.url.is_some(), "updates require server.url");
             anyhow::ensure!(
-                self.updates
-                    .public_key
-                    .as_deref()
-                    .is_some_and(|v| !v.is_empty()),
-                "updates require an Ed25519 public_key"
+                self.updates.install_path.is_absolute(),
+                "updates.install_path must be an absolute path"
             );
+            let encoded = self
+                .updates
+                .public_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("updates require an Ed25519 public_key")?;
+            let key: [u8; 32] = STANDARD
+                .decode(encoded)
+                .context("updates.public_key must be base64 encoded")?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("updates.public_key must decode to 32 bytes"))?;
+            VerifyingKey::from_bytes(&key)
+                .context("updates.public_key is not a valid Ed25519 public key")?;
         }
         if let Some(url) = &self.server.url {
             let parsed = Url::parse(url).context("server.url must be a valid URL")?;
@@ -228,6 +245,24 @@ impl Config {
                 parsed.scheme() == "https"
                     || parsed.scheme() == "http" && self.server.allows_http(),
                 "server.url must use HTTPS; private/internal HTTP is accepted automatically, while public HTTP requires allow_insecure_http"
+            );
+            // Every Agent endpoint is appended to this value. Accepting a path,
+            // query or fragment here produces URLs such as
+            // `/inventory/v1/agent/enroll` or `?tenant=x/v1/agent/enroll`, which
+            // look valid in the config but can never reach the Server router.
+            // Reject that at validation time, before the first collection is
+            // queued and registration starts retrying in the background.
+            anyhow::ensure!(
+                parsed.path().is_empty() || parsed.path() == "/",
+                "server.url must contain only the scheme, host and optional port; remove the path"
+            );
+            anyhow::ensure!(
+                parsed.query().is_none() && parsed.fragment().is_none(),
+                "server.url must contain only the scheme, host and optional port; remove the query or fragment"
+            );
+            anyhow::ensure!(
+                parsed.username().is_empty() && parsed.password().is_none(),
+                "server.url must not contain embedded credentials"
             );
         }
         anyhow::ensure!(
@@ -326,5 +361,64 @@ mod tests {
         config.validate().unwrap();
         config.server.url = Some("http://inventory.example.com:7070".into());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn server_url_is_an_origin_not_an_api_path() {
+        let mut config = Config::default();
+        for valid in [
+            "https://inventory.example.com",
+            "https://inventory.example.com/",
+            "https://inventory.example.com:7070/",
+        ] {
+            config.server.url = Some(valid.into());
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("{valid} should be valid: {error:#}"));
+        }
+
+        for invalid in [
+            "https://inventory.example.com/invenqor",
+            "https://inventory.example.com?tenant=blue",
+            "https://inventory.example.com/#agents",
+            "https://operator:secret@inventory.example.com",
+        ] {
+            config.server.url = Some(invalid.into());
+            let error = config.validate().unwrap_err();
+            assert!(
+                format!("{error:#}").contains("server.url"),
+                "unexpected validation error for {invalid}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_update_settings_fail_fast_when_the_key_or_channel_is_invalid() {
+        let mut config = Config::default();
+        config.server.url = Some("https://inventory.example.com".into());
+        config.updates.enabled = true;
+
+        for key in ["not base64", "c2hvcnQ="] {
+            config.updates.public_key = Some(key.into());
+            let error = config.validate().unwrap_err();
+            assert!(
+                format!("{error:#}").contains("updates.public_key"),
+                "unexpected key validation error: {error:#}"
+            );
+        }
+
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        config.updates.public_key = Some(STANDARD.encode(signing.verifying_key().to_bytes()));
+        config.updates.channel = "nightly".into();
+        assert!(format!("{:#}", config.validate().unwrap_err()).contains("updates.channel"));
+        config.updates.channel = "stable".into();
+        config.validate().unwrap();
+
+        config.updates.install_path = "relative/invenqor-agent".into();
+        let error = config.validate().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("updates.install_path"),
+            "unexpected install path validation error: {error:#}"
+        );
     }
 }

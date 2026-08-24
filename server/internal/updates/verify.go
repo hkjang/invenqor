@@ -3,10 +3,20 @@ package updates
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
+
+const (
+	SignatureSchemeEd25519 = "ed25519"
+	SignatureVersionLegacy = 1
+	SignatureVersionV2     = 2
+)
+
+const signatureDomainV2 = "INVENQOR-AGENT-UPDATE-MANIFEST-V2"
 
 // Publishing used to accept any 64-byte value as a signature. Nothing on the
 // server could check it, because the server held no public key - so a mistyped
@@ -92,16 +102,84 @@ func (s *Store) SetSigningKey(key ed25519.PublicKey) {
 	s.publicKey = key
 }
 
-// verifySignature checks a detached signature over the exact bytes an agent will
-// download.
-func (s *Store) verifySignature(signature []byte, artifact []byte) error {
+// SignatureMessageV2 returns the complete byte contract signed by an offline
+// Ed25519 key and verified independently by the server and Agent. The artifact
+// itself is bound by both its byte length and lowercase SHA-256 digest. Values
+// are UTF-8, separators are literal ASCII, booleans are lowercase, sizes are
+// unsigned base-10 integers, and the final newline is mandatory.
+//
+// Rollout, notes, publication audit fields and download URL are intentionally
+// absent: the server can change or derive those fields without authorizing a
+// different executable or silently enabling rollback.
+func SignatureMessageV2(manifest Manifest) ([]byte, error) {
+	if manifest.SignatureScheme != SignatureSchemeEd25519 ||
+		manifest.SignatureVersion != SignatureVersionV2 {
+		return nil, fmt.Errorf(
+			"manifest signature contract must be %s version %d",
+			SignatureSchemeEd25519, SignatureVersionV2,
+		)
+	}
+	if manifest.Size <= 0 {
+		return nil, errors.New("manifest size must be positive")
+	}
+	if len(manifest.SHA256) != sha256HexSize ||
+		manifest.SHA256 != strings.ToLower(manifest.SHA256) {
+		return nil, errors.New("manifest sha256 must be 64 lowercase hexadecimal characters")
+	}
+	if _, err := hex.DecodeString(manifest.SHA256); err != nil {
+		return nil, errors.New("manifest sha256 must be 64 lowercase hexadecimal characters")
+	}
+	for field, value := range map[string]string{
+		"version": manifest.Version, "channel": manifest.Channel,
+		"os": manifest.OS, "architecture": manifest.Architecture,
+	} {
+		if value == "" || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("manifest %s is empty or contains a line break", field)
+		}
+	}
+
+	var message strings.Builder
+	message.Grow(256)
+	message.WriteString(signatureDomainV2)
+	message.WriteString("\nversion=")
+	message.WriteString(manifest.Version)
+	message.WriteString("\nchannel=")
+	message.WriteString(manifest.Channel)
+	message.WriteString("\nos=")
+	message.WriteString(manifest.OS)
+	message.WriteString("\narchitecture=")
+	message.WriteString(manifest.Architecture)
+	message.WriteString("\nsize=")
+	message.WriteString(strconv.FormatInt(manifest.Size, 10))
+	message.WriteString("\nsha256=")
+	message.WriteString(manifest.SHA256)
+	message.WriteString("\nallow_downgrade=")
+	message.WriteString(strconv.FormatBool(manifest.AllowDowngrade))
+	message.WriteByte('\n')
+	return []byte(message.String()), nil
+}
+
+const sha256HexSize = 64
+
+func normalizeSignatureContract(manifest *Manifest) {
+	if manifest.SignatureScheme == "" {
+		manifest.SignatureScheme = SignatureSchemeEd25519
+	}
+	if manifest.SignatureVersion == 0 {
+		manifest.SignatureVersion = SignatureVersionLegacy
+	}
+}
+
+// verifySignature checks a detached signature over the supplied signature
+// contract. New publications always supply SignatureMessageV2.
+func (s *Store) verifySignature(signature []byte, message []byte) error {
 	s.mu.RLock()
 	key := s.publicKey
 	s.mu.RUnlock()
 	if len(key) != ed25519.PublicKeySize {
 		return ErrSignatureUnverifiable
 	}
-	if !ed25519.Verify(key, artifact, signature) {
+	if !ed25519.Verify(key, message, signature) {
 		return ErrSignatureRejected
 	}
 	return nil
