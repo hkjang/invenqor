@@ -1892,15 +1892,21 @@ mod tests {
         let updates = root.path().join("updates");
         fs::create_dir_all(&updates).unwrap();
         for version in ["0.1.0", "0.2.0", "0.3.0"] {
-            fs::write(updates.join(format!("invenqor-agent-{version}")), b"x").unwrap();
+            fs::write(updates.join(staged_artifact_name(version).unwrap()), b"x").unwrap();
         }
         fs::write(updates.join("pending.json"), b"{}").unwrap();
         let mut config = Config::default();
         config.agent.state_dir = root.path().to_path_buf();
         prune_staged_artifacts(&config, "0.3.0");
-        assert!(updates.join("invenqor-agent-0.3.0").exists());
-        assert!(!updates.join("invenqor-agent-0.1.0").exists());
-        assert!(!updates.join("invenqor-agent-0.2.0").exists());
+        assert!(updates
+            .join(staged_artifact_name("0.3.0").unwrap())
+            .exists());
+        assert!(!updates
+            .join(staged_artifact_name("0.1.0").unwrap())
+            .exists());
+        assert!(!updates
+            .join(staged_artifact_name("0.2.0").unwrap())
+            .exists());
         // Unrelated files must survive.
         assert!(updates.join("pending.json").exists());
     }
