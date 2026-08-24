@@ -183,9 +183,12 @@ $serviceCommandLine = @(
 $serviceSelector = [WildcardPattern]::Escape($ServiceName)
 $serviceNamePowerShellLiteral = "'" + $ServiceName.Replace("'", "''") + "'"
 
-New-Item -ItemType Directory -Force -LiteralPath $InstallRoot | Out-Null
-New-Item -ItemType Directory -Force -LiteralPath $DataRoot | Out-Null
-New-Item -ItemType Directory -Force -LiteralPath $statePath | Out-Null
+# New-Item exposes -Path rather than -LiteralPath. Use Directory.CreateDirectory
+# so validated paths are created literally (including wildcard characters) on
+# both Windows PowerShell 5.1 and PowerShell 7.
+[IO.Directory]::CreateDirectory($InstallRoot) | Out-Null
+[IO.Directory]::CreateDirectory($DataRoot) | Out-Null
+[IO.Directory]::CreateDirectory($statePath) | Out-Null
 
 $existing = Get-Service -Name $serviceSelector -ErrorAction SilentlyContinue
 if ($existing -and $existing.Status -ne 'Stopped') {
