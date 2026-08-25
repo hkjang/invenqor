@@ -1232,10 +1232,23 @@ pub fn services() -> Vec<Service> {
             // a larger buffer - ends the enumeration with what was collected.
             break;
         }
+        // The buffer belongs to this process, not to the SCM, so `returned` and
+        // the room actually available can disagree - and unlike a bad slice index
+        // this one reads past the allocation instead of panicking, which unwinding
+        // cannot catch and which yields a plausible-looking service entry built
+        // from whatever followed in memory. Trust the smaller of the two.
+        let capacity = buffer.len() / std::mem::size_of::<EnumServiceStatusProcessW>();
+        if returned as usize > capacity {
+            tracing::warn!(
+                returned,
+                capacity,
+                "the service control manager reported more services than the buffer holds"
+            );
+        }
         unsafe {
             let items = std::slice::from_raw_parts(
                 buffer.as_ptr() as *const EnumServiceStatusProcessW,
-                returned as usize,
+                (returned as usize).min(capacity),
             );
             for item in items {
                 let Some(name) = from_wide_ptr(item.service_name) else {

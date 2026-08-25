@@ -586,11 +586,13 @@ fn init_logging(state_dir: &Path) {
 
 /// Routes panics into the log.
 ///
-/// The release profile aborts on panic, and the default hook writes its message
-/// to standard error - which a Windows service does not have. A panic therefore
-/// killed the process leaving nothing behind at all: the log showed the four
-/// start-up lines, then silence, then the service manager starting it again. The
-/// hook runs before the abort, so this is the one chance to record why.
+/// The default hook writes its message to standard error, which a Windows service
+/// does not have. Back when the release profile also aborted on panic, that
+/// combination killed the process leaving nothing behind at all: the log showed
+/// the four start-up lines, then silence, then the service manager starting it
+/// again. The profile now unwinds, so a panicking collector is caught and
+/// reported as that collector's error - but the panic message itself still only
+/// reaches the log through this hook.
 fn log_panics() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

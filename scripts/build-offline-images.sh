@@ -11,6 +11,16 @@ archive_name=$(basename "$archive")
 
 mkdir -p "$output_dir"
 cd "$root"
+
+# A configured credential helper that fails takes every pull down with it, and
+# these are public images that need no credentials at all. Use an empty config
+# unless the caller supplied one.
+if [ -z "${DOCKER_CONFIG:-}" ]; then
+  docker_config=$(mktemp -d)
+  echo '{}' > "$docker_config/config.json"
+  export DOCKER_CONFIG="$docker_config"
+  trap 'rm -rf "$docker_config"' EXIT
+fi
 docker build --platform linux/amd64 -t "$server_image" .
 
 # Refresh the base image, but do not fail the release build when the registry is
