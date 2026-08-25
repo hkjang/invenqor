@@ -31,7 +31,7 @@ import {
 } from "./vizModel";
 
 type MatrixCell = {row: string; column: string; count: number; stale: number};
-type Visualization = {
+export type Visualization = {
   generated_at: string;
   window_days: number;
   stale_hours: number;
@@ -320,7 +320,10 @@ function KPI({label, value, note, tone}: {
 type CopyHandler = (headers: string[], rows: (string|number)[][], name: string) => void;
 
 /** 구성: environment → type 두 단계 treemap. 면적이 곧 자산 수입니다. */
-function Composition({data, showTable, onCopy, onSelect}: {
+// The six views are exported so a test can render each one directly. Nothing
+// else imports them: VisualizationPage fetches on mount, so rendering the page
+// itself only ever exercises its loading state.
+export function Composition({data, showTable, onCopy, onSelect}: {
   data: Visualization;
   showTable: boolean;
   onCopy: CopyHandler;
@@ -407,7 +410,7 @@ function Composition({data, showTable, onCopy, onSelect}: {
 }
 
 /** 위험 매트릭스: 중요도 × 환경. 순차 단계 하나로 크기를, 두 번째 렌즈로 정지 비율을 읽습니다. */
-function RiskMatrix({data, showTable, staleLens, onLens, onCopy, onSelect}: {
+export function RiskMatrix({data, showTable, staleLens, onLens, onCopy, onSelect}: {
   data: Visualization;
   showTable: boolean;
   staleLens: boolean;
@@ -516,7 +519,7 @@ function RiskMatrix({data, showTable, staleLens, onLens, onCopy, onSelect}: {
 }
 
 /** 신선도: 나이 구간별 자산 수. 구간은 순서가 있으므로 한 색의 단계로 칠합니다. */
-function Freshness({data, showTable, onCopy}: {
+export function Freshness({data, showTable, onCopy}: {
   data: Visualization; showTable: boolean; onCopy: CopyHandler;
 }) {
   const [hover, setHover] = React.useState<{x: number; y: number; text: string[]}|null>(null);
@@ -584,7 +587,7 @@ function Freshness({data, showTable, onCopy}: {
 }
 
 /** 증감: 기준선 위 신규, 아래 폐기. 방향이 부호이므로 발산 색을 씁니다. */
-function ChangeFlow({data, showTable, onCopy}: {
+export function ChangeFlow({data, showTable, onCopy}: {
   data: Visualization; showTable: boolean; onCopy: CopyHandler;
 }) {
   const [hover, setHover] = React.useState<{x: number; y: number; text: string[]}|null>(null);
@@ -688,7 +691,7 @@ function ChangeFlow({data, showTable, onCopy}: {
 }
 
 /** 성장 추이: 누적 자산 규모. 마지막 점은 상단 지표와 같은 값입니다. */
-function Growth({data, showTable, onCopy}: {
+export function Growth({data, showTable, onCopy}: {
   data: Visualization; showTable: boolean; onCopy: CopyHandler;
 }) {
   const rows = data.flow.map(day => [day.date, day.total]);
@@ -762,7 +765,7 @@ function Growth({data, showTable, onCopy}: {
 }
 
 /** 관계: 결정적 방사 배치. 같은 데이터는 항상 같은 그림으로 그립니다. */
-function Topology({data, showTable, onCopy, onSelect}: {
+export function Topology({data, showTable, onCopy, onSelect}: {
   data: Visualization; showTable: boolean; onCopy: CopyHandler;
   onSelect: (type: string) => void;
 }) {
