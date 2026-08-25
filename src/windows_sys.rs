@@ -947,6 +947,34 @@ struct UserInfo3 {
     password_expired: u32,
 }
 
+/// USER_INFO_3 is thirty fields long and NetUserEnum hands back a buffer this
+/// process only reinterprets, so a single field in the wrong place does not fail
+/// to compile - it silently reads a pointer out of the middle of another field
+/// and dereferences it. That is an access violation, which unwinding does not
+/// catch and which leaves nothing in the log.
+///
+/// Wine stubs NetUserEnum, so `scripts/test-windows-wine.sh` cannot exercise this
+/// path at all; it is the one collector with no execution behind it. These are
+/// the offsets from lmaccess.h under the 64-bit ABI, where the padding lands at
+/// 44, 60 and 116. Checked at compile time because there is nothing else to check
+/// it with.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(align_of::<UserInfo3>() == 8);
+    assert!(size_of::<UserInfo3>() == 184);
+    assert!(offset_of!(UserInfo3, name) == 0);
+    assert!(offset_of!(UserInfo3, comment) == 32);
+    assert!(offset_of!(UserInfo3, flags) == 40);
+    assert!(offset_of!(UserInfo3, script_path) == 48);
+    assert!(offset_of!(UserInfo3, full_name) == 64);
+    assert!(offset_of!(UserInfo3, logon_hours) == 120);
+    assert!(offset_of!(UserInfo3, logon_server) == 136);
+    assert!(offset_of!(UserInfo3, user_id) == 152);
+    assert!(offset_of!(UserInfo3, profile) == 160);
+    assert!(offset_of!(UserInfo3, home_dir_drive) == 168);
+    assert!(offset_of!(UserInfo3, password_expired) == 176);
+};
+
 #[repr(C)]
 struct LocalGroupInfo0 {
     name: *mut u16,
