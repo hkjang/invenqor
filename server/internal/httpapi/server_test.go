@@ -371,7 +371,7 @@ func TestSecurityHeadersAreApplied(t *testing.T) {
 
 func testServer(t *testing.T, runtime *storage.Runtime) *Server {
 	t.Helper()
-	stateDir := filepath.Dir(runtime.SQLitePath())
+	stateDir := testStateDir(t, runtime)
 	bootstrapManager := auth.NewBootstrapManager(runtime.DB(), stateDir)
 	if _, err := bootstrapManager.Ensure(context.Background()); err != nil {
 		t.Fatalf("BootstrapManager.Ensure() error = %v", err)

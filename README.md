@@ -198,6 +198,31 @@ JSON을 생성합니다.
 계정에 쓰기 허용합니다. 기존 설정은 덮어쓰지 않습니다. 제거 스크립트도 감사와
 복구를 위해 설정 및 미전송 큐를 보존합니다.
 
+## PostgreSQL 검증
+
+Go 테스트는 기본적으로 SQLite에서 실행됩니다. 설치할 게 없어서 편하지만, 그 편의가
+결함 두 개를 운영까지 통과시켰습니다 — 테스트는 전부 통과하는 채로.
+
+- 중복 탐지 질의가 `payload_json`에 `LIKE`를 썼습니다. 이 컬럼은 SQLite에서 TEXT,
+  PostgreSQL에서 JSONB이고 JSONB에는 LIKE가 없어서 **모든 ingest가 SQLSTATE 42883**로
+  실패했습니다.
+- 제안된 관계를 승인/거부하는 질의가 파라미터 하나를 두 컬럼에 재사용했고,
+  PostgreSQL이 그 파라미터의 타입을 서로 다르게 추론해 **모든 승인·거부가 HTTP 500**을
+  반환했습니다.
+
+```sh
+scripts/test-postgres.sh          # 전체
+scripts/test-postgres.sh -run TestSoftware   # 일부
+```
+
+일회용 PostgreSQL 컨테이너를 띄우고 같은 테스트를 그 위에서 돌린 뒤 정리합니다.
+테스트마다 별도 스키마를 씁니다.
+
+두 엔진의 차이는 그 밖에도 있습니다. SQLite의 `LIKE`는 ASCII 대소문자를 무시하지만
+PostgreSQL은 구분하므로, fallback에서 맞던 검색이 운영에서는 아무것도 반환하지 않을
+수 있습니다. `TestSoftwareSearchIgnoresCase`가 그 경계를 지킵니다 — 소문자 정규화를
+지우면 PostgreSQL에서는 실패하고 SQLite에서는 조용히 통과합니다.
+
 ## Windows 코드 검증
 
 `src/windows_sys.rs`는 `cfg(windows)` 아래에서만 컴파일되므로, 이 프로젝트를

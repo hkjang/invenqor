@@ -24,7 +24,7 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 	}
 	defer runtime.Close()
 	server := testServer(t, runtime)
-	tokenPath := filepath.Join(filepath.Dir(runtime.SQLitePath()), "initial-admin.token")
+	tokenPath := filepath.Join(testStateDir(t, runtime), "initial-admin.token")
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
 		t.Fatalf("read bootstrap token error = %v", err)
@@ -223,7 +223,7 @@ func TestBootstrapTokenCannotBeReused(t *testing.T) {
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	token, err := os.ReadFile(
-		filepath.Join(filepath.Dir(runtime.SQLitePath()), "initial-admin.token"),
+		filepath.Join(testStateDir(t, runtime), "initial-admin.token"),
 	)
 	if err != nil {
 		t.Fatalf("read bootstrap token error = %v", err)

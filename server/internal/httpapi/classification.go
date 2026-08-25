@@ -441,24 +441,36 @@ func (s *Server) reviewProposedRelation(
 		)
 		return
 	}
+	reviewedAt := time.Now().UTC()
 	status := "active"
 	source := "manual"
+	// Rejecting closes the relationship; approving leaves it open.
+	var validTo any
 	if decision == "reject" {
 		status = "rejected"
 		source = "inferred"
+		validTo = reviewedAt
 	}
 	// An approved proposal becomes a manual relationship: a person vouched for it,
 	// so a later automatic pass must not revise it.
+	//
+	// valid_to is decided here rather than by a CASE over the same parameter that
+	// reviewed_at uses. PostgreSQL deduces a parameter's type from every place it
+	// appears, and inside a CASE whose other branch is a bare NULL it deduced a
+	// different type than the timestamp column gave it, so every approval and
+	// every rejection failed with "inconsistent types deduced for parameter $3"
+	// and the console got a 500. SQLite has no such deduction, so the tests passed.
 	result, err := s.database.DB().ExecContext(
 		request.Context(),
 		`UPDATE asset_relations
 		    SET status = $1, source = $2, reviewed_at = $3, reviewed_by = $4,
-		        valid_to = CASE WHEN $1 = 'rejected' THEN $3 ELSE NULL END
-		  WHERE id = $5 AND status = 'proposed'`,
+		        valid_to = $5
+		  WHERE id = $6 AND status = 'proposed'`,
 		status,
 		source,
-		time.Now().UTC(),
+		reviewedAt,
 		principalFromContext(request.Context()).User.ID,
+		validTo,
 		relationID,
 	)
 	if err != nil {

@@ -21,7 +21,7 @@ func authenticateInitialAdmin(
 ) (*http.Cookie, string) {
 	t.Helper()
 	token, err := os.ReadFile(
-		filepath.Join(filepath.Dir(runtime.SQLitePath()), "initial-admin.token"),
+		filepath.Join(testStateDir(t, runtime), "initial-admin.token"),
 	)
 	if err != nil {
 		t.Fatalf("read bootstrap token: %v", err)

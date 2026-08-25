@@ -100,7 +100,15 @@ func TestGenericSettingsCannotExposeOrOverwriteKeycloakState(t *testing.T) {
 	).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored != `{"enabled":false}` {
+	// Compared as a value, not as text: value_json is JSONB on PostgreSQL, which
+	// re-serialises what it is given - key order is normalised and a space appears
+	// after each colon - so a byte comparison here fails on an unchanged setting
+	// and passes only because SQLite stores the text verbatim.
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stored), &decoded); err != nil {
+		t.Fatalf("stored setting is not JSON: %s", stored)
+	}
+	if len(decoded) != 1 || decoded["enabled"] != false {
 		t.Fatalf("dedicated setting was changed to %s", stored)
 	}
 }
