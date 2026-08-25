@@ -77,13 +77,41 @@ impl StateStore {
         Ok(hex::encode(Sha256::digest(bytes)))
     }
 
+    /// The last inventory this Agent sent, used only to work out what changed.
+    ///
+    /// An unreadable file is treated as no previous inventory rather than as an
+    /// error. It is a cache: losing it costs one full snapshot instead of a
+    /// delta, which the Server accepts. Failing instead ended the whole run, and
+    /// since the file is read again on the next start, every start after that
+    /// ended the same way - a service manager restarting an Agent that could
+    /// never do anything, over one damaged cache file.
     pub fn previous_inventory(&self) -> Result<Vec<AssetRecord>> {
         let path = self.root.join("inventory.json");
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the previous inventory could not be read; sending a full snapshot"
+                );
+                return Ok(Vec::new());
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(records) => Ok(records),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the previous inventory could not be parsed; sending a full snapshot"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     pub fn set_previous_inventory(&self, records: &[AssetRecord]) -> Result<()> {

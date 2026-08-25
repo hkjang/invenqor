@@ -436,6 +436,7 @@ pub async fn run(
         checks.push(check);
     }
     checks.push(collection_check(config, config_path, now));
+    checks.push(enrollment_check(config));
 
     finish(config, config_path, agent_id, now, checks)
 }
@@ -489,6 +490,61 @@ fn service_check() -> Option<Check> {
     #[cfg(not(windows))]
     {
         None
+    }
+}
+
+/// What the Server actually said the last time this Agent tried to register.
+///
+/// Every other check here asks whether registration *could* work: the Server
+/// answers, the policy allows this host, the credential file is present. None of
+/// them asks whether it *did*. An Agent refused with AGENT_ALREADY_CLAIMED -
+/// which happens whenever a machine is cloned from an image that already
+/// enrolled - reaches the Server, passes the policy check, and is rejected on
+/// every cycle forever; the report said "OK, the Agent can reach the Server and
+/// register" while nothing had ever been delivered.
+///
+/// The Agent already records the refusal, with the Server's own remediation
+/// text. This reads it back.
+fn enrollment_check(config: &Config) -> Check {
+    let Ok(store) = StateStore::open(&config.agent.state_dir, config.agent.max_queue_bytes) else {
+        return Check::skip("last registration", "the state directory is unreadable");
+    };
+    let Some(status) = store.read_status() else {
+        return Check::skip(
+            "last registration",
+            "the Agent has not recorded a status yet",
+        );
+    };
+    let enrollment = &status.enrollment;
+    match enrollment.state.as_str() {
+        "enrolled" => Check::pass(
+            "last registration",
+            match enrollment.enrolled_at {
+                Some(at) => format!("registered at {}", format_unix_utc(at)),
+                None => "registered".to_string(),
+            },
+        ),
+        "failed" => {
+            let error = enrollment.last_error.as_ref();
+            let detail = match error {
+                Some(error) => format!(
+                    "the Server refused registration ({}): {}",
+                    error.code, error.detail
+                ),
+                None => enrollment.summary.clone(),
+            };
+            let remediation = error
+                .map(|error| error.remediation.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Read the Agent log for the Server's response.".to_string());
+            Check::fail("last registration", detail, remediation)
+        }
+        "pending" => Check::warn(
+            "last registration",
+            "no registration attempt has completed yet",
+            "Run one cycle by hand and read the result.",
+        ),
+        other => Check::skip("last registration", format!("state {other}")),
     }
 }
 
