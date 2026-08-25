@@ -134,7 +134,7 @@ type ReleaseListing = {
   agents: number;
   signature_verified: boolean;
 };
-type Statistics = {
+export type Statistics = {
   generated_at: string;
   assets: {
     total: number;
@@ -1258,7 +1258,9 @@ function AssetDetail({id, csrf, access, onClose, onChanged}: {
   </Drawer>;
 }
 
-function AssetTable({items, selected, onToggle, onSelect}: {
+// Exported so a test can render them directly. The pages that own them fetch
+// on mount, so rendering a page only ever exercises its loading state.
+export function AssetTable({items, selected, onToggle, onSelect}: {
   items: Asset[]; selected?: string[]; onToggle?: (id: string) => void; onSelect?: (id: string) => void;
 }) {
   return <div className="table-wrap"><table><thead><tr>
@@ -1292,7 +1294,7 @@ export const breakdownRows = (items: Bucket[], slots = 8): Bucket[] => {
   }];
 };
 
-function Breakdown({items}: {items: Bucket[]}) {
+export function Breakdown({items}: {items: Bucket[]}) {
   const total = items.reduce((sum, item) => sum + item.count, 0);
   const rows = breakdownRows(items);
   return <div className="breakdown">{rows.map((item, index) =>
@@ -1301,15 +1303,23 @@ function Breakdown({items}: {items: Bucket[]}) {
       <b>{number(item.count)}</b><small>{total ? Math.round(item.count / total * 100) : 0}%</small></div>)}
     {!items.length && <Empty icon={Boxes} text="집계 데이터가 없습니다."/>}</div>;
 }
-function DailyBars({items}: {items: Statistics["collection"]["daily"]}) {
+export function DailyBars({items}: {items: Statistics["collection"]["daily"]}) {
   const max = Math.max(1, ...items.map(item => item.events));
+  // Without this an installation that has collected nothing shows an empty box
+  // where the chart belongs, and nothing saying why. Breakdown beside it has
+  // always said so; this did not.
+  if (!items.length) {
+    return <div className="daily-bars">
+      <Empty icon={Activity} text="수집 활동이 아직 없습니다."/>
+    </div>;
+  }
   return <div className="daily-bars">{items.map(item => <div key={item.date}>
     <div className="bar-stack" title={`${item.events} events / ${item.failed} failed`}>
       <i style={{height: `${Math.max(3, item.events / max * 100)}%`}}/>
       {item.failed > 0 && <b style={{height: `${Math.max(3, item.failed / max * 100)}%`}}/>}
     </div><strong>{item.events}</strong><span>{item.date.slice(5)}</span></div>)}</div>;
 }
-function RiskSummary({statistics}: {statistics: Statistics|null}) {
+export function RiskSummary({statistics}: {statistics: Statistics|null}) {
   const critical = statistics?.assets.by_criticality.find(item => item.label === "critical")?.count || 0;
   const failed = statistics?.collection.failed_24h || 0;
   const attention = statistics?.agents.attention || 0;

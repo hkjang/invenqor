@@ -107,6 +107,9 @@ describe("visualization views", () => {
         // A throw here is a blank page with no message: React unmounts the tree
         // and the user has nothing to report.
         const markup = renderToStaticMarkup(view.render(empty, showTable));
+        // Without this the rest is vacuous: they are all absences, and a view
+        // that rendered nothing would satisfy every one of them.
+        expect(markup.length).toBeGreaterThan(100);
         expect(markup).not.toContain("NaN");
         expect(markup).not.toContain("undefined");
         expect(markup).not.toContain("Infinity");
@@ -117,7 +120,7 @@ describe("visualization views", () => {
         expect(markup).not.toContain("NaN");
         expect(markup).not.toContain("undefined");
         expect(markup).not.toContain("Infinity");
-        expect(markup.length).toBeGreaterThan(0);
+        expect(markup.length).toBeGreaterThan(100);
       });
     }
   }
