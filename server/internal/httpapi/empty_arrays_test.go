@@ -29,11 +29,21 @@ func TestEmptyInstallationReturnsArraysNotNull(t *testing.T) {
 		"/api/v1/assets/software-products",
 		"/api/v1/assets",
 		"/api/v1/admin/agents",
+		// The console calls .slice() straight onto these two without a guard, so
+		// a nil here throws in render rather than showing an empty section.
+		"/api/v1/admin/agent-updates",
+		"/api/v1/admin/diagnostics/enrollment",
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		request.AddCookie(cookie)
 		response := httptest.NewRecorder()
 		server.Handler().ServeHTTP(response, request)
+		// A test Server has no update directory, and the console handles that
+		// answer with a catch. Anything else that is not 200 is a real problem.
+		if response.Code == http.StatusServiceUnavailable &&
+			strings.Contains(response.Body.String(), "UPDATE_STORE_UNAVAILABLE") {
+			continue
+		}
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s = %d body = %s", path, response.Code, response.Body.String())
 		}
@@ -81,6 +91,7 @@ func looksLikeCollection(key string) bool {
 		"cells", "rows", "columns", "items", "edges", "nodes", "children",
 		"buckets", "series", "points", "records", "errors", "evidence",
 		"agents", "assets", "products", "history", "roles", "scopes",
+		"releases", "agent_versions", "awaiting_inventory", "by_event_code",
 	} {
 		if key == name {
 			return true
