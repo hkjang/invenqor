@@ -24,6 +24,8 @@ report_failure() {
 trap 'report_failure "$LINENO"' ERR
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/e2e-wait.sh
+. "$root/scripts/lib/e2e-wait.sh"
 suffix=$$
 network="invenqor-e2e-$suffix"
 postgres="invenqor-e2e-postgres-$suffix"
@@ -70,10 +72,7 @@ docker run -d --name "$postgres" --network "$network" \
   -e POSTGRES_DB=invenqor -e POSTGRES_USER=invenqor \
   -e POSTGRES_PASSWORD=e2e-contract-password \
   -v "$pg_volume:/var/lib/postgresql/data" postgres:17-alpine >/dev/null
-for _ in $(seq 1 30); do
-  docker exec "$postgres" pg_isready -U invenqor >/dev/null 2>&1 && break
-  sleep 1
-done
+wait_for_postgres "$postgres" invenqor invenqor
 openssl genpkey -algorithm ED25519 -out "$work/update-private.pem" >/dev/null 2>&1
 update_public_key=$(
   openssl pkey -in "$work/update-private.pem" -pubout -outform DER |
@@ -83,10 +82,8 @@ docker run -d --name "$server" --network "$network" -p "127.0.0.1:$port:7070" \
   -e INVENQOR_POSTGRES_DSN='postgres://invenqor:e2e-contract-password@invenqor-e2e-postgres-'$suffix':5432/invenqor?sslmode=disable' \
   -e INVENQOR_UPDATE_PUBLIC_KEY="$update_public_key" \
   -v "$state_volume:/var/lib/invenqor-server" invenqor-server:e2e >/dev/null
-for _ in $(seq 1 30); do
-  curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
-  sleep 1
-done
+wait_until 60 "the Server on port $port" \
+  curl -fsS "http://127.0.0.1:$port/health/ready"
 
 docker cp "$server:/var/lib/invenqor-server/initial-admin.token" "$work/token"
 bootstrap_token=$(tr -d '\r\n' < "$work/token")

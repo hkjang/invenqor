@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/e2e-wait.sh
+. "$root/scripts/lib/e2e-wait.sh"
 suffix=$$
 network="invenqor-admin-e2e-$suffix"
 postgres="invenqor-admin-pg-$suffix"
@@ -33,12 +35,7 @@ docker run -d --name "$postgres" --network "$network" \
   -e POSTGRES_PASSWORD=target-e2e-password \
   -v "$pg_volume:/var/lib/postgresql/data" \
   postgres:17-alpine >/dev/null
-for _ in $(seq 1 40); do
-  if docker exec "$postgres" pg_isready -U invenqor >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
+wait_for_postgres "$postgres" invenqor invenqor
 
 dsn="postgres://invenqor:target-e2e-password@$postgres:5432/invenqor?sslmode=disable"
 docker run -d --name "$server" --network "$network" \
@@ -48,12 +45,8 @@ docker run -d --name "$server" --network "$network" \
   -e bootstrap_admin_password='ActualAdmin@42-Strong' \
   -v "$state_volume:/var/lib/invenqor-server" \
   invenqor-server:e2e-admin >/dev/null
-for _ in $(seq 1 40); do
-  if curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
+wait_until 60 "the Server on port $port" \
+  curl -fsS "http://127.0.0.1:$port/health/ready"
 
 curl -fsS "http://127.0.0.1:$port/api/v1/system/info" |
   jq -e --arg version "$expected_version" \

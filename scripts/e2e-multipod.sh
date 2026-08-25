@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=scripts/lib/e2e-wait.sh
+. "$root/scripts/lib/e2e-wait.sh"
 suffix=$$
 network="invenqor-multipod-$suffix"
 postgres="invenqor-multipod-postgres-$suffix"
@@ -53,10 +55,7 @@ docker run -d --name "$postgres" --network "$network" \
   -e POSTGRES_DB=invenqor -e POSTGRES_USER=invenqor \
   -e POSTGRES_PASSWORD=multipod-contract-password \
   -v "$pg_volume:/var/lib/postgresql/data" postgres:17-alpine >/dev/null
-for _ in $(seq 1 30); do
-  docker exec "$postgres" pg_isready -U invenqor >/dev/null 2>&1 && break
-  sleep 1
-done
+wait_for_postgres "$postgres" invenqor invenqor
 
 dsn="postgres://invenqor:multipod-contract-password@$postgres:5432/invenqor?sslmode=disable"
 run_pod() {
@@ -81,10 +80,8 @@ run_pod "$pod_b" "$state_b" "$port_b" &
 wait
 
 for port in "$port_a" "$port_b"; do
-  for _ in $(seq 1 45); do
-    curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
-    sleep 1
-  done
+  wait_until 60 "the Server on port $port" \
+    curl -fsS "http://127.0.0.1:$port/health/ready"
   curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null
 done
 
@@ -222,10 +219,7 @@ pending_spool=$(docker run --rm -v "$event_spool:/data" alpine:3.22 \
 test "$pending_spool" = 2
 docker rm -f "$pod_a" >/dev/null
 docker start "$postgres" >/dev/null
-for _ in $(seq 1 45); do
-  docker exec "$postgres" pg_isready -U invenqor >/dev/null 2>&1 && break
-  sleep 1
-done
+wait_for_postgres "$postgres" invenqor invenqor
 for _ in $(seq 1 45); do
   replayed=$(docker exec "$postgres" psql -U invenqor -d invenqor -Atc \
     "SELECT COUNT(*) FROM agent_events WHERE event_id IN ('$spooled_first_id','$spooled_second_id') AND processing_status='processed'")
@@ -242,10 +236,8 @@ test "$(docker run --rm -v "$event_spool:/data" alpine:3.22 \
 # Scale the removed ordinal back up and ensure both Pods can still mount the
 # root-owned state/update/spool roots without gaining privileged ownership.
 run_pod "$pod_a" "$state_a" "$port_a"
-for _ in $(seq 1 45); do
-  curl -fsS "http://127.0.0.1:$port_a/health/ready" >/dev/null 2>&1 && break
-  sleep 1
-done
+wait_until 60 "the Server on port $port_a" \
+  curl -fsS "http://127.0.0.1:$port_a/health/ready"
 curl -fsS "http://127.0.0.1:$port_a/health/ready" >/dev/null
 
 registration_response=$(curl -fsS -b "$work/cookies" \
