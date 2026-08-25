@@ -12,7 +12,21 @@ archive_name=$(basename "$archive")
 mkdir -p "$output_dir"
 cd "$root"
 docker build --platform linux/amd64 -t "$server_image" .
-docker pull --platform linux/amd64 "$postgres_image"
+
+# Refresh the base image, but do not fail the release build when the registry is
+# unreachable and the exact tag is already present locally - a broken credential
+# helper or an offline build host is not a reason to have no bundle. Say so
+# loudly, because the bundle then ships whatever that local image happens to be.
+if ! docker pull --platform linux/amd64 "$postgres_image"; then
+  if docker image inspect "$postgres_image" >/dev/null 2>&1; then
+    echo "WARNING: could not pull $postgres_image; bundling the local copy" >&2
+    echo "WARNING: local digest $(docker image inspect "$postgres_image" --format '{{index .RepoDigests 0}}' 2>/dev/null || echo unknown)" >&2
+  else
+    echo "ERROR: cannot pull $postgres_image and it is not present locally" >&2
+    exit 1
+  fi
+fi
+
 test "$(docker image inspect "$server_image" --format '{{.Architecture}}')" = amd64
 test "$(docker image inspect "$postgres_image" --format '{{.Architecture}}')" = amd64
 docker save "$server_image" "$postgres_image" | gzip -9 > "$archive"

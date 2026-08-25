@@ -281,6 +281,21 @@ fn wide(value: &str) -> Vec<u16> {
         .collect()
 }
 
+/// Takes the first `count` elements, clamped to what the buffer actually holds.
+///
+/// Win32 reports lengths in an out-parameter or a return value, and a caller that
+/// slices with one of those directly is trusting it. Most of the time that trust
+/// holds, but not always: GetLogicalDriveStringsW returns the *required* size when
+/// the buffer was too small, which is larger than the buffer, and a driver is free
+/// to report a hardware address longer than the fixed field it was written into.
+/// Slicing past the end panics, and until the release profile stopped aborting on
+/// panic that took the whole agent down - one adapter with an unusual address
+/// length and the host collected nothing at all. Clamping loses a truncated value
+/// in the rare wrong case and keeps every other collector alive.
+fn take<T>(buffer: &[T], count: usize) -> &[T] {
+    &buffer[..count.min(buffer.len())]
+}
+
 fn from_wide(buffer: &[u16]) -> String {
     let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
     OsString::from_wide(&buffer[..end])
@@ -421,7 +436,7 @@ impl Key {
             if status != ERROR_SUCCESS {
                 break;
             }
-            result.push(from_wide(&name[..length as usize]));
+            result.push(from_wide(take(&name, length as usize)));
             index += 1;
             if index > 20_000 {
                 break;
@@ -594,7 +609,7 @@ pub fn volumes() -> Vec<Volume> {
         return Vec::new();
     }
     let mut result = Vec::new();
-    for root in buffer[..written as usize].split(|&c| c == 0) {
+    for root in take(&buffer, written as usize).split(|&c| c == 0) {
         if root.is_empty() {
             continue;
         }
@@ -715,11 +730,14 @@ pub fn adapters() -> Vec<Adapter> {
                 .or_else(|| from_wide_ptr(adapter.description))
                 .unwrap_or_else(|| "unknown".to_string());
             let mac = (adapter.physical_address_length > 0).then(|| {
-                adapter.physical_address[..adapter.physical_address_length as usize]
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(":")
+                take(
+                    &adapter.physical_address,
+                    adapter.physical_address_length as usize,
+                )
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(":")
             });
             let mut addresses = Vec::new();
             let mut unicast = adapter.first_unicast;
@@ -821,7 +839,7 @@ pub fn processes(limit: usize) -> Vec<Process> {
                     let mut length = buffer.len() as u32;
                     if QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) != 0
                     {
-                        path = Some(from_wide(&buffer[..length as usize]));
+                        path = Some(from_wide(take(&buffer, length as usize)));
                     }
                     CloseHandle(process);
                 }
