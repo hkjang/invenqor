@@ -251,7 +251,9 @@ export function SoftwareOverview({summary}: {summary: SoftwareSummary|null}) {
   </article>;
 }
 
-function SoftwareTable({items, onSelect}: {items: SoftwareProduct[]; onSelect: (item: SoftwareProduct) => void}) {
+// Exported so a test can render them directly. The page fetches on mount, so
+// rendering it only ever exercises its loading state.
+export function SoftwareTable({items, onSelect}: {items: SoftwareProduct[]; onSelect: (item: SoftwareProduct) => void}) {
   return <div className="table-wrap"><table className="software-table"><thead><tr>
     <th>제품</th><th>역할</th><th>호스트</th><th>버전</th><th>설치</th><th>실행</th><th>신뢰도 / 근거</th><th/>
   </tr></thead><tbody>{items.map(item => {
@@ -271,7 +273,7 @@ function SoftwareTable({items, onSelect}: {items: SoftwareProduct[]; onSelect: (
     {!items.length && <Empty/>}</div>;
 }
 
-function SoftwareProductDrawer({product, onClose}: {product: SoftwareProduct; onClose: () => void}) {
+export function SoftwareProductDrawer({product, onClose}: {product: SoftwareProduct; onClose: () => void}) {
   const confidence = confidencePresentation(product.confidence);
   const drawerRef = React.useRef<HTMLElement>(null);
   const closeRef = React.useRef<HTMLButtonElement>(null);
@@ -342,13 +344,13 @@ function SoftwareProductDrawer({product, onClose}: {product: SoftwareProduct; on
   </aside></div>;
 }
 
-function EvidenceGroup({title, values}: {title: string; values: string[]}) {
+export function EvidenceGroup({title, values}: {title: string; values: string[]}) {
   if (!values.length) return null;
   return <section className="drawer-section software-signals"><h3>{title} <span>{values.length}</span></h3>
     <div>{values.map(value => <code key={value}>{value}</code>)}</div></section>;
 }
 
-function TopProducts({summary, compact = false}: {summary: SoftwareSummary; compact?: boolean}) {
+export function TopProducts({summary, compact = false}: {summary: SoftwareSummary; compact?: boolean}) {
   const items = (summary.top_products || []).slice(0, compact ? 5 : 10);
   const maximum = Math.max(1, ...items.map(item => item.instances));
   return <div className={`software-top-products ${compact ? "compact" : ""}`}>{items.map(item =>
