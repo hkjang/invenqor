@@ -14,30 +14,30 @@ import (
 // Every Keycloak failure code an administrator can meet, with the action that
 // resolves it. The console shows this next to the code.
 var keycloakGuidance = map[string]string{
-	"KEYCLOAK_DISABLED": "Enable Keycloak login in Settings > Keycloak.",
-	"KEYCLOAK_SECRET_REQUIRED": "Enter the Keycloak client secret in " +
-		"Settings > Keycloak and save it again.",
-	"KEYCLOAK_FLOW_EXPIRED": "The login took longer than ten minutes or the " +
-		"link was reused. Start the login again from the console.",
-	"KEYCLOAK_NONCE_MISMATCH": "The ID token did not match this login " +
-		"attempt. Confirm one Keycloak client is not shared by two servers.",
-	"KEYCLOAK_EMAIL_DOMAIN_REJECTED": "Add the domain to the allowed email " +
-		"domain list, or remove the restriction.",
-	"KEYCLOAK_PROVISIONING_DISABLED": "Enable automatic user creation, or " +
-		"create the account locally before the user signs in.",
-	"KEYCLOAK_USERNAME_UNUSABLE": "Map a username claim that contains 3 to " +
-		"64 letters, digits, dot, underscore or hyphen.",
-	"KEYCLOAK_USERNAME_CONFLICT": "A local account already owns this name. " +
-		"Rename or delete the local account, or map a different username claim.",
-	"KEYCLOAK_USER_INACTIVE": "Reactivate the account on the user page.",
-	"KEYCLOAK_ROLE_MISSING": "A role mapping points at a role that no longer " +
-		"exists. Correct the mapping in Settings > Keycloak.",
-	"KEYCLOAK_UNREACHABLE": "Check the Keycloak URL, realm, DNS and TLS " +
-		"trust. Use the connection test in Settings > Keycloak.",
-	"KEYCLOAK_PROVIDER_REJECTED": "Keycloak refused the request. Check the " +
-		"client's valid redirect URIs and any authentication flow policy.",
-	"KEYCLOAK_LOGIN_FAILED": "Open Server 진단 로그 and search for the " +
-		"reported request ID.",
+	"KEYCLOAK_DISABLED": "설정 > Keycloak 에서 Keycloak 로그인을 켜십시오.",
+	"KEYCLOAK_SECRET_REQUIRED": "설정 > Keycloak 에서 Client Secret을 입력하고 " +
+		"다시 저장하십시오.",
+	"KEYCLOAK_FLOW_EXPIRED": "로그인이 10분을 넘겼거나 링크가 다시 사용되었습니다. " +
+		"콘솔에서 로그인을 다시 시작하십시오.",
+	"KEYCLOAK_NONCE_MISMATCH": "ID 토큰이 이 로그인 시도와 일치하지 않습니다. " +
+		"하나의 Keycloak client를 두 서버가 공유하고 있지 않은지 확인하십시오.",
+	"KEYCLOAK_EMAIL_DOMAIN_REJECTED": "해당 도메인을 허용 이메일 도메인 목록에 " +
+		"추가하거나 제한을 해제하십시오.",
+	"KEYCLOAK_PROVISIONING_DISABLED": "자동 사용자 생성을 켜거나, 사용자가 " +
+		"로그인하기 전에 로컬 계정을 먼저 만드십시오.",
+	"KEYCLOAK_USERNAME_UNUSABLE": "영문자·숫자·점·밑줄·하이픈으로 3~64자가 되는 " +
+		"username claim을 매핑하십시오.",
+	"KEYCLOAK_USERNAME_CONFLICT": "같은 이름의 로컬 계정이 이미 있습니다. 그 로컬 " +
+		"계정의 이름을 바꾸거나 삭제하거나, 다른 username claim을 매핑하십시오.",
+	"KEYCLOAK_USER_INACTIVE": "사용자 화면에서 해당 계정을 다시 활성화하십시오.",
+	"KEYCLOAK_ROLE_MISSING": "역할 매핑이 더 이상 존재하지 않는 역할을 가리킵니다. " +
+		"설정 > Keycloak 에서 매핑을 수정하십시오.",
+	"KEYCLOAK_UNREACHABLE": "Keycloak URL, realm, DNS, TLS 신뢰를 확인하십시오. " +
+		"설정 > Keycloak 의 연결 테스트를 사용하십시오.",
+	"KEYCLOAK_PROVIDER_REJECTED": "Keycloak이 요청을 거부했습니다. client의 유효 " +
+		"redirect URI와 인증 흐름 정책을 확인하십시오.",
+	"KEYCLOAK_LOGIN_FAILED": "Server 진단 로그 를 열고 표시된 request ID로 " +
+		"검색하십시오.",
 }
 
 func keycloakRemediation(code string) string {

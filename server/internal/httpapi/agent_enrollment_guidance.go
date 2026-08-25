@@ -19,7 +19,7 @@ var enrollmentGuidance = map[string][2]string{
 	},
 	"AGENT_AUTO_ENROLLMENT_DISABLED": {
 		"Automatic Agent enrollment is disabled.",
-		"Set Settings > Agent registration to URL-only or token mode, " +
+		"설정 > Agent 등록 을 URL 전용 또는 토큰 모드로 바꾸거나, " +
 			"or provision the device manually on the Agent page.",
 	},
 	"AGENT_SOURCE_NOT_ALLOWED": {
@@ -67,7 +67,7 @@ var enrollmentGuidance = map[string][2]string{
 	},
 	"AGENT_ENROLLMENT_POLICY_UNAVAILABLE": {
 		"The automatic enrollment policy could not be loaded.",
-		"The metadata database is unreachable. Check Settings > PostgreSQL " +
+		"메타데이터 데이터베이스에 연결할 수 없습니다. 설정 > PostgreSQL 에서 " +
 			"and the database health endpoint.",
 	},
 	"AGENT_ENROLLMENT_FAILED": {
