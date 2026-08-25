@@ -93,6 +93,39 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
 
+  dependency-audit:
+    # The web dependencies were already audited on every run; the Rust and Go
+    # ones were not. This agent runs as root under systemd and as SYSTEM under
+    # the Windows service manager, so a dependency with a known hole is worth
+    # the same attention there. Both trees are clean as of this commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      # Pinned: 0.22.2 and later need rustc 1.88, and this project builds on
+      # 1.85 so that the agent keeps running on older distributions.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.1
+      - name: Audit the Agent dependencies
+        # A newly published advisory will fail this on a change that has nothing
+        # to do with it. That is the intended trade: fix it, or record the
+        # decision with --ignore RUSTSEC-0000-0000 and a reason.
+        run: cargo audit
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Audit the Server dependencies
+        # Reports vulnerabilities this code actually reaches, so a finding here
+        # is a call path and not just a version match. One advisory currently
+        # sits in the tree without being called - golang.org/x/crypto/openpgp,
+        # unmaintained, no fix published - and govulncheck correctly ignores it.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+        working-directory: server
+
   static-build:
     strategy:
       matrix:
