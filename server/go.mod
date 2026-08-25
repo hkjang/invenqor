@@ -1,6 +1,6 @@
 module github.com/hkjang/invenqor/server
 
-go 1.25.0
+go 1.25.14
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0

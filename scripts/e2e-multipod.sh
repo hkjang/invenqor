@@ -26,6 +26,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Without this a pod that fails to start reports only that nothing answered on
+# its port; the reason is in the container's own log, which the cleanup trap
+# then removes. Print it before anything is torn down.
+report_failure() {
+  status=$?
+  echo "E2E FAIL: command at line $1 exited with status $status" >&2
+  for pod in "$pod_a" "$pod_b" "$postgres"; do
+    if docker inspect "$pod" >/dev/null 2>&1; then
+      echo "E2E $pod state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' "$pod")" >&2
+      echo "E2E $pod log tail:" >&2
+      docker logs --tail 80 "$pod" >&2 2>&1 || true
+    else
+      echo "E2E $pod was never created" >&2
+    fi
+  done
+  exit "$status"
+}
+trap 'report_failure "$LINENO"' ERR
+
 cd "$root"
 docker build -q -t invenqor-server:e2e-multipod .
 docker network create "$network" >/dev/null
