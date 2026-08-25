@@ -143,6 +143,39 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  linux-e2e:
+    # These scripts existed and were never run by CI. Between them they cover a
+    # PostgreSQL-backed server, automatic agent registration, a packaged RHEL 8
+    # agent under systemd, the update path, RBAC, Keycloak, diagnostics and the
+    # web console - none of which the unit suites reach.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # This one cross-builds the musl agent it then installs.
+          - script: e2e-client-server.sh
+            needs_rust: true
+          - script: e2e-admin-settings.sh
+            needs_rust: false
+          # Two server instances sharing PostgreSQL and a state directory: the
+          # shape in which a replica that cannot read the sealed Keycloak client
+          # secret makes the login button disappear.
+          - script: e2e-multipod.sh
+            needs_rust: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.85.0
+        if: matrix.needs_rust
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.needs_rust
+      - name: Install cross
+        if: matrix.needs_rust
+        run: cargo install cross --locked --version 0.2.5
+      - name: Run ${{ matrix.script }}
+        run: ./scripts/${{ matrix.script }}
+
   windows-native-e2e:
     needs: static-build
     runs-on: windows-latest
