@@ -1,6 +1,6 @@
 # Invenqor Server 설치·운영·오프라인 배포 가이드
 
-대상 Server 버전: v0.2.16 · Agent 버전: v0.2.16 · 기준일: 2026-08-24
+대상 Server 버전: v0.2.17 · Agent 버전: v0.2.17 · 기준일: 2026-08-24
 
 ## 1. 운영 구조와 단일 포트
 
@@ -47,7 +47,7 @@ Snapshot, 변경 이력과 오류를 함께 보존해 화면 값의 출처를 �
 같은 host의 프로세스·서비스·패키지는 내장 카탈로그로 주요 소프트웨어 제품에
 자동 결합하고 `runs_on` 관계, 설치·실행 상태와 판별 근거를 함께 저장합니다.
 
-v0.2.16 Server에서 `(Agent ID, Event ID)`가 같은 이벤트의 `processed` 상태는
+v0.2.17 Server에서 `(Agent ID, Event ID)`가 같은 이벤트의 `processed` 상태는
 최종 상태입니다. 여러 Pod가 같은 이벤트를 처리하다 한 Pod가 먼저 성공한 뒤 다른
 Pod의 늦은 실패 기록이 도착해도 성공 상태를 `failed`로 강등하지 않습니다. Agent가
 같은 이벤트를 다시 보내면 Server는 중복 성공으로 응답하므로, 일시적인 응답 유실이
@@ -75,15 +75,15 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 Server image 묶음과 체크섬을 인터넷 연결 구간에서 내려받아
 승인된 매체로 반입합니다.
 
-- `invenqor-0.2.16.tar.gz`
-- `invenqor-0.2.16.tar.gz.sha256`
+- `invenqor-0.2.17.tar.gz`
+- `invenqor-0.2.17.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 Agent 전체 배포본도 함께 반입하려면 다음 두 파일을 사용합니다. Server image
 묶음과 분리되어 있어 자산 장비에는 필요한 Agent 패키지만 전달할 수 있습니다.
 
-- `invenqor-agents-0.2.16.tar.gz`
-- `invenqor-agents-0.2.16.tar.gz.sha256`
+- `invenqor-agents-0.2.17.tar.gz`
+- `invenqor-agents-0.2.17.tar.gz.sha256`
 
 Agent 묶음에는 Linux x86_64·aarch64, Windows x86_64 패키지와 각 체크섬,
 관리 콘솔용 단일 signature-bundle JSON을 만드는
@@ -92,10 +92,10 @@ Agent 묶음에는 Linux x86_64·aarch64, Windows x86_64 패키지와 각 체크
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.16.tar.gz.sha256
-gzip -t invenqor-0.2.16.tar.gz
-docker load < invenqor-0.2.16.tar.gz
-docker image inspect invenqor-server:0.2.16 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-0.2.17.tar.gz.sha256
+gzip -t invenqor-0.2.17.tar.gz
+docker load < invenqor-0.2.17.tar.gz
+docker image inspect invenqor-server:0.2.17 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -103,9 +103,9 @@ Agent 전체 묶음은 별도로 검증하고 해제합니다. 해제된 디렉�
 개별 패키지의 `.sha256`을 대상 장비에 함께 전달해 복사 후 다시 검증하십시오.
 
 ```bash
-sha256sum -c invenqor-agents-0.2.16.tar.gz.sha256
-gzip -t invenqor-agents-0.2.16.tar.gz
-tar -xzf invenqor-agents-0.2.16.tar.gz
+sha256sum -c invenqor-agents-0.2.17.tar.gz.sha256
+gzip -t invenqor-agents-0.2.17.tar.gz
+tar -xzf invenqor-agents-0.2.17.tar.gz
 ```
 
 `compose.offline.yaml`은 `pull_policy: never`이므로 외부 Registry를 조회하지
@@ -134,7 +134,7 @@ docker compose -f compose.offline.yaml up -d
 만들고 SHA-256 파일까지 생성합니다.
 
 ```bash
-./scripts/build-offline-images.sh 0.2.16
+./scripts/build-offline-images.sh 0.2.17
 ```
 
 ## 5. 최초 관리자와 Agent 등록
@@ -149,7 +149,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.16
+  invenqor-server:0.2.17
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -245,8 +245,8 @@ Release의 CPU별 정적 musl 패키지를 사용합니다. 이 방식은 CentOS
 glibc가 있는 호스트에도 별도 런타임을 요구하지 않습니다.
 
 ```bash
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.16/invenqor-agent-linux-x86_64.tar.gz
-curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.16/invenqor-agent-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.17/invenqor-agent-linux-x86_64.tar.gz
+curl -fLO https://github.com/hkjang/invenqor/releases/download/v0.2.17/invenqor-agent-linux-x86_64.tar.gz.sha256
 sha256sum -c invenqor-agent-linux-x86_64.tar.gz.sha256
 tar -xzf invenqor-agent-linux-x86_64.tar.gz
 sudo ./invenqor-agent-linux-x86_64/scripts/install.sh
@@ -266,7 +266,7 @@ Windows용 Agent는 별도 배포본이며 같은 Server·같은 등록 절차�
 PowerShell에서 설치합니다.
 
 ```powershell
-$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.16'
+$release = 'https://github.com/hkjang/invenqor/releases/download/v0.2.17'
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip" -OutFile agent.zip
 Invoke-WebRequest "$release/invenqor-agent-windows-x86_64.zip.sha256" -OutFile agent.zip.sha256
 # 게시된 값과 일치하는지 확인합니다.
@@ -363,7 +363,7 @@ openssl pkey -in update-private.pem -pubout -outform DER |
 python3 scripts/sign-agent-update-manifest-v2.py \
   --artifact invenqor-agent-linux-x86_64 \
   --private-key update-private.pem \
-  --version 0.2.16 --channel stable \
+  --version 0.2.17 --channel stable \
   --os linux --architecture x86_64 \
   > invenqor-agent-linux-x86_64.signature-bundle.json
 ```
@@ -483,7 +483,7 @@ sudo /opt/invenqor-agent/bin/invenqor-agent \
 
 ```bash
 invenqor-agent --config /etc/invenqor-agent/config.toml --status
-#   updates       자동 · 실행 0.2.14 · 대기 0.2.16
+#   updates       자동 · 실행 0.2.14 · 대기 0.2.17
 invenqor-agent --config /etc/invenqor-agent/config.toml --diagnose
 #   [WARN] automatic updates  a verified update is staged and is waiting to be installed
 ```
@@ -504,8 +504,8 @@ SHA-256을 내도록 owner·mtime·정렬 순서를 고정하는 전용 스크�
 
 ```bash
 # 공식 릴리즈 artifact 검증
-sha256sum -c invenqor-0.2.16.tgz.sha256
-helm lint invenqor-0.2.16.tgz --strict
+sha256sum -c invenqor-0.2.17.tgz.sha256
+helm lint invenqor-0.2.17.tgz --strict
 
 # 소스 checkout에서 동일 artifact 생성
 ./scripts/package-helm-release.sh ./dist/helm
@@ -518,7 +518,7 @@ kubectl create secret generic invenqor-database \
   --from-literal=dsn='postgres://user:password@host/db?sslmode=require'
 kubectl create secret generic invenqor-bootstrap-admin \
   --from-literal=password='CorrectHorse!42'
-helm upgrade --install invenqor ./invenqor-0.2.16.tgz \
+helm upgrade --install invenqor ./invenqor-0.2.17.tgz \
   --set replicaCount=2 \
   --set bootstrapAdmin.username=admin \
   --set bootstrapAdmin.passwordSecret.name=invenqor-bootstrap-admin \
@@ -533,11 +533,11 @@ helm upgrade --install invenqor ./invenqor-0.2.16.tgz \
 사용하지 마십시오.
 
 Chart의 기본 Server 이미지는 공개 GHCR 이미지
-`ghcr.io/hkjang/invenqor-server:0.2.16`이며 `linux/amd64`와 `linux/arm64`를
+`ghcr.io/hkjang/invenqor-server:0.2.17`이며 `linux/amd64`와 `linux/arm64`를
 지원합니다. 인터넷 연결이 제한되었거나 사내 레지스트리를 사용하는 경우에는 먼저
 오프라인 이미지 번들을 레지스트리에 적재한 뒤
 `--set image.repository=REGISTRY/PROJECT/invenqor-server`와
-`--set image.tag=0.2.16`로 명시하십시오.
+`--set image.tag=0.2.17`로 명시하십시오.
 
 Chart는 StatefulSet parallel 기동, readiness/liveness/startup probe, Pod
 anti-affinity, rolling update와 PDB `minAvailable: 1`을 포함합니다. 세션,
@@ -578,7 +578,7 @@ Helm values에서 `bootstrapAdmin.username`을 비우고 해당 Secret을 폐기
 
 ### 9.1 v0.2.14 Keycloak Secret 자동 이관
 
-v0.2.16부터 Keycloak Client Secret은 공용 PostgreSQL의
+v0.2.17부터 Keycloak Client Secret은 공용 PostgreSQL의
 `auth.keycloak.client_secret` 설정에 저장됩니다. 값은 모든 Pod가 공유하는
 32-byte Master Key와 용도별 associated data를 사용해 AES-256-GCM AEAD로
 암호화되며, DB에는 ciphertext envelope만 남습니다. 따라서 새로 설정한 Secret은
@@ -589,7 +589,7 @@ v0.2.14는 이 Secret을 설정 요청을 처리한 Pod의 `bootstrap.enc`에
 보관했습니다. Rolling upgrade는 다음 순서를 지키십시오.
 
 1. PostgreSQL, Master Key Secret과 기존 Pod state PVC를 함께 백업합니다.
-2. 동일한 Master Key와 기존 `bootstrap.enc`가 있는 PVC를 연결한 v0.2.16 Pod를
+2. 동일한 Master Key와 기존 `bootstrap.enc`가 있는 PVC를 연결한 v0.2.17 Pod를
    하나 먼저 기동합니다.
 3. Server는 공용 DB에 Secret이 없을 때만 로컬 값을 읽어 암호화하고
    insert-if-absent로 이관합니다. 여러 Pod가 동시에 시작해도 먼저 저장된 한 값만
@@ -649,7 +649,7 @@ CIDR을 추가하고, Ingress Controller가 수신한 임의 `X-Forwarded-For`�
 |---|---|
 | `/health/live` | HTTP 200, 프로세스 생존 |
 | `/health/ready` | HTTP 200, 요청 처리 준비 |
-| `/api/v1/system/info` | 인증 전에도 확인 가능한 버전 `0.2.16` |
+| `/api/v1/system/info` | 인증 전에도 확인 가능한 버전 `0.2.17` |
 | `/health/database` | 로그인·`settings.read` 필요, `POSTGRES_ACTIVE` 권장 |
 | `/api/v1/admin/system/info` | 로그인·`settings.read` 필요, 포트·DB·등록 정책 확인 |
 
@@ -705,7 +705,7 @@ request ID와 Server 진단 로그를 함께 확인하십시오.
 
 ## 11. 자동 호환성 검증 범위
 
-v0.2.16 검증 경로는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동해
+v0.2.17 검증 경로는 실제 PostgreSQL-backed Server와 Agent 컨테이너를 기동해
 수집 레코드 생성, 인증 전송, DB 처리, daemon 지속 실행과 서명 업데이트
 스테이징을 확인하도록 구성되어 있습니다.
 
@@ -801,7 +801,7 @@ curl -s -b cookies "$BASE/api/v1/admin/diagnostics/enrollment?hours=24" | jq .to
   **등록 진단**의 *첫 수집 대기* 목록과 Agent의 `--status` 큐 깊이를 함께
   확인합니다.
 - Windows Agent의 첫 inventory 시각은 있는데 **운영체제 확인 전**: Server와
-  Agent 버전을 확인합니다. v0.2.16는 기존 최상위 `os_name`과 새 `os_release`
+  Agent 버전을 확인합니다. v0.2.17는 기존 최상위 `os_name`과 새 `os_release`
   형식을 모두 읽고 snapshot·후속 `system` delta뿐 아니라 저장된 기존 원천을 첫
   heartbeat에서 다시 투영합니다. Server를 올리면 자동 복구되며 Agent를 삭제·
   재등록하거나 `%ProgramData%\Invenqor\state`를 지우면 안 됩니다. Agent는 이후
@@ -951,7 +951,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.16
+  invenqor-server:0.2.17
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서
@@ -1191,7 +1191,7 @@ curl -fsS -b cookies.txt \
 inventory가 현재 저장 증거를 자동 조정하고 `software_catalog_reconciliations`에
 카탈로그 버전 완료 마커를 기록합니다. 제품이 없는 장비도 마커가 있으므로 이후
 heartbeat에서 반복 스캔하지 않으며, 카탈로그 버전이 바뀔 때만 한 번 다시
-조정합니다. 즉시 확인하려면 Server v0.2.16 기동 후 한 heartbeat 주기를 기다리고,
+조정합니다. 즉시 확인하려면 Server v0.2.17 기동 후 한 heartbeat 주기를 기다리고,
 주요 소프트웨어 API의 `hosts`, `high_confidence`, `needs_review`를 운영 기준선으로
 기록하십시오.
 

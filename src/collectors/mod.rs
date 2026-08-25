@@ -320,6 +320,47 @@ mod tests {
         }
     }
 
+    struct Panics;
+    impl Collector for Panics {
+        fn name(&self) -> &'static str {
+            "panics"
+        }
+        fn collect(&self, _collected_at: u64) -> Result<Vec<AssetRecord>> {
+            // Stands in for an indexing mistake or a bad assumption in a
+            // platform call - the kind of fault that is found in production and
+            // not in a test.
+            panic!("a collector made a wrong assumption")
+        }
+    }
+
+    /// The release profile aborted on panic, so a panic anywhere in a collector
+    /// killed the whole agent: nothing was collected, queued, delivered or
+    /// registered, and on a Windows service the panic message went to a standard
+    /// error that does not exist. Unwinding lets the cycle report the one that
+    /// failed and deliver what the others found.
+    #[tokio::test]
+    async fn a_panicking_collector_does_not_take_the_agent_down() {
+        let collectors: Vec<Arc<dyn Collector>> = vec![Arc::new(Panics), Arc::new(Works)];
+        let snapshot = collect_all("agent-1", collectors).await;
+
+        assert_eq!(
+            snapshot.records.len(),
+            1,
+            "the working collector's records must still arrive: {:#?}",
+            snapshot
+        );
+        let reported = snapshot
+            .errors
+            .iter()
+            .find(|error| error.collector == "panics")
+            .expect("the panic must be reported as that collector's error");
+        assert!(
+            reported.message.contains("panic") || reported.message.contains("task failed"),
+            "the error must say the collector panicked: {}",
+            reported.message
+        );
+    }
+
     /// A collector that never returns used to stop the cycle forever: nothing was
     /// collected, queued, delivered or registered, and the only visible sign was
     /// a service that looked healthy and did nothing.

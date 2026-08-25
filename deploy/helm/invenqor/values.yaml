@@ -1,7 +1,7 @@
 replicaCount: 2
 image:
   repository: ghcr.io/hkjang/invenqor-server
-  tag: "0.2.16"
+  tag: "0.2.17"
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP

@@ -1,6 +1,6 @@
 [package]
 name = "invenqor-agent"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2021"
 rust-version = "1.85"
 description = "Portable, progressively degrading Linux and Windows asset inventory agent"
@@ -38,5 +38,12 @@ tempfile = "3.15"
 codegen-units = 1
 lto = "thin"
 opt-level = "s"
-panic = "abort"
+# Unwind rather than abort. The design principle is that one failing collector
+# does not stop the others, and aborting broke it in the worst way: a panic
+# anywhere in a collector killed the whole process, so no inventory was collected,
+# queued, delivered or registered - and on a Windows service the panic message
+# went to a standard error that does not exist, leaving nothing behind at all.
+# Unwinding lets spawn_blocking catch the panic, report it as that collector's
+# error, and deliver everything the other collectors found.
+panic = "unwind"
 strip = true
