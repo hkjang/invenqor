@@ -45,6 +45,12 @@ type ConnectionFailure struct {
 	Summary   string      `json:"summary"`
 	Host      string      `json:"host,omitempty"`
 	CheckedAt time.Time   `json:"checked_at"`
+	// Detail is the underlying cause, for the operator's log only. It is never
+	// serialised, because this type is returned by the health endpoints and the
+	// classified fields above are deliberately credential-free. Set it only
+	// where the cause cannot carry a connection string - a failing migration
+	// statement can, a connection error cannot.
+	Detail string `json:"-"`
 }
 
 type Options struct {
@@ -85,6 +91,14 @@ func Open(ctx context.Context, options Options) (*Runtime, error) {
 		// of truth. Falling through to a fresh Pod-local SQLite database makes a
 		// broken production Pod look ready while serving an unrelated data set.
 		// Return only the classified, credential-free failure metadata.
+		if postgresFailure.Detail != "" {
+			return nil, fmt.Errorf(
+				"start PostgreSQL: %s (%s): %s",
+				postgresFailure.Summary,
+				postgresFailure.Code,
+				postgresFailure.Detail,
+			)
+		}
 		return nil, fmt.Errorf(
 			"start PostgreSQL: %s (%s)",
 			postgresFailure.Summary,
@@ -170,12 +184,16 @@ func openPostgres(ctx context.Context, options Options) (*sql.DB, *ConnectionFai
 	defer cancel()
 	if err := applyMigrations(timeoutContext, database, "postgres"); err != nil {
 		database.Close()
-		return nil, failure(
+		classified := failure(
 			FailureSchemaMigration,
 			"PostgreSQL schema migration failed",
 			postgresHost(options.PostgresDSN),
 			time.Now(),
 		)
+		// Without this the operator gets a code and nothing else, and the only
+		// way to learn which statement failed is to reproduce it.
+		classified.Detail = err.Error()
+		return nil, classified
 	}
 	return database, nil
 }

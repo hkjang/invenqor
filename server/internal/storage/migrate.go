@@ -16,13 +16,13 @@ func applyMigrations(ctx context.Context, db *sql.DB, dialect string) error {
 	if dialect != "sqlite" && dialect != "postgres" {
 		return fmt.Errorf("unsupported migration dialect %q", dialect)
 	}
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version BIGINT PRIMARY KEY,
-			applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`); err != nil {
-		return fmt.Errorf("create migration tracking table: %w", err)
-	}
+	// The advisory lock is taken before anything touches the schema, including
+	// the tracking table. CREATE TABLE IF NOT EXISTS is not atomic against a
+	// concurrent creation in PostgreSQL: both instances find no table, both
+	// create it, and the loser fails with a duplicate key on
+	// pg_type_typname_nsp_index. Two Pods starting together on an empty database
+	// - a rolling update, or a Deployment scaled past one replica - is exactly
+	// that case, and all but one of them exited at boot.
 	var target migrationTarget = db
 	if dialect == "postgres" {
 		connection, err := db.Conn(ctx)
@@ -40,6 +40,13 @@ func applyMigrations(ctx context.Context, db *sql.DB, dialect string) error {
 			context.Background(), "SELECT pg_advisory_unlock($1)", lockID,
 		)
 		target = connection
+	}
+	if _, err := target.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version BIGINT PRIMARY KEY,
+			applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+		return fmt.Errorf("create migration tracking table: %w", err)
 	}
 	entries, err := fs.ReadDir(migrations.Files, dialect)
 	if err != nil {
