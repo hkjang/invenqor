@@ -146,9 +146,33 @@ pub async fn collect_all_within(
             });
             continue;
         }
+        // Named before it runs, so that when a collector takes the process down -
+        // a panic aborts, and a bad system call raises an access violation, and
+        // neither leaves anything on a service's discarded standard error - the
+        // last line in the log is the collector that did it.
+        tracing::info!(collector = name, "collector started");
         tasks.push((
             name,
-            tokio::task::spawn_blocking(move || collector.collect(collected_at)),
+            tokio::task::spawn_blocking(move || {
+                let started = Instant::now();
+                let outcome = collector.collect(collected_at);
+                let elapsed = started.elapsed().as_millis();
+                match &outcome {
+                    Ok(records) => tracing::info!(
+                        collector = name,
+                        records = records.len(),
+                        elapsed_ms = elapsed as u64,
+                        "collector finished"
+                    ),
+                    Err(error) => tracing::warn!(
+                        collector = name,
+                        elapsed_ms = elapsed as u64,
+                        error = %format!("{error:#}"),
+                        "collector failed"
+                    ),
+                }
+                outcome
+            }),
         ));
     }
 

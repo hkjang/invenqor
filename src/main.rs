@@ -259,6 +259,8 @@ async fn run() -> Result<i32> {
     }
 
     init_logging(&config.agent.state_dir);
+    log_panics();
+    let run_marker = note_run_boundary(&config.agent.state_dir);
     if !config_present && config_path == default_config {
         tracing::warn!(
             config = %config_path.display(),
@@ -312,7 +314,14 @@ async fn run() -> Result<i32> {
             }
         }
     } else {
-        agent.run().await.map(|()| 0)
+        let outcome = agent.run().await.map(|()| 0);
+        // Only a run that returned - a stop the service manager asked for, or a
+        // requested restart - clears the marker. A crash leaves it, and the next
+        // start says so.
+        if outcome.is_ok() {
+            let _ = std::fs::remove_file(&run_marker);
+        }
+        outcome
     }
 }
 
@@ -573,6 +582,55 @@ fn init_logging(state_dir: &Path) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// Routes panics into the log.
+///
+/// The release profile aborts on panic, and the default hook writes its message
+/// to standard error - which a Windows service does not have. A panic therefore
+/// killed the process leaving nothing behind at all: the log showed the four
+/// start-up lines, then silence, then the service manager starting it again. The
+/// hook runs before the abort, so this is the one chance to record why.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|value| format!("{}:{}", value.file(), value.line()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        tracing::error!(
+            location = %location,
+            panic = %message,
+            "the agent panicked and is aborting; this is a bug"
+        );
+        default(info);
+    }));
+}
+
+/// Records that this run started, and reports whether the previous one ended.
+///
+/// A process that dies without unwinding leaves the marker behind. Finding it at
+/// start-up is what turns "the log begins again every twenty-eight seconds" -
+/// which an operator has to notice and interpret - into a statement.
+fn note_run_boundary(state_dir: &Path) -> std::path::PathBuf {
+    let marker = state_dir.join("running.marker");
+    if marker.exists() {
+        tracing::warn!(
+            marker = %marker.display(),
+            "the previous run did not shut down cleanly; if this repeats every few \
+             seconds the agent is crashing and being restarted by the service manager"
+        );
+    }
+    if let Err(error) = std::fs::write(&marker, std::process::id().to_string()) {
+        tracing::debug!(error = %error, "could not write the run marker");
+    }
+    marker
 }
 
 fn print_help() {
