@@ -216,6 +216,39 @@ impl StateStore {
             .with_context(|| format!("parse queued event {}", path.display()))
     }
 
+    /// Moves an event that cannot be read out of the delivery queue.
+    ///
+    /// The queue is drained oldest first, and an event that fails to parse used
+    /// to abort the whole cycle with the file still in place - so the next cycle
+    /// reached the same file and failed the same way, and the Agent never
+    /// delivered anything again while its queue filled behind the blockage.
+    ///
+    /// Enqueueing writes atomically, so a half-written file is unlikely; an
+    /// event queued by one version and read back by another after an automatic
+    /// update is the realistic way to get here, along with anything that damages
+    /// the file underneath us.
+    ///
+    /// Moved rather than deleted: it is collected inventory, and an operator
+    /// looking into why an event never arrived needs to see it. It leaves the
+    /// queue directory, so it no longer blocks delivery and no longer counts
+    /// against the queue limit.
+    pub fn quarantine(&self, path: &Path) -> Result<PathBuf> {
+        anyhow::ensure!(
+            path.parent() == Some(self.queue.as_path()),
+            "refusing to quarantine a file outside the queue"
+        );
+        let directory = self.root.join("queue-unreadable");
+        create_secure_dir(&directory)?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("queued event has no file name"))?;
+        let destination = directory.join(name);
+        fs::rename(path, &destination).with_context(|| {
+            format!("quarantine {} to {}", path.display(), destination.display())
+        })?;
+        Ok(destination)
+    }
+
     pub fn acknowledge(&self, path: &Path) -> Result<()> {
         anyhow::ensure!(
             path.parent() == Some(self.queue.as_path()),
@@ -521,5 +554,59 @@ mod tests {
             StateStore::effective_inventory(&[previous], &[], false).len(),
             1
         );
+    }
+
+    /// The queue is drained oldest first, and an event that cannot be parsed
+    /// used to abort the cycle with the file still in place - so every later
+    /// cycle reached the same file and failed identically, and the Agent stopped
+    /// delivering anything at all while its queue filled up behind the blockage.
+    ///
+    /// Writing is atomic, so a torn file is unlikely; reading back an event
+    /// queued by a different version after an automatic update is the realistic
+    /// way to get one, along with anything that damages the file underneath us.
+    #[test]
+    fn an_unreadable_event_leaves_the_queue_instead_of_blocking_it() {
+        let root = tempfile::tempdir().unwrap();
+        let store = StateStore::open(root.path(), 1024 * 1024).unwrap();
+
+        let bad = store.queue.join(format!("{:039}-corrupt.jsonl", 1));
+        fs::write(&bad, b"{ this was readable when it was written").unwrap();
+        let good = store.queue.join(format!("{:039}-intact.jsonl", 2));
+        let envelope = Envelope {
+            schema_version: 1,
+            event_id: "event-1".into(),
+            agent_id: "agent-1".into(),
+            created_at: 1,
+            kind: EnvelopeKind::Heartbeat,
+            snapshot_hash: "hash".into(),
+            snapshot: None,
+            changes: Vec::new(),
+            collection_errors: Vec::new(),
+        };
+        fs::write(&good, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        // Oldest first, so the damaged one is reached before the intact one.
+        assert_eq!(store.pending().unwrap(), vec![bad.clone(), good.clone()]);
+        assert!(store.read_envelope(&bad).is_err());
+
+        let moved = store.quarantine(&bad).unwrap();
+        assert!(moved.exists(), "the event must be kept for inspection");
+        assert!(
+            !moved.starts_with(&store.queue),
+            "a quarantined event must leave the queue directory: {}",
+            moved.display()
+        );
+
+        assert_eq!(
+            store.pending().unwrap(),
+            vec![good.clone()],
+            "delivery must continue with the events that can still be read"
+        );
+        assert_eq!(
+            store.queue_bytes().unwrap(),
+            fs::metadata(&good).unwrap().len(),
+            "a quarantined event must stop counting against the queue limit"
+        );
+        store.read_envelope(&good).unwrap();
     }
 }

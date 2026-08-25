@@ -219,7 +219,25 @@ impl Agent {
         let mut last_request_id = None;
         let mut last_policy_version = None;
         for path in self.store.pending()? {
-            let envelope = self.store.read_envelope(&path)?;
+            let envelope = match self.store.read_envelope(&path) {
+                Ok(value) => value,
+                Err(error) => {
+                    // One unreadable event must not end the cycle: the queue is
+                    // drained oldest first, so aborting here left the same file
+                    // in place for the next cycle to fail on, and nothing was
+                    // ever delivered again.
+                    let quarantined = self.store.quarantine(&path);
+                    tracing::error!(
+                        event = %path.display(),
+                        moved_to = ?quarantined.as_ref().ok(),
+                        error = %error,
+                        "a queued event could not be read; moving it aside and \
+                         continuing with the rest of the queue"
+                    );
+                    quarantined?;
+                    continue;
+                }
+            };
             let first_attempt = self
                 .transport
                 .as_ref()
