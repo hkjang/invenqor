@@ -48,6 +48,39 @@ jobs:
       - run: go build ./cmd/invenqor-server
         working-directory: server
 
+  server-postgres:
+    # The suite defaults to the SQLite fallback because it needs nothing
+    # installed, and that let two defects reach production while every test
+    # passed: a LIKE on a JSONB column that failed every ingest with SQLSTATE
+    # 42883, and one parameter reused for two columns whose types PostgreSQL
+    # deduced differently, which made every relation approval return HTTP 500.
+    # Neither is reachable from SQLite. See scripts/test-postgres.sh.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: invenqor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Test against PostgreSQL
+        run: go test ./...
+        working-directory: server
+        env:
+          INVENQOR_TEST_POSTGRES_DSN: postgres://postgres:test@127.0.0.1:5432/invenqor?sslmode=disable
+
   test:
     runs-on: ubuntu-latest
     steps:

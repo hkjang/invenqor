@@ -96,6 +96,34 @@ try {
     foreach ($required in @('system', 'process', 'service', 'software.package')) {
         if ($categories -notcontains $required) { throw "Windows collector did not emit $required" }
     }
+
+    # Four required categories left six of the ten collectors unchecked: one that
+    # failed - or that died and took the cycle with it - still produced a snapshot
+    # that satisfied the list. Assert on the collectors themselves.
+    if (@($snapshot.errors).Count -ne 0) {
+        throw ("Windows collectors reported errors: " + ($snapshot.errors | ConvertTo-Json -Depth 6))
+    }
+    $agentLog = Join-Path $agentState 'agent.log'
+    if (-not (Test-Path -LiteralPath $agentLog)) { throw "Agent wrote no log at $agentLog" }
+    $logText = Get-Content -LiteralPath $agentLog -Raw
+    $started = [regex]::Matches($logText, 'collector started collector="([a-z]+)"')
+    $finished = [regex]::Matches($logText, 'collector finished collector="([a-z]+)"')
+    # config/config.windows.toml enables all ten (process defaults to true). If a
+    # collector is deliberately disabled there, change this number with it.
+    if ($started.Count -ne 10) {
+        throw "Ten collectors should start, $($started.Count) did"
+    }
+    if ($finished.Count -ne $started.Count) {
+        # The collector that started last and never finished is the one that did
+        # not survive - the same line an operator reads out of a failing host.
+        $startedNames = @($started | ForEach-Object { $_.Groups[1].Value })
+        $finishedNames = @($finished | ForEach-Object { $_.Groups[1].Value })
+        $missing = @($startedNames | Where-Object { $finishedNames -notcontains $_ })
+        throw ("These collectors started and never finished: " + ($missing -join ', '))
+    }
+    if ($logText -match 'the agent panicked') {
+        throw ("A collector panicked: " + ($logText -split "`n" | Select-String 'the agent panicked'))
+    }
     $system = @($snapshot.records | Where-Object { $_.category -eq 'system' })[0]
     if ($system.payload.os_family -ne 'windows') { throw 'System payload is not Windows' }
     if ([string]::IsNullOrWhiteSpace([string]$system.payload.os_name)) {
