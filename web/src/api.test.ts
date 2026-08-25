@@ -86,4 +86,35 @@ describe("API client", () => {
       message: expect.stringContaining("API/Ingress"),
     });
   });
+
+  // The Server puts a request ID on every error and the console's guidance
+  // tells the reader to search 진단 로그 for it. Every caller shows only
+  // (reason as Error).message, so if it is not in the message it is not on
+  // screen - nothing reads APIError.body.
+  it("shows the request ID the Server reported with the failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        error: {code: "INTERNAL_ERROR", message: "요청을 완료하지 못했습니다."},
+        request_id: "pod-a/abc123-000042",
+      }), {status: 500, headers: {"Content-Type": "application/json"}}),
+    ));
+
+    const error = await api("/api/v1/assets").catch(reason => reason);
+
+    expect((error as Error).message).toContain("요청을 완료하지 못했습니다.");
+    expect((error as Error).message).toContain("pod-a/abc123-000042");
+  });
+
+  it("leaves the message alone when the failure carries no request ID", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        failure: {summary: "PostgreSQL connection failed"},
+      }), {status: 503, headers: {"Content-Type": "application/json"}}),
+    ));
+
+    const error = await api("/api/v1/admin/settings").catch(reason => reason);
+
+    expect((error as Error).message).toBe("PostgreSQL connection failed");
+    expect((error as Error).message).not.toContain("요청 ID");
+  });
 });

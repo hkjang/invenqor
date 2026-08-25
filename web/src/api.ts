@@ -54,12 +54,22 @@ export const api = async <T,>(
       ? body as {
         error?: {message?: string};
         failure?: {summary?: string};
+        request_id?: string;
       }
       : undefined;
+    const message = payload?.error?.message ||
+      payload?.failure?.summary ||
+      `서버 요청에 실패했습니다. (HTTP ${response.status}) API/Ingress 경로와 Server 로그를 확인하십시오.`;
+    // The Server puts a request ID on every error, and the console's own
+    // guidance tells the reader to search 진단 로그 for it. It was never shown:
+    // every caller displays (reason as Error).message and nothing reads
+    // APIError.body, so the id was carried and dropped. Appending it here
+    // reaches all of them without touching a single call site.
+    const requestID = typeof payload?.request_id === "string"
+      ? payload.request_id.trim()
+      : "";
     throw new APIError(
-      payload?.error?.message ||
-        payload?.failure?.summary ||
-        `서버 요청에 실패했습니다. (HTTP ${response.status}) API/Ingress 경로와 Server 로그를 확인하십시오.`,
+      requestID ? `${message} (요청 ID: ${requestID})` : message,
       response.status,
       body,
     );
