@@ -116,11 +116,12 @@ const consumeAuthErrorFromURL = (): {code: string; requestID: string} | null => 
   return {code, requestID};
 };
 
-function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete }: {
+function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete, keycloakUnreadable }: {
   onLogin: (user: User, csrf: string) => void;
   systemInfo: SystemInfo | null;
   keycloakEnabled: boolean;
   keycloakIncomplete: boolean;
+  keycloakUnreadable: boolean;
 }) {
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -161,10 +162,22 @@ function Login({ onLogin, systemInfo, keycloakEnabled, keycloakIncomplete }: {
         {error && <div className="error">{error}</div>}
         <button className="primary" type="submit">안전하게 로그인 <ChevronRight size={18}/></button>
         {keycloakEnabled && <a className="sso" href="/api/v1/auth/keycloak/start">Keycloak으로 계속</a>}
-        {keycloakIncomplete && <p className="muted sso-incomplete">
-          Keycloak 로그인이 활성화되어 있지만 client secret이 없어 사용할 수 없습니다.
-          관리자가 설정 → Keycloak에서 secret을 저장해야 합니다.
-        </p>}
+        {/* A stored-but-undecryptable secret used to make the button vanish with
+            no explanation, because the readiness request failed and the failure
+            was swallowed. It is a different problem from "not configured" and
+            needs a different answer. */}
+        {keycloakUnreadable
+          ? <p className="muted sso-incomplete">
+              저장된 Keycloak client secret을 이 인스턴스의 master key로 복호화할 수
+              없어 SSO를 사용할 수 없습니다. 모든 replica가 <code>master.key</code>가
+              있는 상태 디렉터리를 공유해야 합니다. 공유 볼륨으로 마운트하거나 모든
+              인스턴스에 같은 <code>INVENQOR_MASTER_KEY</code>를 설정한 뒤 secret을
+              다시 저장하십시오.
+            </p>
+          : keycloakIncomplete && <p className="muted sso-incomplete">
+              Keycloak 로그인이 활성화되어 있지만 client secret이 없어 사용할 수 없습니다.
+              관리자가 설정 → Keycloak에서 secret을 저장해야 합니다.
+            </p>}
         <ProductVersion info={systemInfo}/>
       </form>
     </section>
@@ -213,6 +226,7 @@ function App() {
   const [systemInfo, setSystemInfo] = React.useState<SystemInfo|null>(null);
   const [keycloakEnabled, setKeycloakEnabled] = React.useState(false);
   const [keycloakIncomplete, setKeycloakIncomplete] = React.useState(false);
+  const [keycloakUnreadable, setKeycloakUnreadable] = React.useState(false);
   const [bootstrap, setBootstrap] = React.useState<BootstrapStatus|null>(null);
   const [preferences, setPreferences] = React.useState<UserPreferences>(defaultPreferences);
   const [security,setSecurity]=React.useState<AccountSecurity|undefined>(undefined);
@@ -229,8 +243,9 @@ function App() {
     api<SystemInfo>(path).then(setSystemInfo).catch(()=>{});
   },[user?.id]);
   React.useEffect(()=>{
-    api<{keycloak:boolean; keycloak_incomplete?:boolean}>("/api/v1/auth/methods")
-      .then(v=>{ setKeycloakEnabled(v.keycloak); setKeycloakIncomplete(!!v.keycloak_incomplete); })
+    api<{keycloak:boolean; keycloak_incomplete?:boolean; keycloak_secret_unreadable?:boolean}>("/api/v1/auth/methods")
+      .then(v=>{ setKeycloakEnabled(v.keycloak); setKeycloakIncomplete(!!v.keycloak_incomplete);
+        setKeycloakUnreadable(!!v.keycloak_secret_unreadable); })
       .catch(()=>{});
   },[]);
   React.useEffect(()=>{ api<BootstrapStatus>("/api/v1/bootstrap/status").then(setBootstrap).catch(()=>{}); },[]);
@@ -275,7 +290,7 @@ function App() {
     return () => media.removeEventListener("change", synchronize);
   }, [preferences]);
   if (bootstrap?.required) return <BootstrapSetup onComplete={() => setBootstrap({required:false})}/>;
-  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
+  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} keycloakUnreadable={keycloakUnreadable} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
   const visibleNavigation=navigation.filter(item=>canOpenNavigationItem(item,user));
   const personalPage=page==="account"||page==="preferences";
   const activePage=personalPage||visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;

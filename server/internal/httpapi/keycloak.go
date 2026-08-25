@@ -59,21 +59,42 @@ func (s *Server) authMethods(response http.ResponseWriter, request *http.Request
 		s.internalError(response, request, err)
 		return
 	}
-	secretConfigured, err := s.oidcService.ClientSecretConfigured(request.Context())
+	state, err := s.oidcService.ClientSecretState(request.Context())
 	if err != nil {
 		s.internalError(response, request, err)
 		return
+	}
+	secretConfigured := state == auth.ClientSecretReady
+	unreadable := state == auth.ClientSecretUnreadable
+	if unreadable {
+		// This used to be a 500, which the login page's fetch swallowed: the
+		// Keycloak button simply vanished after a restart and nothing anywhere
+		// said why. It is recorded so it also appears in the Server log screen.
+		s.recordDiagnostic(request, diagnostics.Event{
+			Level:     "error",
+			Component: "keycloak",
+			EventCode: "KEYCLOAK_SECRET_UNREADABLE",
+			Message: "a Keycloak client secret is stored but this instance's " +
+				"master key cannot decrypt it, so SSO is unavailable",
+			Details: map[string]any{
+				"remediation": "Every replica must share the state directory that " +
+					"holds master.key. Mount it as a shared read-write volume, or " +
+					"set INVENQOR_MASTER_KEY to the same value on every instance; " +
+					"then re-save the Keycloak client secret.",
+			},
+		})
 	}
 	// Offering the button without a client secret sends the user into a failed
 	// redirect, so report readiness rather than the stored flag alone.
 	ready := settings.Enabled && secretConfigured
 	writeJSON(response, http.StatusOK, map[string]any{
-		"local":                    true,
-		"keycloak":                 ready,
-		"keycloak_enabled":         settings.Enabled,
-		"keycloak_client_secret":   secretConfigured,
-		"keycloak_incomplete":      settings.Enabled && !secretConfigured,
-		"keycloak_provider_issuer": settings.EffectiveIssuer(),
+		"local":                      true,
+		"keycloak":                   ready,
+		"keycloak_enabled":           settings.Enabled,
+		"keycloak_client_secret":     secretConfigured,
+		"keycloak_incomplete":        settings.Enabled && !secretConfigured,
+		"keycloak_secret_unreadable": unreadable,
+		"keycloak_provider_issuer":   settings.EffectiveIssuer(),
 	})
 }
 

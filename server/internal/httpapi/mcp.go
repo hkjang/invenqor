@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -545,17 +546,18 @@ func (s *Server) mcpCallTool(
 	}
 	var result any
 	var err error
+	arguments := newMCPArguments(definition.Name, call.Arguments, definition.InputSchema)
 	switch call.Name {
 	case "asset_search":
-		result, err = s.mcpAssetSearch(r, call.Arguments)
+		result, err = s.mcpAssetSearch(r, arguments)
 	case "software_inventory":
-		result, err = s.mcpSoftwareInventory(r, call.Arguments)
+		result, err = s.mcpSoftwareInventory(r, arguments)
 	case "asset_get":
-		result, err = s.mcpAssetGet(r, call.Arguments)
+		result, err = s.mcpAssetGet(r, arguments)
 	case "asset_relations":
-		result, err = s.mcpAssetRelations(r, call.Arguments)
+		result, err = s.mcpAssetRelations(r, arguments)
 	case "agents_list":
-		result, err = s.mcpAgentsList(r, call.Arguments)
+		result, err = s.mcpAgentsList(r, arguments)
 	}
 	if err != nil {
 		writeMCPToolError(w, request.ID, err.Error(), protocolVersion)
@@ -569,23 +571,24 @@ func (s *Server) mcpCallTool(
 	}, protocolVersion)
 }
 
-func (s *Server) mcpAssetSearch(r *http.Request, raw json.RawMessage) (any, error) {
-	var input struct {
-		Q                   string `json:"q"`
-		Type                string `json:"type"`
-		Status              string `json:"status"`
-		IncludeObservations bool   `json:"include_observations"`
-		Limit               int    `json:"limit"`
-		Offset              int    `json:"offset"`
+func (s *Server) mcpAssetSearch(r *http.Request, arguments *mcpArguments) (any, error) {
+	input := struct {
+		Q                   string
+		Type                string
+		Status              string
+		IncludeObservations bool
+		Limit               int
+		Offset              int
+	}{
+		Q:                   arguments.String("q"),
+		Type:                arguments.String("type"),
+		Status:              arguments.String("status"),
+		IncludeObservations: arguments.Bool("include_observations", false),
+		Limit:               arguments.Int("limit", 50, 1, 100),
+		Offset:              arguments.Int("offset", 0, 0, 1_000_000),
 	}
-	if len(raw) > 0 && strictJSON(raw, &input) != nil {
-		return nil, errors.New("asset_search arguments are invalid")
-	}
-	if input.Limit == 0 {
-		input.Limit = 50
-	}
-	if input.Limit < 1 || input.Limit > 100 || input.Offset < 0 || input.Offset > 1_000_000 {
-		return nil, errors.New("asset_search pagination is out of range")
+	if err := arguments.Err(); err != nil {
+		return nil, err
 	}
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT `+assetColumns+` FROM assets
@@ -609,34 +612,43 @@ func (s *Server) mcpAssetSearch(r *http.Request, raw json.RawMessage) (any, erro
 		}
 		items = append(items, item)
 	}
-	return map[string]any{"items": items, "limit": input.Limit, "offset": input.Offset}, rows.Err()
+	return map[string]any{
+		"items": items, "limit": input.Limit, "offset": input.Offset,
+		// A full page is indistinguishable from the last page without this, so a
+		// caller either stops early or pages forever.
+		"has_more":    len(items) == input.Limit,
+		"next_offset": input.Offset + len(items),
+	}, rows.Err()
 }
 
-func (s *Server) mcpSoftwareInventory(r *http.Request, raw json.RawMessage) (any, error) {
-	var input struct {
-		Q          string `json:"q"`
-		Role       string `json:"role"`
-		Vendor     string `json:"vendor"`
-		Runtime    string `json:"runtime_state"`
-		Confidence string `json:"confidence"`
-		Limit      int    `json:"limit"`
-		Offset     int    `json:"offset"`
+func (s *Server) mcpSoftwareInventory(r *http.Request, arguments *mcpArguments) (any, error) {
+	input := struct {
+		Q          string
+		Role       string
+		Vendor     string
+		Runtime    string
+		Confidence string
+		Limit      int
+		Offset     int
+	}{
+		Q:          arguments.String("q"),
+		Role:       arguments.String("role"),
+		Vendor:     arguments.String("vendor"),
+		Runtime:    arguments.String("runtime_state"),
+		Confidence: arguments.String("confidence"),
+		Limit:      arguments.Int("limit", 50, 1, 100),
+		Offset:     arguments.Int("offset", 0, 0, 1_000_000),
 	}
-	if len(raw) > 0 && strictJSON(raw, &input) != nil {
-		return nil, errors.New("software_inventory arguments are invalid")
+	if err := arguments.Err(); err != nil {
+		return nil, err
 	}
-	if input.Limit == 0 {
-		input.Limit = 50
+	// A rejected value names what is accepted, so the caller can choose one
+	// instead of guessing again.
+	if err := mustBeOneOf("runtime_state", input.Runtime, "running", "stopped", "unknown"); err != nil {
+		return nil, fmt.Errorf("software_inventory: %w", err)
 	}
-	if input.Limit < 1 || input.Limit > 100 || input.Offset < 0 || input.Offset > 1_000_000 {
-		return nil, errors.New("software_inventory pagination is out of range")
-	}
-	if input.Runtime != "" && input.Runtime != "running" &&
-		input.Runtime != "stopped" && input.Runtime != "unknown" {
-		return nil, errors.New("software_inventory runtime_state is invalid")
-	}
-	if input.Confidence != "" && input.Confidence != "high" && input.Confidence != "review" {
-		return nil, errors.New("software_inventory confidence is invalid")
+	if err := mustBeOneOf("confidence", input.Confidence, "high", "review"); err != nil {
+		return nil, fmt.Errorf("software_inventory: %w", err)
 	}
 	return s.querySoftwareInventory(r.Context(), softwareInventoryQuery{
 		Query:        input.Q,
@@ -649,12 +661,10 @@ func (s *Server) mcpSoftwareInventory(r *http.Request, raw json.RawMessage) (any
 	})
 }
 
-func (s *Server) mcpAssetGet(r *http.Request, raw json.RawMessage) (any, error) {
-	var input struct {
-		AssetID string `json:"asset_id"`
-	}
-	if strictJSON(raw, &input) != nil || input.AssetID == "" {
-		return nil, errors.New("asset_id is required")
+func (s *Server) mcpAssetGet(r *http.Request, arguments *mcpArguments) (any, error) {
+	input := struct{ AssetID string }{AssetID: arguments.RequiredString("asset_id")}
+	if err := arguments.Err(); err != nil {
+		return nil, err
 	}
 	asset, err := scanAsset(s.database.DB().QueryRowContext(r.Context(),
 		`SELECT `+assetColumns+` FROM assets WHERE id=$1 AND deleted_at IS NULL`,
@@ -666,12 +676,10 @@ func (s *Server) mcpAssetGet(r *http.Request, raw json.RawMessage) (any, error) 
 	return map[string]any{"asset": asset}, err
 }
 
-func (s *Server) mcpAssetRelations(r *http.Request, raw json.RawMessage) (any, error) {
-	var input struct {
-		AssetID string `json:"asset_id"`
-	}
-	if strictJSON(raw, &input) != nil || input.AssetID == "" {
-		return nil, errors.New("asset_id is required")
+func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (any, error) {
+	input := struct{ AssetID string }{AssetID: arguments.RequiredString("asset_id")}
+	if err := arguments.Err(); err != nil {
+		return nil, err
 	}
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT id, source_asset_id, relation_type, target_asset_id,
@@ -702,18 +710,10 @@ func (s *Server) mcpAssetRelations(r *http.Request, raw json.RawMessage) (any, e
 	return map[string]any{"relations": items}, rows.Err()
 }
 
-func (s *Server) mcpAgentsList(r *http.Request, raw json.RawMessage) (any, error) {
-	var input struct {
-		Limit int `json:"limit"`
-	}
-	if len(raw) > 0 && strictJSON(raw, &input) != nil {
-		return nil, errors.New("agents_list arguments are invalid")
-	}
-	if input.Limit == 0 {
-		input.Limit = 50
-	}
-	if input.Limit < 1 || input.Limit > 100 {
-		return nil, errors.New("agents_list limit is out of range")
+func (s *Server) mcpAgentsList(r *http.Request, arguments *mcpArguments) (any, error) {
+	input := struct{ Limit int }{Limit: arguments.Int("limit", 50, 1, 100)}
+	if err := arguments.Err(); err != nil {
+		return nil, err
 	}
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT agent_id, hostname, status, version, os_name, architecture,
@@ -738,7 +738,10 @@ func (s *Server) mcpAgentsList(r *http.Request, raw json.RawMessage) (any, error
 			"last_seen_at": apiTime(lastSeen), "last_inventory_at": apiTime(lastInventory),
 		})
 	}
-	return map[string]any{"agents": items}, rows.Err()
+	return map[string]any{
+		"agents": items, "limit": input.Limit, "count": len(items),
+		"has_more": len(items) == input.Limit,
+	}, rows.Err()
 }
 
 func strictJSON(raw []byte, destination any) error {
@@ -837,4 +840,21 @@ func rawID(id json.RawMessage) any {
 		return nil
 	}
 	return value
+}
+
+// mustBeOneOf rejects a value the schema constrains to a fixed set, naming the
+// set. "runtime_state is invalid" told the caller nothing it could act on.
+func mustBeOneOf(name, value string, allowed ...string) error {
+	if value == "" {
+		return nil
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%q must be one of %s, received %q",
+		name, strings.Join(allowed, ", "), value,
+	)
 }

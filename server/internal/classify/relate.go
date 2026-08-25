@@ -3,8 +3,10 @@ package classify
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -203,12 +205,23 @@ func ProposeDuplicatesByMachineIdentity(
 	if machineIdentifier == "" || assetID == "" {
 		return nil
 	}
+	// payload_json is JSONB on PostgreSQL and TEXT on the SQLite fallback, and
+	// PostgreSQL has no LIKE for jsonb - the query failed with SQLSTATE 42883
+	// ("operator does not exist: jsonb ~~ unknown") on every ingest, which the
+	// SQLite-backed tests could never have caught. Casting gives one statement
+	// that both engines accept.
+	//
+	// The LIKE is only a prefilter. A machine identifier is a UUID that can
+	// legitimately appear elsewhere in a system payload - a disk serial, a
+	// tenant id - and treating any occurrence as a match proposes a merge
+	// between two unrelated hosts. The payload comes back so the identity
+	// fields can be compared exactly.
 	rows, err := transaction.QueryContext(
 		ctx,
-		`SELECT s.asset_id FROM asset_sources s
+		`SELECT s.asset_id, CAST(s.payload_json AS TEXT) FROM asset_sources s
 		  WHERE s.category = 'system' AND s.agent_id <> $1
 		    AND s.deleted_at IS NULL
-		    AND s.payload_json LIKE $2`,
+		    AND CAST(s.payload_json AS TEXT) LIKE $2`,
 		agentInternalID,
 		"%"+machineIdentifier+"%",
 	)
@@ -218,9 +231,12 @@ func ProposeDuplicatesByMachineIdentity(
 	defer rows.Close()
 	others := make([]string, 0, 2)
 	for rows.Next() {
-		var other string
-		if err := rows.Scan(&other); err != nil {
+		var other, payload string
+		if err := rows.Scan(&other, &payload); err != nil {
 			return err
+		}
+		if !identifiesMachine(payload, machineIdentifier) {
+			continue
 		}
 		others = append(others, other)
 	}
@@ -233,4 +249,22 @@ func ProposeDuplicatesByMachineIdentity(
 		}
 	}
 	return nil
+}
+
+// identifiesMachine reports whether the payload names this identifier in one of
+// the fields that actually identify a machine, rather than merely containing the
+// text somewhere.
+func identifiesMachine(payload string, identifier string) bool {
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		// An unreadable payload is not evidence of anything.
+		return false
+	}
+	for _, field := range []string{"machine_id", "firmware_uuid", "dmi_product_uuid"} {
+		if value, ok := decoded[field].(string); ok &&
+			strings.EqualFold(strings.TrimSpace(value), identifier) {
+			return true
+		}
+	}
+	return false
 }

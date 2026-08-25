@@ -33,7 +33,10 @@ var (
 	ErrOIDCUsername     = errors.New("OIDC response has no usable username")
 	ErrOIDCUserInactive = errors.New("Keycloak-linked user is inactive")
 	ErrOIDCSecret       = errors.New("Keycloak client secret is required")
-	ErrOIDCRole         = errors.New("Keycloak role mapping references an unknown role")
+	// ErrOIDCSecretUnreadable means a sealed secret exists but this instance's
+	// master key cannot decrypt it.
+	ErrOIDCSecretUnreadable = errors.New("the stored Keycloak client secret cannot be decrypted with this instance's master key")
+	ErrOIDCRole             = errors.New("Keycloak role mapping references an unknown role")
 	// ErrOIDCUsernameTaken separates "a local account owns this name" from a
 	// generic database failure. Without it the administrator sees only a failed
 	// login and has no way to learn that renaming the local account fixes it.
@@ -244,14 +247,47 @@ func (service *OIDCService) Settings(ctx context.Context) (OIDCSettings, error) 
 	return settings, nil
 }
 
+// ClientSecretState distinguishes the three things that can be true of the
+// stored client secret. They used to collapse into one boolean plus an error,
+// and the console's fetch swallowed the error - so a secret that was present but
+// undecryptable looked exactly like no secret at all: the Keycloak button simply
+// disappeared after a restart with nothing said anywhere.
+type ClientSecretState int
+
+const (
+	ClientSecretAbsent ClientSecretState = iota
+	ClientSecretReady
+	// ClientSecretUnreadable means a sealed secret is stored but this instance's
+	// master key cannot open it. The usual cause is a replacement pod that
+	// generated its own key because the state directory is not shared across
+	// replicas, and every other sealed setting is in the same position.
+	ClientSecretUnreadable
+)
+
+func (service *OIDCService) ClientSecretState(
+	ctx context.Context,
+) (ClientSecretState, error) {
+	secret, err := service.clientSecret(ctx)
+	if err != nil {
+		if errors.Is(err, ErrOIDCSecretUnreadable) {
+			return ClientSecretUnreadable, nil
+		}
+		return ClientSecretAbsent, err
+	}
+	if strings.TrimSpace(secret) == "" {
+		return ClientSecretAbsent, nil
+	}
+	return ClientSecretReady, nil
+}
+
 func (service *OIDCService) ClientSecretConfigured(
 	ctx context.Context,
 ) (bool, error) {
-	secret, err := service.clientSecret(ctx)
+	state, err := service.ClientSecretState(ctx)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(secret) != "", nil
+	return state == ClientSecretReady, nil
 }
 
 func (service *OIDCService) SaveSettings(
@@ -844,7 +880,9 @@ func (service *OIDCService) sharedClientSecret(
 		envelope.Sealed,
 	)
 	if err != nil {
-		return "", true, fmt.Errorf("decrypt Keycloak client secret: %w", err)
+		// A stored secret this instance cannot open is a different situation
+		// from no secret, and the operator has to be told which one it is.
+		return "", true, fmt.Errorf("%w: %v", ErrOIDCSecretUnreadable, err)
 	}
 	return secret, true, nil
 }

@@ -23,7 +23,8 @@ func TestMCPSoftwareInventoryReturnsProductStateAndEvidence(t *testing.T) {
 
 	request := httptest.NewRequest("POST", "/mcp", nil)
 	result, err := server.mcpSoftwareInventory(
-		request, json.RawMessage(`{"q":"web-mcp-01","role":"web_server","vendor":"F5","runtime_state":"running","confidence":"high","limit":10}`),
+		request,
+		mcpArgumentsForTest("software_inventory", []byte(`{"q":"web-mcp-01","role":"web_server","vendor":"F5","runtime_state":"running","confidence":"high","limit":10}`)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +66,7 @@ func TestMCPAssetSearchHidesRawProcessesUnlessRequested(t *testing.T) {
 
 	count := func(raw string) int {
 		t.Helper()
-		result, err := server.mcpAssetSearch(request, json.RawMessage(raw))
+		result, err := server.mcpAssetSearch(request, mcpArgumentsForTest("asset_search", []byte(raw)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,4 +85,16 @@ func TestMCPAssetSearchHidesRawProcessesUnlessRequested(t *testing.T) {
 	if got := count(`{"limit":10,"include_observations":true}`); got != 2 {
 		t.Fatalf("forensic MCP search returned %d items, want 2", got)
 	}
+}
+
+// mcpArgumentsForTest builds the reader the tool dispatch builds, from the same
+// schema the client is given, so a test cannot pass arguments the real path
+// would reject.
+func mcpArgumentsForTest(tool string, raw []byte) *mcpArguments {
+	for index := range mcpTools {
+		if mcpTools[index].Name == tool {
+			return newMCPArguments(tool, raw, mcpTools[index].InputSchema)
+		}
+	}
+	panic("unknown tool " + tool)
 }
