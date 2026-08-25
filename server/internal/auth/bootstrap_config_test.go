@@ -4,20 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 )
 
 func TestConfiguredBootstrapCreatesInitialAdministratorOnce(t *testing.T) {
 	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	manager := NewBootstrapManager(runtime.DB(), root)
 	status, err := manager.Ensure(context.Background())
@@ -80,12 +74,7 @@ func TestConfiguredBootstrapCreatesInitialAdministratorOnce(t *testing.T) {
 
 func TestConfiguredBootstrapValidationFailurePreservesTokenClaim(t *testing.T) {
 	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	manager := NewBootstrapManager(runtime.DB(), root)
 	if _, err := manager.Ensure(context.Background()); err != nil {

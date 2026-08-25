@@ -3,21 +3,16 @@ package apikeys
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestRotationEnforcesOwnerAndGrantableScopesBeforeReturningSecret(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	ownerID := uuid.NewString()
 	otherID := uuid.NewString()
@@ -102,12 +97,7 @@ func TestRotationEnforcesOwnerAndGrantableScopesBeforeReturningSecret(t *testing
 }
 
 func TestScopeReplacementRejectsStaleRevisionAtomically(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	userID := uuid.NewString()
 	if _, err := runtime.DB().Exec(
@@ -170,12 +160,7 @@ func TestScopeReplacementRejectsStaleRevisionAtomically(t *testing.T) {
 }
 
 func TestRotationRejectsStaleKeyRevision(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	userID := uuid.NewString()
 	if _, err := runtime.DB().Exec(

@@ -3,26 +3,21 @@ package apikeys_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/apikeys"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestAPIKeyScopeLifecycleRotationAndRevocation(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	userID := uuid.NewString()
-	_, err = runtime.DB().Exec(
+	_, err := runtime.DB().Exec(
 		`INSERT INTO users(
 		 id, username, normalized_username, display_name, active, super_admin
 		 ) VALUES ($1,'key.owner','key.owner','Key Owner',TRUE,TRUE)`, userID,
@@ -112,12 +107,7 @@ func TestAPIKeyScopeLifecycleRotationAndRevocation(t *testing.T) {
 }
 
 func TestConcurrentAPIKeyScopeAdditionsDoNotLoseUpdates(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	userID := uuid.NewString()
 	if _, err := runtime.DB().Exec(
@@ -190,12 +180,7 @@ func TestConcurrentAPIKeyScopeAdditionsDoNotLoseUpdates(t *testing.T) {
 }
 
 func TestAPIKeyRejectsUnknownScopesAndExpiredKeys(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	userID := uuid.NewString()
 	_, _ = runtime.DB().Exec(

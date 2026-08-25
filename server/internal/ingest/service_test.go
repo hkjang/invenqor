@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/agents"
@@ -145,7 +147,20 @@ func TestInventoryIsIdempotentAndPreservesRawEvent(t *testing.T) {
 	).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored != string(raw) {
+	// Compared as a value, not as bytes. raw_event is JSONB on PostgreSQL, which
+	// re-serialises what it stores: key order is normalised and whitespace
+	// changes. So the retained event is semantically identical, not byte
+	// identical, and anything that ever needs the agent's exact bytes - verifying
+	// a signature over the payload, say - would need a TEXT or BYTEA column
+	// instead. Nothing reads raw_event back today; it is written and kept.
+	var storedEvent, sentEvent any
+	if err := json.Unmarshal([]byte(stored), &storedEvent); err != nil {
+		t.Fatalf("stored raw event is not JSON: %s", stored)
+	}
+	if err := json.Unmarshal(raw, &sentEvent); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(storedEvent, sentEvent) {
 		t.Fatalf("raw event was changed\n got: %s\nwant: %s", stored, raw)
 	}
 	var hostname, architecture, version string
@@ -477,15 +492,35 @@ func TestExactAgentAndServerTimestampTieUsesEventIDDeterministically(
 	// SQLite CURRENT_TIMESTAMP is second-granular, but a slow CI runner could
 	// still cross a boundary. Pin the DB receive clock so this is an exact tuple
 	// tie and verifies the final deterministic event_id comparison itself.
-	if _, err := runtime.DB().Exec(
+	//
+	// Written for both engines rather than skipped on one: the tie-break this
+	// checks is ordering logic that has to hold wherever the server runs, and a
+	// test pinned to SQLite is a test PostgreSQL never checks.
+	pinReceivedAt := []string{
 		`CREATE TRIGGER pin_agent_event_received_at
 		 AFTER INSERT ON agent_events
 		 BEGIN
 		   UPDATE agent_events SET received_at='2030-01-01 00:00:00'
 		   WHERE id=NEW.id;
 		 END`,
-	); err != nil {
-		t.Fatal(err)
+	}
+	if storagetest.Postgres() {
+		pinReceivedAt = []string{
+			`CREATE FUNCTION pin_agent_event_received_at() RETURNS TRIGGER AS $$
+			 BEGIN
+			   NEW.received_at := TIMESTAMPTZ '2030-01-01 00:00:00+00';
+			   RETURN NEW;
+			 END;
+			 $$ LANGUAGE plpgsql`,
+			`CREATE TRIGGER pin_agent_event_received_at
+			 BEFORE INSERT ON agent_events
+			 FOR EACH ROW EXECUTE FUNCTION pin_agent_event_received_at()`,
+		}
+	}
+	for _, statement := range pinReceivedAt {
+		if _, err := runtime.DB().Exec(statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 	timestamp := uint64(time.Now().Add(-time.Minute).Unix())
 	highID := "ffffffff-ffff-4fff-bfff-ffffffffffff"
@@ -959,12 +994,7 @@ func TestFirstInventoryPromotesEnrollmentHostWithoutDuplicateAsset(
 	t *testing.T,
 ) {
 	t.Parallel()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	agentService := agents.NewService(runtime.DB())
 	externalID := uuid.NewString()
@@ -1042,12 +1072,7 @@ func TestEnvelopeValidationRejectsIdentityAndHeartbeatPayload(t *testing.T) {
 
 func testService(t *testing.T) (*storage.Runtime, agents.Agent, *Service) {
 	t.Helper()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	t.Cleanup(func() { runtime.Close() })
 	agentService := agents.NewService(runtime.DB())
 	provisioned, err := agentService.ProvisionBearer(

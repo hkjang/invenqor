@@ -1,13 +1,13 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/storage"
@@ -18,13 +18,7 @@ import (
 // filters have to run in the query, and the response has to say how many entries
 // actually match.
 func TestAuditSearchFiltersInTheQueryAndReportsTheTotal(t *testing.T) {
-	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
@@ -104,13 +98,7 @@ func TestAuditSearchFiltersInTheQueryAndReportsTheTotal(t *testing.T) {
 // An audit extract is evidence, and transcribing rows out of a browser is how
 // evidence gets copied wrongly.
 func TestAuditExportWritesTheFilteredRowsAsCSV(t *testing.T) {
-	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)

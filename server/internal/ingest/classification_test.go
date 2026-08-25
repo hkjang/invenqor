@@ -266,7 +266,7 @@ func TestClassificationRulesAreCachedButInvalidatable(t *testing.T) {
 	runtime, agent, service := testService(t)
 	// Disable the environment rule and invalidate, then confirm the change lands.
 	if _, err := runtime.DB().Exec(
-		`UPDATE asset_classification_rules SET enabled = 0
+		`UPDATE asset_classification_rules SET enabled = FALSE
 		  WHERE id = '20000000-0000-0000-0000-000000000020'`,
 	); err != nil {
 		t.Fatal(err)

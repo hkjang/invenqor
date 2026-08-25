@@ -215,6 +215,11 @@ scripts/test-postgres.sh          # 전체
 scripts/test-postgres.sh -run TestSoftware   # 일부
 ```
 
+모든 패키지가 `internal/storagetest`를 통해 저장소를 엽니다. 엔진 선택이 한 곳에만
+있어서 여덟 개 사본이 따로 흘러가지 않습니다. fallback 자체가 주제인 테스트나
+SQLite 전용 SQL을 쓰는 테스트만 `storagetest.OpenSQLite`로 고정합니다 — 고정된
+테스트는 PostgreSQL이 검사하지 않는 테스트이므로 최소한으로 씁니다.
+
 일회용 PostgreSQL 컨테이너를 띄우고 같은 테스트를 그 위에서 돌린 뒤 정리합니다.
 테스트마다 별도 스키마를 씁니다.
 

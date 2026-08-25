@@ -2,20 +2,14 @@ package diagnostics
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 )
 
 func TestStoreFiltersSharedDiagnosticsAndRedactsSecrets(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	store := NewStore(runtime.DB())
 	if err := store.Record(context.Background(), Event{

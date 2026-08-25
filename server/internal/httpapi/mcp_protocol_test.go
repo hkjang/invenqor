@@ -2,14 +2,13 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
-	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/hkjang/invenqor/server/internal/version"
 )
 
@@ -467,12 +466,7 @@ func TestMCPDistinguishesParseErrorsFromInvalidRequests(t *testing.T) {
 
 func mcpProtocolTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	t.Cleanup(func() { _ = runtime.Close() })
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)

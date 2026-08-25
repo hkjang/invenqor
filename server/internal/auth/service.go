@@ -358,13 +358,21 @@ func (service *Service) ChangePassword(
 	); err != nil {
 		return fmt.Errorf("change password: %w", err)
 	}
-	if _, err := transaction.ExecContext(
-		ctx,
-		`UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP
-		 WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`,
-		principal.User.ID,
-		principal.SessionID,
-	); err != nil {
+	// Every session but the caller's own. The exclusion is only added when the
+	// caller actually has one: sessions.id is a UUID column, and a principal
+	// without a session carries an empty SessionID while an API-key principal
+	// carries "api_key:<id>" - neither is a UUID, and PostgreSQL rejects the
+	// comparison outright (SQLSTATE 22P02) where SQLite silently matches nothing.
+	// With no session of its own to keep, revoking all of the user's sessions is
+	// also the right answer.
+	revoke := `UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP
+		 WHERE user_id = $1 AND revoked_at IS NULL`
+	arguments := []any{principal.User.ID}
+	if _, err := uuid.Parse(principal.SessionID); err == nil {
+		revoke += ` AND id <> $2`
+		arguments = append(arguments, principal.SessionID)
+	}
+	if _, err := transaction.ExecContext(ctx, revoke, arguments...); err != nil {
 		return fmt.Errorf("revoke other sessions: %w", err)
 	}
 	if err := service.audit.Record(ctx, transaction, audit.Entry{

@@ -2,27 +2,21 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestEnrollmentNetworkPolicyAllowsCIDRAndRejectsSpoofedForwarding(
 	t *testing.T,
 ) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
@@ -111,12 +105,7 @@ func TestEnrollmentNetworkPolicyAllowsCIDRAndRejectsSpoofedForwarding(
 func TestAdminCanManageAgentEnrollmentPolicyAcrossServerInstances(
 	t *testing.T,
 ) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)

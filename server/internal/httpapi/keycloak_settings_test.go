@@ -6,23 +6,18 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/hkjang/invenqor/server/internal/auth"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestKeycloakAutoConfigureDiscoversAndPersistsMinimumSettings(
 	t *testing.T,
 ) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
@@ -96,12 +91,7 @@ func TestKeycloakAutoConfigureDiscoversAndPersistsMinimumSettings(
 }
 
 func TestKeycloakSettingsNormalizeNullableCollections(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
@@ -148,12 +138,7 @@ func TestKeycloakSettingsNormalizeNullableCollections(t *testing.T) {
 }
 
 func TestKeycloakSettingsRequireSecretBeforeEnable(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
@@ -187,12 +172,7 @@ func TestKeycloakSettingsRequireSecretBeforeEnable(t *testing.T) {
 }
 
 func TestKeycloakSettingsRejectUnknownMappedRole(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)

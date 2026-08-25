@@ -12,6 +12,7 @@ import (
 
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 )
 
 func authenticateInitialAdmin(
@@ -21,7 +22,7 @@ func authenticateInitialAdmin(
 ) (*http.Cookie, string) {
 	t.Helper()
 	token, err := os.ReadFile(
-		filepath.Join(testStateDir(t, runtime), "initial-admin.token"),
+		filepath.Join(storagetest.StateDir(t, runtime), "initial-admin.token"),
 	)
 	if err != nil {
 		t.Fatalf("read bootstrap token: %v", err)

@@ -1,15 +1,13 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
 
-	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 )
 
 // Every `*_at` field the console reads must be RFC 3339 with an explicit zone.
@@ -21,13 +19,7 @@ import (
 // This walks real responses rather than trusting the field types, because a new
 // endpoint that builds a map by hand is exactly how the problem returns.
 func TestAPIResponsesAlwaysCarryZonedTimestamps(t *testing.T) {
-	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, server, runtime)

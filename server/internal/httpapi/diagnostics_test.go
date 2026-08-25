@@ -3,21 +3,16 @@ package httpapi
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/hkjang/invenqor/server/internal/diagnostics"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestDiagnosticLogsAreSharedAcrossServerInstances(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	first := testServer(t, runtime)
 	cookie, csrf := authenticateInitialAdmin(t, first, runtime)

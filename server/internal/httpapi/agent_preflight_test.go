@@ -1,116 +1,17 @@
 package httpapi
 
 import (
-	"database/sql"
-
 	"context"
 	"encoding/json"
-	"fmt"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+
 	"github.com/google/uuid"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
-
-// newRuntime opens the store these tests run against.
-//
-// SQLite by default, because it needs nothing installed. Set
-// INVENQOR_TEST_POSTGRES_DSN to run the same tests against a real PostgreSQL -
-// see scripts/test-postgres.sh.
-//
-// That switch is not a nicety. The two engines disagree in ways that make a
-// SQLite-only suite report success over a broken deployment: JSONB has no text
-// operators, so a query that works here fails there with SQLSTATE 42883, and
-// SQLite's LIKE ignores ASCII case while PostgreSQL's does not, so a search that
-// matches here returns nothing there. Both of those shipped.
-//
-// Each test gets its own schema so they do not collide when run in parallel and
-// so a failing test leaves its rows behind for inspection.
-func newRuntime(t *testing.T) *storage.Runtime {
-	t.Helper()
-	options := storage.Options{SQLitePath: filepath.Join(t.TempDir(), "invenqor.db")}
-	if dsn := os.Getenv("INVENQOR_TEST_POSTGRES_DSN"); dsn != "" {
-		schema := testSchemaName(t)
-		createTestSchema(t, dsn, schema)
-		options = storage.Options{PostgresDSN: dsn, Schema: schema}
-	}
-	runtime, err := storage.Open(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { runtime.Close() })
-	return runtime
-}
-
-// testStateDir is where this test's master.key, sealed bootstrap values and
-// initial admin token live.
-//
-// In SQLite mode that is the directory holding the database file. A PostgreSQL
-// runtime has no SQLite path, and filepath.Dir("") is ".", so deriving it that
-// way put key material in the package directory and gave every test one shared
-// bootstrap store - a secret written by one test answered another test's lookup.
-// Memoised so every caller for a given runtime gets the same directory.
-// Production takes this from INVENQOR_STATE_DIR and never derives it.
-var testStateDirs sync.Map
-
-func testStateDir(t *testing.T, runtime *storage.Runtime) string {
-	t.Helper()
-	if path := runtime.SQLitePath(); path != "" {
-		return filepath.Dir(path)
-	}
-	if existing, ok := testStateDirs.Load(runtime); ok {
-		return existing.(string)
-	}
-	directory := t.TempDir()
-	actual, _ := testStateDirs.LoadOrStore(runtime, directory)
-	return actual.(string)
-}
-
-// createTestSchema makes the schema the runtime will migrate into. The server
-// sets search_path but does not create the schema, so this mirrors what an
-// operator does once before pointing the server at a non-public schema.
-func createTestSchema(t *testing.T, dsn, schema string) {
-	t.Helper()
-	database, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if _, err := database.Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Exec(`CREATE SCHEMA "` + schema + `"`); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// testSchemaName derives a PostgreSQL schema identifier from the test name.
-var testSchemaCounter atomic.Uint64
-
-func testSchemaName(t *testing.T) string {
-	t.Helper()
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			return r
-		}
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return '_'
-	}, t.Name())
-	if len(safe) > 40 {
-		safe = safe[:40]
-	}
-	return fmt.Sprintf("t_%s_%d", safe, testSchemaCounter.Add(1))
-}
 
 func getJSON(
 	t *testing.T,

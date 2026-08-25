@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,17 +14,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/hkjang/invenqor/server/internal/updates"
 )
 
 func TestPublishAgentUpdateUsesManifestSignatureV2(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	updateStore, err := updates.Open(filepath.Join(t.TempDir(), "updates"))
 	if err != nil {
@@ -212,12 +207,7 @@ func TestPublishOptionsRejectsConflictingDirectAndFileSignatures(t *testing.T) {
 }
 
 func TestPublishAgentUpdateRequiresAConfiguredVerificationKey(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	updateStore, err := updates.Open(filepath.Join(t.TempDir(), "updates"))
 	if err != nil {

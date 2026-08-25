@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hkjang/invenqor/server/internal/storagetest"
 
 	"github.com/hkjang/invenqor/server/internal/storage"
 )
@@ -100,12 +101,7 @@ func TestLoginIPRateLimitAlsoCoversUnknownUsers(t *testing.T) {
 func setupAuthUser(t *testing.T) (*storage.Runtime, User) {
 	t.Helper()
 	root := t.TempDir()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(root, "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	manager := NewBootstrapManager(runtime.DB(), root)
 	if _, err := manager.Ensure(context.Background()); err != nil {
 		runtime.Close()

@@ -2,22 +2,17 @@ package softwarecatalog
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestReconciliationMarkerTracksMissingCurrentAndOutdatedCatalog(t *testing.T) {
 	t.Parallel()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "marker.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	t.Cleanup(func() { _ = runtime.Close() })
 	agentID := uuid.NewString()
 	if _, err := runtime.DB().Exec(

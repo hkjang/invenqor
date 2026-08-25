@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,20 +10,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/hkjang/invenqor/server/internal/auth"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
-	tokenPath := filepath.Join(testStateDir(t, runtime), "initial-admin.token")
+	tokenPath := filepath.Join(storagetest.StateDir(t, runtime), "initial-admin.token")
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
 		t.Fatalf("read bootstrap token error = %v", err)
@@ -214,16 +209,11 @@ func TestInitialAdminLoginSessionAndCSRF(t *testing.T) {
 }
 
 func TestBootstrapTokenCannotBeReused(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	token, err := os.ReadFile(
-		filepath.Join(testStateDir(t, runtime), "initial-admin.token"),
+		filepath.Join(storagetest.StateDir(t, runtime), "initial-admin.token"),
 	)
 	if err != nil {
 		t.Fatalf("read bootstrap token error = %v", err)

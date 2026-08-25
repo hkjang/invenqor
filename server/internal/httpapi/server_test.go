@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/auth"
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
@@ -21,12 +23,7 @@ import (
 )
 
 func TestAutomaticAgentEnrollmentSupportsOpenAndProtectedModes(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	openBody := map[string]string{
@@ -124,12 +121,7 @@ func TestAutomaticAgentEnrollmentSupportsOpenAndProtectedModes(t *testing.T) {
 }
 
 func TestDashboardStatisticsUseAuthoritativeTotals(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	now := time.Now().UTC()
 	agentInternalID := uuid.NewString()
@@ -211,12 +203,7 @@ func TestDashboardStatisticsUseAuthoritativeTotals(t *testing.T) {
 }
 
 func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.OpenSQLite(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 
@@ -256,12 +243,7 @@ func TestHealthEndpointsReportSQLiteFallback(t *testing.T) {
 }
 
 func TestPublicSystemInfoDoesNotExposeAdministrativeRuntimeDetails(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 
@@ -282,8 +264,10 @@ func TestPublicSystemInfoDoesNotExposeAdministrativeRuntimeDetails(t *testing.T)
 	}
 	var accessLogs int
 	if err := runtime.DB().QueryRow(
+		// CAST because details_json is JSONB on PostgreSQL, which has no LIKE.
 		`SELECT COUNT(*) FROM diagnostic_logs
-		  WHERE event_code='HTTP_REQUEST' AND details_json LIKE '%/api/v1/system/info%'`,
+		  WHERE event_code='HTTP_REQUEST'
+		    AND CAST(details_json AS TEXT) LIKE '%/api/v1/system/info%'`,
 	).Scan(&accessLogs); err != nil || accessLogs != 1 {
 		t.Fatalf("persisted public system access logs = %d/%v, want 1", accessLogs, err)
 	}
@@ -298,7 +282,9 @@ func TestPublicSystemInfoDoesNotExposeAdministrativeRuntimeDetails(t *testing.T)
 		json.Unmarshal(admin.Body.Bytes(), &adminPayload) != nil {
 		t.Fatalf("admin system info = %d/%s", admin.Code, admin.Body.String())
 	}
-	if adminPayload["database_mode"] != string(storage.ModeSQLiteFallback) ||
+	// Whichever engine the suite is running against - the point is that the admin
+	// endpoint reports the mode at all, where the public one must not.
+	if adminPayload["database_mode"] != string(runtime.Mode()) ||
 		adminPayload["agent_enrollment_mode"] == nil {
 		t.Fatalf("admin system info omitted runtime details: %#v", adminPayload)
 	}
@@ -347,12 +333,7 @@ func TestExplicitInvalidPostgresDSNFailsClosedWithoutExposingPassword(t *testing
 }
 
 func TestSecurityHeadersAreApplied(t *testing.T) {
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "invenqor.db"),
-	})
-	if err != nil {
-		t.Fatalf("storage.Open() error = %v", err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	server := testServer(t, runtime)
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -369,9 +350,15 @@ func TestSecurityHeadersAreApplied(t *testing.T) {
 	}
 }
 
+// newRuntime is the name these tests have always used for the store.
+func newRuntime(t *testing.T) *storage.Runtime {
+	t.Helper()
+	return storagetest.Open(t)
+}
+
 func testServer(t *testing.T, runtime *storage.Runtime) *Server {
 	t.Helper()
-	stateDir := testStateDir(t, runtime)
+	stateDir := storagetest.StateDir(t, runtime)
 	bootstrapManager := auth.NewBootstrapManager(runtime.DB(), stateDir)
 	if _, err := bootstrapManager.Ensure(context.Background()); err != nil {
 		t.Fatalf("BootstrapManager.Ensure() error = %v", err)

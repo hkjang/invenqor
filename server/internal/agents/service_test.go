@@ -3,22 +3,17 @@ package agents
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/hkjang/invenqor/server/internal/storagetest"
+
 	"github.com/google/uuid"
-	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 func TestBearerProvisionAuthenticationRotationAndBlocking(t *testing.T) {
 	t.Parallel()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	service := NewService(runtime.DB())
 	externalID := uuid.NewString()
@@ -82,12 +77,7 @@ func TestBearerProvisionAuthenticationRotationAndBlocking(t *testing.T) {
 
 func TestCertificateAuthentication(t *testing.T) {
 	t.Parallel()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	service := NewService(runtime.DB())
 	result, err := service.ProvisionBearer(
@@ -122,12 +112,7 @@ func TestCertificateAuthentication(t *testing.T) {
 
 func TestAutoEnrollmentIsRetryableOnlyByOriginalDeviceClaim(t *testing.T) {
 	t.Parallel()
-	runtime, err := storage.Open(context.Background(), storage.Options{
-		SQLitePath: filepath.Join(t.TempDir(), "test.db"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := storagetest.Open(t)
 	defer runtime.Close()
 	service := NewService(runtime.DB())
 	externalID := uuid.NewString()

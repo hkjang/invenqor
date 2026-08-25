@@ -47,7 +47,11 @@ func TestNoTextOperatorIsAppliedToAJsonbColumnWithoutACast(t *testing.T) {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
 			return err
 		}
-		if strings.HasSuffix(path, "_test.go") {
+		// Test files are scanned too. A test that applies a text operator to a
+		// JSONB column fails only when the suite runs against PostgreSQL, and the
+		// default is SQLite - so one sat in server_test.go until the PostgreSQL
+		// run found it. This file is excluded because it names the operators.
+		if strings.HasSuffix(path, "jsonb_operator_test.go") {
 			return nil
 		}
 		text, err := os.ReadFile(path)
