@@ -77,10 +77,14 @@ func (s *Server) authMethods(response http.ResponseWriter, request *http.Request
 			Message: "a Keycloak client secret is stored but this instance's " +
 				"master key cannot decrypt it, so SSO is unavailable",
 			Details: map[string]any{
-				"remediation": "Every replica must share the state directory that " +
-					"holds master.key. Mount it as a shared read-write volume, or " +
-					"set INVENQOR_MASTER_KEY to the same value on every instance; " +
-					"then re-save the Keycloak client secret.",
+				// INVENQOR_MASTER_KEY_FILE names a file, not a key. Advice that
+				// does not work is worse than none: an operator following it sees
+				// no change and has no reason to doubt the instruction.
+				"remediation": "Every replica must use the same master key. Either " +
+					"mount the state directory holding master.key as a shared " +
+					"read-write volume, or give every instance the same key file and " +
+					"set INVENQOR_MASTER_KEY_FILE to its path - a Secret mounted into " +
+					"each Pod does this. Then re-save the Keycloak client secret.",
 			},
 		})
 	}

@@ -87,7 +87,15 @@ func (s *Store) Load() (Values, error) {
 	}
 	var envelope encryptedEnvelope
 	if err := json.Unmarshal(bytes, &envelope); err != nil {
-		return Values{}, errors.New("decode encrypted bootstrap envelope")
+		// Same reasoning as a damaged master key: the values are unreachable, and
+		// starting without them loses configured secrets silently.
+		return Values{}, fmt.Errorf(
+			"%s is not readable as a sealed envelope, so the settings it holds "+
+				"cannot be recovered. Restore it from a backup, or delete it: the "+
+				"Server will start without those values, and every sealed setting - "+
+				"including the Keycloak client secret - must be entered again",
+			s.bootstrapPath,
+		)
 	}
 	if envelope.Version != 1 {
 		return Values{}, fmt.Errorf("unsupported bootstrap envelope version %d", envelope.Version)
@@ -205,7 +213,20 @@ func loadOrCreateKey(path string) ([]byte, error) {
 	key, err := os.ReadFile(path)
 	if err == nil {
 		if len(key) != keySize {
-			return nil, fmt.Errorf("master key must be %d bytes", keySize)
+			// Refusing to start is right: without the original key the sealed
+			// settings - the Keycloak client secret among them - cannot be
+			// decrypted, and starting anyway would make SSO vanish from the login
+			// page with nothing to explain it. But the operator gets this line and
+			// a container that restarts, so it has to say what to do about it.
+			return nil, fmt.Errorf(
+				"%s is %d bytes, not %d, so the sealed settings in this state "+
+					"directory cannot be decrypted. Restore that file from a backup, "+
+					"or point INVENQOR_MASTER_KEY_FILE at a copy of the original key. "+
+					"If neither is available, delete %s and bootstrap.enc beside it: "+
+					"the Server will start with a new key, and every sealed setting - "+
+					"including the Keycloak client secret - must be entered again",
+				path, len(key), keySize, path,
+			)
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			return nil, fmt.Errorf("secure master key: %w", err)

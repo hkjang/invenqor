@@ -34,8 +34,13 @@ client secret은 인스턴스의 master key로 봉인되어 저장됩니다. 교
   화면에 조치와 함께 표시되고, 진단 로그(`keycloak` 구성요소)에
   `KEYCLOAK_SECRET_UNREADABLE`로 기록됩니다.
 - 원인은 대부분 **replica들이 `master.key`가 있는 상태 디렉터리를 공유하지 않는
-  것**입니다. 상태 디렉터리를 RWX 공유 볼륨으로 마운트하거나 모든 인스턴스에 같은
-  `INVENQOR_MASTER_KEY`를 설정한 뒤 secret을 다시 저장하십시오.
+  것**입니다. 상태 디렉터리를 RWX 공유 볼륨으로 마운트하거나, 모든 인스턴스에 같은
+  키 파일을 주고 `INVENQOR_MASTER_KEY_FILE`에 그 경로를 지정한 뒤(각 Pod에 마운트한
+  Secret이 이 방식입니다) secret을 다시 저장하십시오.
+
+  *정정: 이 문서의 최초 판은 `INVENQOR_MASTER_KEY`에 값을 설정하라고 안내했습니다.
+  그런 변수는 없습니다 — 실제 변수는 `INVENQOR_MASTER_KEY_FILE`이고 값이 아니라
+  파일 경로를 받습니다.*
 
 ## 3. MCP 도구 호출이 파라미터 검증에서 계속 실패했습니다
 
