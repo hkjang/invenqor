@@ -959,7 +959,9 @@ function GeneralSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean
   </div>;
 }
 
-function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
+// Exported so a test can render them directly. The settings panels beside
+// them fetch on mount, so rendering those only exercises a loading state.
+export function SystemSettingsInfo({info}: {info: SystemInfo|null}) {
   const [health, setHealth] = React.useState<Record<string, unknown>>({});
   const [error, setError] = React.useState("");
   const load = React.useCallback(async () => {
@@ -1220,7 +1222,7 @@ function AdminPanel({title, action, children}: {title: string; action: string; c
 function StatusItem({label, value, good}: {label: string; value: string; good?: boolean}) {
   return <div><span>{label}</span><strong className={good ? "status-good" : ""}>{value}</strong></div>;
 }
-function Notice({tone, title, children}: {tone: "info"|"warning"|"error"; title: string; children: React.ReactNode}) {
+export function Notice({tone, title, children}: {tone: "info"|"warning"|"error"; title: string; children: React.ReactNode}) {
   return <div className={`admin-notice ${tone}`} role={tone === "error" ? "alert" : "status"}>
     <strong>{title}</strong><span>{children}</span>
   </div>;
