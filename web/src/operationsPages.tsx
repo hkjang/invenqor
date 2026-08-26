@@ -730,8 +730,9 @@ function EnrollmentDiagnosticsPanel() {
     {blocked === 0 && !failing.length
       ? <Notice tone="info" title="차단된 등록 시도가 없습니다.">
           Agent가 보이지 않는다면 해당 장비에서 <code>invenqor-agent --diagnose</code>를
-          실행하십시오. Server에 도달조차 못한 경우 Agent 측 로그와
-          <code>/var/lib/invenqor-agent/status.json</code>에 원인이 기록됩니다.
+          실행하십시오. Server에 도달조차 못한 경우 Agent 측 로그와 상태 파일에 원인이
+          기록됩니다 — Linux는 <code>/var/lib/invenqor-agent/status.json</code>,
+          Windows는 <code>%ProgramData%\Invenqor\state\status.json</code>입니다.
         </Notice>
       : <div className="audit-table enrollment-source-table">
           {failing.map(source => <details key={`${source.source_ip}|${source.agent_id}`}>
@@ -986,13 +987,17 @@ export function AuditPage() {
 // recording a new one: agent_preflight and keycloak were both being recorded and
 // neither could be selected. Known names get a label; anything else still
 // appears, under its own name.
-const diagnosticComponentLabels: Record<string, string> = {
+export const diagnosticComponentLabels: Record<string, string> = {
   agent_enrollment: "Agent 등록",
   agent_transport: "Agent 전송",
   agent_preflight: "Agent 사전 점검",
   keycloak: "Keycloak 로그인",
   http: "Server HTTP",
   server: "Server 일반",
+  // Recorded when a Pod queues events through a database outage and replays
+  // them afterwards. Without a label it was the one component shown to a Korean
+  // reader in English.
+  event_spool: "이벤트 스풀",
 };
 
 export function ServerLogsPage() {
