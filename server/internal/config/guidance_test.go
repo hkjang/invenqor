@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -71,10 +72,10 @@ func repositoryRoot(t *testing.T) string {
 	return root
 }
 
-func forEachStringLiteral(
+func forEachGoFile(
 	t *testing.T,
 	root string,
-	visit func(file string, line int, value string),
+	visit func(path string, set *token.FileSet, parsed *ast.File),
 ) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(root, "internal", "*", "*.go"))
@@ -94,6 +95,17 @@ func forEachStringLiteral(
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
+		visit(path, set, parsed)
+	}
+}
+
+func forEachStringLiteral(
+	t *testing.T,
+	root string,
+	visit func(file string, line int, value string),
+) {
+	t.Helper()
+	forEachGoFile(t, root, func(path string, set *token.FileSet, parsed *ast.File) {
 		ast.Inspect(parsed, func(node ast.Node) bool {
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
@@ -106,5 +118,87 @@ func forEachStringLiteral(
 			visit(path, set.Position(literal.Pos()).Line, value)
 			return true
 		})
+	})
+}
+
+func TestKoreanGuidanceDoesNotTrailIntoEnglish(t *testing.T) {
+	root := repositoryRoot(t)
+	hangul := regexp.MustCompile(`[가-힣]`)
+	englishClause := regexp.MustCompile(`\b[a-z]+ [a-z]+ [a-z]+\b`)
+
+	var offenders []string
+	// Concatenations, not individual literals. The two that shipped were
+	// "설정 > ... 바꾸거나, " + "or provision the device manually...", where each
+	// half is unremarkable on its own: the Korean one has no English clause and
+	// the English one has no Hangul. Checking them separately reproduces the
+	// blind spot that caused the defect - the first version of this test did
+	// exactly that and passed on both.
+	forEachJoinedString(t, root, func(file string, line int, value string) {
+		if !hangul.MatchString(value) {
+			return
+		}
+		if match := englishClause.FindString(value); match != "" {
+			offenders = append(offenders, fmt.Sprintf(
+				"%s:%d: %q trails into %q",
+				filepath.Base(file), line, value, match,
+			))
+		}
+	})
+	if len(offenders) > 0 {
+		t.Errorf(
+			"these read as neither Korean nor English:\n%s",
+			strings.Join(offenders, "\n"),
+		)
 	}
+}
+
+// forEachJoinedString visits every string expression with adjacent literals
+// joined by + folded together, so a sentence split across several literals is
+// seen as the sentence a reader gets.
+func forEachJoinedString(
+	t *testing.T,
+	root string,
+	visit func(file string, line int, value string),
+) {
+	t.Helper()
+	var fold func(node ast.Expr) (string, bool)
+	fold = func(node ast.Expr) (string, bool) {
+		switch typed := node.(type) {
+		case *ast.BasicLit:
+			if typed.Kind != token.STRING {
+				return "", false
+			}
+			value, err := strconv.Unquote(typed.Value)
+			return value, err == nil
+		case *ast.BinaryExpr:
+			if typed.Op != token.ADD {
+				return "", false
+			}
+			left, leftOK := fold(typed.X)
+			right, rightOK := fold(typed.Y)
+			if !leftOK || !rightOK {
+				return "", false
+			}
+			return left + right, true
+		case *ast.ParenExpr:
+			return fold(typed.X)
+		}
+		return "", false
+	}
+
+	forEachGoFile(t, root, func(path string, set *token.FileSet, parsed *ast.File) {
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			expression, ok := node.(ast.Expr)
+			if !ok {
+				return true
+			}
+			value, folded := fold(expression)
+			if !folded {
+				return true
+			}
+			visit(path, set.Position(expression.Pos()).Line, value)
+			// The parts are covered by the whole.
+			return false
+		})
+	})
 }

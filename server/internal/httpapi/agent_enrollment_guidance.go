@@ -20,7 +20,7 @@ var enrollmentGuidance = map[string][2]string{
 	"AGENT_AUTO_ENROLLMENT_DISABLED": {
 		"Automatic Agent enrollment is disabled.",
 		"설정 > Agent 등록 을 URL 전용 또는 토큰 모드로 바꾸거나, " +
-			"or provision the device manually on the Agent page.",
+			"Agent 화면에서 해당 장비를 직접 등록하십시오.",
 	},
 	"AGENT_SOURCE_NOT_ALLOWED": {
 		"The Agent source IP was rejected by the enrollment policy.",
@@ -67,8 +67,8 @@ var enrollmentGuidance = map[string][2]string{
 	},
 	"AGENT_ENROLLMENT_POLICY_UNAVAILABLE": {
 		"The automatic enrollment policy could not be loaded.",
-		"메타데이터 데이터베이스에 연결할 수 없습니다. 설정 > PostgreSQL 에서 " +
-			"and the database health endpoint.",
+		"메타데이터 데이터베이스에 연결할 수 없습니다. 설정 > PostgreSQL 과 " +
+			"데이터베이스 health 엔드포인트를 확인하십시오.",
 	},
 	"AGENT_ENROLLMENT_FAILED": {
 		"The server failed while creating the Agent or host asset.",
