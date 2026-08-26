@@ -205,7 +205,13 @@ func TestAgentPathMistakesAnswerJSONAndAreRecorded(t *testing.T) {
 		}
 	}
 	// The remedy has to travel with the event; the code alone is not actionable.
-	if !strings.Contains(body, "scheme, host and port only") {
+	// Compared against the table rather than a copy of its wording, so this
+	// keeps checking that the remedy travels rather than what it happens to say.
+	remedy := enrollmentRemediation("AGENT_ENDPOINT_NOT_FOUND")
+	if remedy == "" {
+		t.Fatal("AGENT_ENDPOINT_NOT_FOUND has no remediation, so this proves nothing")
+	}
+	if !strings.Contains(body, remedy) {
 		t.Fatalf("diagnostics omitted the remediation text: %s", body)
 	}
 }

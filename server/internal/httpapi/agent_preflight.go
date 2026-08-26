@@ -87,7 +87,7 @@ func (s *Server) agentPreflight(
 			Level:     "error",
 			Component: "agent_preflight",
 			EventCode: "AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
-			Message:   "The automatic enrollment policy could not be loaded.",
+			Message:   enrollmentSummary("AGENT_ENROLLMENT_POLICY_UNAVAILABLE"),
 			Details:   map[string]any{"error": err.Error()},
 		})
 		writeAPIError(
@@ -103,7 +103,7 @@ func (s *Server) agentPreflight(
 			Level:     "warning",
 			Component: "agent_preflight",
 			EventCode: "INVALID_AGENT_SOURCE_ADDRESS",
-			Message:   "The Agent source address could not be verified.",
+			Message:   enrollmentSummary("INVALID_AGENT_SOURCE_ADDRESS"),
 			Details: map[string]any{
 				"remote_address": request.RemoteAddr,
 				"error":          err.Error(),
@@ -158,13 +158,14 @@ func (s *Server) agentPreflight(
 	}
 	level := "info"
 	code := "AGENT_PREFLIGHT_READY"
-	message := "An Agent verified its registration path successfully."
 	if !verdict.Allowed || credential["state"] == "invalid" ||
 		credential["state"] == "blocked" {
 		level = "warning"
 		code = "AGENT_PREFLIGHT_BLOCKED"
-		message = "An Agent verified its registration path and it is not usable."
 	}
+	// The sentence for each code lives in enrollmentGuidance, so the log and
+	// the enrollment panel cannot say different things about the same failure.
+	message := enrollmentSummary(code)
 	s.recordDiagnostic(request, diagnostics.Event{
 		Level:     level,
 		Component: "agent_preflight",

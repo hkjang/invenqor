@@ -36,7 +36,7 @@ func (s *Server) autoEnrollAgent(
 			Level:     "error",
 			Component: "agent_enrollment",
 			EventCode: "AGENT_ENROLLMENT_POLICY_UNAVAILABLE",
-			Message:   "The automatic enrollment policy could not be loaded.",
+			Message:   enrollmentSummary("AGENT_ENROLLMENT_POLICY_UNAVAILABLE"),
 			Details:   map[string]any{"error": err.Error()},
 		})
 		writeAPIError(
@@ -52,7 +52,7 @@ func (s *Server) autoEnrollAgent(
 			Level:     "warning",
 			Component: "agent_enrollment",
 			EventCode: "INVALID_AGENT_SOURCE_ADDRESS",
-			Message:   "The Agent source address could not be verified.",
+			Message:   enrollmentSummary("INVALID_AGENT_SOURCE_ADDRESS"),
 			Details: map[string]any{
 				"remote_address": request.RemoteAddr,
 				"error":          err.Error(),

@@ -484,7 +484,7 @@ func (s *Server) notFound(
 		s.recordAgentEndpointMisuse(
 			request,
 			"AGENT_ENDPOINT_NOT_FOUND",
-			"An Agent called a path this server does not serve.",
+			"",
 		)
 		writeAPIError(
 			response, request, http.StatusNotFound,
@@ -505,7 +505,7 @@ func (s *Server) methodNotAllowed(
 		s.recordAgentEndpointMisuse(
 			request,
 			"AGENT_ENDPOINT_METHOD_NOT_ALLOWED",
-			"An Agent used the wrong HTTP method on an Agent endpoint.",
+			"",
 		)
 	}
 	writeAPIError(
@@ -520,6 +520,15 @@ func (s *Server) recordAgentEndpointMisuse(
 	code string,
 	message string,
 ) {
+	// Same rule as recordEnrollment: "" means "whatever this code means", so
+	// the sentence lives in enrollmentGuidance only.
+	if message == "" {
+		if summary := enrollmentSummary(code); summary != "" {
+			message = summary
+		} else {
+			message = code
+		}
+	}
 	s.recordDiagnostic(request, diagnostics.Event{
 		Level:     "warning",
 		Component: "agent_transport",
