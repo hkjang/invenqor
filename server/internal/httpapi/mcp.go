@@ -558,6 +558,18 @@ func (s *Server) mcpCallTool(
 		result, err = s.mcpAssetRelations(r, arguments)
 	case "agents_list":
 		result, err = s.mcpAgentsList(r, arguments)
+	default:
+		// A tool declared in mcpTools but not wired here would otherwise fall
+		// through with both result and err nil, and be reported as a successful
+		// empty answer. A model reads that as "there is no such asset" and says
+		// so, which is worse than an error: an inventory question answered
+		// confidently and wrongly.
+		writeMCPToolError(
+			w, request.ID,
+			call.Name+" is declared but not implemented on this Server",
+			protocolVersion,
+		)
+		return
 	}
 	if err != nil {
 		writeMCPToolError(w, request.ID, err.Error(), protocolVersion)
