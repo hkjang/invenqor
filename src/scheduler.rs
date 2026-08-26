@@ -135,8 +135,7 @@ impl Agent {
                 &stable_loaded_sids,
             );
         }
-        // A failed collector must not turn all of its assets into false removals.
-        let allow_removals = snapshot.errors.is_empty();
+        let allow_removals = removals_are_trustworthy(&snapshot);
         let changes = StateStore::diff(&previous_inventory, &snapshot.records, allow_removals);
         let effective_inventory =
             StateStore::effective_inventory(&previous_inventory, &snapshot.records, allow_removals);
@@ -502,6 +501,24 @@ impl Agent {
     }
 }
 
+/// Whether this cycle saw enough to say an asset is gone.
+///
+/// Only a cycle where every collector finished can. A collector that failed
+/// reported nothing, and nothing is indistinguishable from "no longer present"
+/// once the snapshot reaches the Server: it reconciles the host's software from
+/// the evidence it holds, so an absence retires the product, closes its
+/// relation and deletes its projection row.
+///
+/// This became the common case rather than the rare one. The release profile
+/// used to abort on panic, so a collector that failed took the process with it
+/// and no snapshot was sent at all; now it is caught, reported as that
+/// collector's error, and the rest of the cycle is delivered. The whole point
+/// of that change was to keep delivering - which is only an improvement if what
+/// is delivered cannot be read as a removal.
+fn removals_are_trustworthy(snapshot: &Snapshot) -> bool {
+    snapshot.errors.is_empty()
+}
+
 /// HKEY_USERS contains only profiles whose hives are currently loaded. A user
 /// logging off is not an uninstall event, so preserve that SID's last package
 /// records until its hive is loaded again and can authoritatively report the
@@ -647,6 +664,66 @@ mod tests {
                 "name": "Example"
             }),
         }
+    }
+
+    /// A cycle with a failed collector must not be read as a removal.
+    ///
+    /// The Server reconciles a host's software from the evidence it holds, so an
+    /// asset missing from a snapshot is retired: the product is marked removed,
+    /// its relation is closed and its projection row is deleted. A collector
+    /// that failed reported nothing, and nothing looks exactly like that.
+    ///
+    /// The release profile used to abort on panic, so a failing collector took
+    /// the process with it and no snapshot was sent. It is now caught and the
+    /// rest of the cycle is delivered, which makes this the common path rather
+    /// than the rare one - and only an improvement while what is delivered
+    /// cannot be mistaken for an uninstall.
+    #[test]
+    fn a_cycle_with_a_failed_collector_is_not_read_as_a_removal() {
+        let clean = Snapshot {
+            schema_version: 1,
+            agent_id: "agent-1".into(),
+            collected_at: 1,
+            duration_ms: 0,
+            records: vec![user_package("package-a", "S-1-5-21-100")],
+            errors: Vec::new(),
+        };
+        assert!(
+            removals_are_trustworthy(&clean),
+            "a cycle where every collector finished may report removals"
+        );
+
+        let mut degraded = clean.clone();
+        degraded.errors = vec![crate::model::CollectionError {
+            collector: "packages".into(),
+            message: "the registry hive could not be opened".into(),
+        }];
+        assert!(
+            !removals_are_trustworthy(&degraded),
+            "a cycle with a failed collector must not report removals"
+        );
+
+        // The consequence, not just the flag: the records the failed collector
+        // would have reported have to survive into what is sent.
+        let previous = vec![user_package("package-a", "S-1-5-21-100")];
+        let effective = crate::storage::StateStore::effective_inventory(
+            &previous,
+            &[],
+            removals_are_trustworthy(&degraded),
+        );
+        assert_eq!(
+            effective, previous,
+            "a degraded cycle must keep what the previous one found"
+        );
+        assert!(
+            crate::storage::StateStore::effective_inventory(
+                &previous,
+                &[],
+                removals_are_trustworthy(&clean),
+            )
+            .is_empty(),
+            "a clean cycle that finds nothing is a real removal"
+        );
     }
 
     #[test]
