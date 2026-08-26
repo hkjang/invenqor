@@ -43,7 +43,15 @@ func (s *Server) dashboardStatistics(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	agentTotal, err := scalarCount(ctx, s.database.DB(), `SELECT COUNT(*) FROM agents`)
+	// The fleet expected to report, which is not every row ever written.
+	// Blocking is how an operator retires a machine - the console offers it next
+	// to each Agent and nothing deletes the row - so counting blocked Agents here
+	// made "needs attention" climb forever and made clicking 차단 appear to do
+	// nothing. The release distribution already counts only unblocked Agents.
+	agentTotal, err := scalarCount(
+		ctx, s.database.DB(),
+		`SELECT COUNT(*) FROM agents WHERE blocked_at IS NULL`,
+	)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
