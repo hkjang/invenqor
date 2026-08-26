@@ -203,7 +203,7 @@ func (s *Store) Publish(manifest Manifest, source io.Reader) (Manifest, error) {
 			_ = os.Remove(artifact)
 			return syncErr
 		}
-		if writeErr := atomicWrite(manifestPath, append(bytes, '\n'), 0o600); writeErr != nil {
+		if writeErr := atomicCreate(manifestPath, append(bytes, '\n'), 0o600); writeErr != nil {
 			_ = os.Remove(artifact)
 			_ = durablefs.SyncDirectory(s.root)
 			return writeErr
@@ -474,7 +474,17 @@ func safeVersion(value string) bool {
 	return err == nil && n == 3 && value == fmt.Sprintf("%d.%d.%d", a, b, c)
 }
 
-func atomicWrite(path string, bytes []byte, mode os.FileMode) error {
+// atomicCreate writes a file that must not already exist.
+//
+// It links rather than renames, so it fails instead of replacing. That is
+// deliberate here - a staged artifact and its manifest are signed, and silently
+// overwriting one would lose the record of what was replaced. Callers that mean
+// to replace remove the old path first.
+//
+// The bootstrap store has a function of the same shape called atomicWrite that
+// renames, so it does replace. Two functions with one name and different
+// answers to "what if it exists" is a trap; this one says which it is.
+func atomicCreate(path string, bytes []byte, mode os.FileMode) error {
 	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
