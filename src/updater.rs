@@ -1162,6 +1162,44 @@ mod tests {
         script.into_bytes()
     }
 
+    /// A signature is only worth anything against the key the operator installed.
+    ///
+    /// The threat this closes is a Server that has been taken over. It picks the
+    /// artifact and it writes the manifest, so it can produce a perfectly valid
+    /// signature - over its own binary, with its own key. The only thing that
+    /// distinguishes that from a real release is which key verifies it, and the
+    /// Agent takes that from updates.public_key in its own configuration and
+    /// from nowhere else.
+    ///
+    /// Every other test here signs and verifies with one key, so none of them
+    /// would notice if the key ever came from the response instead. This one
+    /// signs with a key the Agent was never given.
+    #[test]
+    fn an_update_signed_by_a_key_the_agent_was_not_given_is_refused() {
+        let trusted = SigningKey::from_bytes(&[31u8; 32]);
+        let attacker = SigningKey::from_bytes(&[32u8; 32]);
+        let bytes = b"a binary the Server chose";
+
+        for version in [SIGNATURE_VERSION_LEGACY, SIGNATURE_VERSION_V2] {
+            // Signed correctly, in the attacker's own hand.
+            let manifest = signed_manifest(bytes, &attacker, "9.0.0", version, false);
+            let trusted_key = STANDARD.encode(trusted.verifying_key().as_bytes());
+
+            let error = verify_artifact(bytes, &manifest, &trusted_key)
+                .expect_err("an update signed by an untrusted key was accepted");
+            assert!(
+                format!("{error:#}").contains("signature"),
+                "the refusal must name the signature: {error:#}"
+            );
+
+            // The same manifest against its own key verifies, so the refusal is
+            // the key and not something incidental about the fixture.
+            let attacker_key = STANDARD.encode(attacker.verifying_key().as_bytes());
+            verify_artifact(bytes, &manifest, &attacker_key)
+                .expect("the fixture must be a validly signed manifest");
+        }
+    }
+
     fn signed_manifest(
         bytes: &[u8],
         signing: &SigningKey,
