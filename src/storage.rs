@@ -274,7 +274,53 @@ impl StateStore {
         fs::rename(path, &destination).with_context(|| {
             format!("quarantine {} to {}", path.display(), destination.display())
         })?;
+        self.trim_quarantine(&directory);
         Ok(destination)
+    }
+
+    /// The number of unreadable events kept for inspection.
+    ///
+    /// They repeat: whatever makes one event unreadable - most likely reading
+    /// back an event queued by a different version after an automatic update -
+    /// makes all of them unreadable, so an update can move an entire queue
+    /// aside at once. A few examples answer the question an operator has; the
+    /// rest is a copy of the same thing, and it would sit in the state
+    /// directory forever, outside the queue limit that would otherwise bound it.
+    const QUARANTINE_KEEP: usize = 20;
+
+    fn trim_quarantine(&self, directory: &Path) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|value| value.path()))
+            .filter(|path| path.is_file())
+            .collect();
+        if files.len() <= Self::QUARANTINE_KEEP {
+            return;
+        }
+        // The names carry the queue sequence, so sorting puts the oldest first.
+        files.sort();
+        let surplus = files.len() - Self::QUARANTINE_KEEP;
+        for path in files.into_iter().take(surplus) {
+            if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "an unreadable event could not be removed from quarantine"
+                );
+            }
+        }
+    }
+
+    /// How many unreadable events are set aside, for the report to name.
+    pub fn quarantined_events(&self) -> usize {
+        fs::read_dir(self.root.join("queue-unreadable"))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .count()
     }
 
     pub fn acknowledge(&self, path: &Path) -> Result<()> {
@@ -570,6 +616,52 @@ mod tests {
         assert_eq!(
             StateStore::effective_inventory(&[previous], &[], false).len(),
             1
+        );
+    }
+
+    /// Quarantine keeps a bounded number of examples, not everything.
+    ///
+    /// Whatever makes one event unreadable makes all of them unreadable - most
+    /// likely reading back events queued by a different version after an
+    /// automatic update - so an update can move an entire queue aside at once.
+    /// They leave the queue directory, so the queue limit no longer bounds them,
+    /// and without this the state directory would grow by the size of the queue
+    /// on every such update, forever.
+    #[test]
+    fn quarantine_keeps_recent_examples_rather_than_everything() {
+        let root = tempfile::tempdir().unwrap();
+        let store = StateStore::open(root.path(), 1024 * 1024).unwrap();
+
+        let total = StateStore::QUARANTINE_KEEP + 10;
+        for sequence in 1..=total {
+            let path = store.queue.join(format!("{sequence:039}-corrupt.jsonl"));
+            fs::write(&path, b"{ this parsed when it was written").unwrap();
+            store.quarantine(&path).unwrap();
+        }
+
+        assert_eq!(
+            store.quarantined_events(),
+            StateStore::QUARANTINE_KEEP,
+            "quarantine must stop growing once it holds enough examples"
+        );
+
+        // The newest are the useful ones: they are what the Agent is failing on
+        // now, and the oldest may predate the change that caused it.
+        let kept: Vec<String> = fs::read_dir(root.path().join("queue-unreadable"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            kept.iter()
+                .any(|name| name.starts_with(&format!("{total:039}"))),
+            "the most recent unreadable event must be one of the kept examples"
+        );
+        assert!(
+            !kept
+                .iter()
+                .any(|name| name.starts_with(&format!("{:039}", 1))),
+            "the oldest must have been dropped: {kept:?}"
         );
     }
 

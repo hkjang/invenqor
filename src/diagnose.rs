@@ -226,6 +226,25 @@ pub async fn run(
                     config.agent.max_queue_bytes
                 ),
             ));
+            // Events set aside because they could not be read are events that
+            // were collected and never arrived. Nothing else says so: they leave
+            // the queue, so the count above drops as if they had been delivered.
+            let quarantined = store.quarantined_events();
+            if quarantined > 0 {
+                checks.push(Check::warn(
+                    "unreadable events",
+                    format!(
+                        "{quarantined} collected event(s) could not be read and \
+                         were set aside, so they were never delivered"
+                    ),
+                    format!(
+                        "They are kept in {} for inspection. This usually follows \
+                         an Agent update that changed the event format; the \
+                         inventory they held is re-collected on the next cycle.",
+                        config.agent.state_dir.join("queue-unreadable").display(),
+                    ),
+                ));
+            }
             checks.push(match &credential {
                 Some(_) => Check::pass(
                     "stored credential",
