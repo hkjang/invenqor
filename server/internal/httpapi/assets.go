@@ -235,9 +235,15 @@ func (s *Server) exportAssets(response http.ResponseWriter, request *http.Reques
 		"first_seen_at", "last_seen_at",
 	})
 	for _, item := range items {
+		// The free-text columns are what a spreadsheet would evaluate: the
+		// asset key and name come from what a monitored host reported or what
+		// an operator typed, and the department and location are typed in the
+		// console. See spreadsheetSafe.
 		_ = writer.Write([]string{
-			item.AssetKey, item.Name, item.Type, item.Status, item.Environment,
-			item.Criticality, item.OwnerDepartment, item.Location, item.Source,
+			spreadsheetSafe(item.AssetKey), spreadsheetSafe(item.Name),
+			item.Type, item.Status, item.Environment, item.Criticality,
+			spreadsheetSafe(item.OwnerDepartment), spreadsheetSafe(item.Location),
+			item.Source,
 			strconv.FormatFloat(item.Confidence, 'f', 2, 64),
 			item.FirstSeenAt.String(), item.LastSeenAt.String(),
 		})
