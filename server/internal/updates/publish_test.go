@@ -472,3 +472,53 @@ func TestPublishRejectsAnUnsupportedPlatform(t *testing.T) {
 		}
 	}
 }
+
+// The rollout percent decides how much of the fleet receives a new Agent
+// binary. A typo that publishes at 1000 instead of 10 hands the update to every
+// machine at once, which is the one thing a staged rollout exists to prevent,
+// and a negative one silently reaches nobody while looking published.
+//
+// The publish path takes it from a form field parsed with no bounds of its own,
+// so this is the check that stands between a mistyped number and the fleet.
+func TestPublishRejectsARolloutOutsideZeroToOneHundred(t *testing.T) {
+	store := newStore(t)
+	private, _ := signingPair(t)
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte("x")))
+
+	for _, rollout := range []int{-1, 101, 1000} {
+		candidate := manifest(signature)
+		candidate.Rollout = rollout
+		_, err := store.Publish(candidate, strings.NewReader("x"))
+		if err == nil {
+			t.Fatalf("a rollout of %d was accepted", rollout)
+		}
+		if !strings.Contains(err.Error(), "rollout") {
+			t.Fatalf("a rollout of %d was refused for another reason: %v", rollout, err)
+		}
+	}
+
+	// The ends of the range are both meaningful: 0 is the emergency stop and
+	// 100 is a full rollout, so neither may be rejected by an off-by-one. Each
+	// gets its own store because a published version is immutable, and the
+	// refusal to republish also mentions the rollout.
+	for _, rollout := range []int{0, 100} {
+		fresh := newStore(t)
+		candidate := manifest(signature)
+		candidate.Rollout = rollout
+		if _, err := fresh.Publish(candidate, strings.NewReader("x")); err != nil {
+			t.Fatalf("a rollout of %d was refused: %v", rollout, err)
+		}
+	}
+}
+
+// SetRollout changes the reach of a release that is already published, so it is
+// a second way in and needs the same bound.
+func TestSetRolloutRejectsAValueOutsideZeroToOneHundred(t *testing.T) {
+	store := newStore(t)
+	for _, rollout := range []int{-1, 101} {
+		if _, err := store.SetRollout("invenqor-agent-1.2.3-linux-x86_64", rollout); err == nil ||
+			!strings.Contains(err.Error(), "rollout") {
+			t.Fatalf("SetRollout(%d) error = %v, want a rollout range error", rollout, err)
+		}
+	}
+}
