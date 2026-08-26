@@ -1101,18 +1101,7 @@ export function ServerLogsPage() {
             <span>{item.instance_id} · {diagnosticComponentLabels[item.component] || item.component}</span>
             <Badge value={item.level}/>
           </summary>
-          <div className="audit-detail">
-            <DataRow label="Message" value={item.message}/>
-            <DataRow label="Pod / Instance" value={item.instance_id}/>
-            <DataRow label="Request ID" value={item.request_id || "—"}/>
-            <DataRow label="Agent ID" value={item.agent_id || "—"}/>
-            <DataRow label="Source IP" value={item.source_ip || "—"}/>
-            <DataRow label="Component" value={item.component}/>
-            {item.request_id && <div className="audit-cross-link">
-              <button className="link" onClick={() => setQuery(item.request_id)}>
-                같은 request ID의 이벤트만 보기</button></div>}
-            <pre>{pretty(item.details)}</pre>
-          </div>
+          <DiagnosticDetail item={item} onFilterByRequest={setQuery}/>
         </details>)}
         {!items.length && <Empty icon={ShieldCheck} text="조건에 맞는 진단 이벤트가 없습니다."/>}
       </div>
@@ -1394,7 +1383,7 @@ type AuditEvent = {
   result: string; reason: string; before: unknown; after: unknown; metadata: unknown;
 };
 
-type DiagnosticLog = {
+export type DiagnosticLog = {
   id: string;
   occurred_at: string;
   level: "info" | "warning" | "error";
@@ -1408,3 +1397,31 @@ type DiagnosticLog = {
   details: Record<string, unknown>;
 };
 const pretty = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
+// Split out so a test can render it: the page that owns it fetches on mount.
+export function DiagnosticDetail({item, onFilterByRequest}: {
+  item: DiagnosticLog;
+  onFilterByRequest: (requestID: string) => void;
+}) {
+  // The Server works out what to do about several of these codes and puts it in
+  // details. It was only ever visible inside the JSON below, mixed in with the
+  // path and the agent version - the most actionable field was the least
+  // prominent one. The enrollment view already gives it a row of its own.
+  const remediation = typeof item.details?.remediation === "string"
+    ? item.details.remediation.trim()
+    : "";
+  return <div className="audit-detail">
+    <DataRow label="Message" value={item.message}/>
+    <DataRow label="Pod / Instance" value={item.instance_id}/>
+    <DataRow label="Request ID" value={item.request_id || "—"}/>
+    <DataRow label="Agent ID" value={item.agent_id || "—"}/>
+    <DataRow label="Source IP" value={item.source_ip || "—"}/>
+    <DataRow label="Component" value={item.component}/>
+    {remediation && <DataRow label="조치" value={remediation}/>}
+    {item.request_id && <div className="audit-cross-link">
+      <button className="link" onClick={() => onFilterByRequest(item.request_id)}>
+        같은 request ID의 이벤트만 보기</button></div>}
+    <pre>{pretty(item.details)}</pre>
+  </div>;
+}
+
+

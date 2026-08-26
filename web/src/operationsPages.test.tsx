@@ -4,8 +4,10 @@ import {
   AssetTable,
   Breakdown,
   DailyBars,
+  DiagnosticDetail,
   RiskSummary,
   type Asset,
+  type DiagnosticLog,
   type Statistics,
 } from "./operationsPages";
 
@@ -144,5 +146,61 @@ describe("Breakdown and DailyBars", () => {
   it("render populated inputs", () => {
     clean(renderToStaticMarkup(<Breakdown items={statistics.assets.by_type}/>));
     clean(renderToStaticMarkup(<DailyBars items={statistics.collection.daily}/>));
+  });
+});
+
+const diagnostic: DiagnosticLog = {
+  id: "55555555-5555-4555-8555-555555555555",
+  occurred_at: "2026-08-26T00:00:00Z",
+  level: "warning",
+  component: "agent_enrollment",
+  event_code: "AGENT_ALREADY_CLAIMED",
+  message: "The agent identifier is already bound to another device claim.",
+  request_id: "pod-a/abc123-000042",
+  instance_id: "pod-a",
+  agent_id: "agent-1",
+  source_ip: "10.0.0.9",
+  details: {
+    path: "/v1/agent/enroll",
+    agent_version: "0.2.18",
+    remediation: "Delete agent-id and enrollment-claim.json on that host.",
+  },
+};
+
+describe("DiagnosticDetail", () => {
+  // The Server computes the fix for several of these codes. Buried in the JSON
+  // dump it is the least visible field on screen, and it is the only one that
+  // tells the reader what to do.
+  it("gives the Server's remediation a row of its own", () => {
+    const markup = renderToStaticMarkup(
+      <DiagnosticDetail item={diagnostic} onFilterByRequest={noop}/>,
+    );
+    clean(markup);
+    expect(markup).toContain("조치");
+    expect(markup).toContain("Delete agent-id and enrollment-claim.json");
+    expect(markup).toContain("pod-a/abc123-000042");
+  });
+
+  it("omits the row when the event carries no remediation", () => {
+    const markup = renderToStaticMarkup(
+      <DiagnosticDetail
+        item={{...diagnostic, details: {path: "/health/ready"}}}
+        onFilterByRequest={noop}
+      />,
+    );
+    clean(markup);
+    expect(markup).not.toContain("조치");
+  });
+
+  it("renders an event with no request ID, agent or source", () => {
+    const markup = renderToStaticMarkup(
+      <DiagnosticDetail
+        item={{...diagnostic, request_id: "", agent_id: "", source_ip: "", details: {}}}
+        onFilterByRequest={noop}
+      />,
+    );
+    clean(markup);
+    // No request ID means no cross-link to events sharing one.
+    expect(markup).not.toContain("같은 request ID");
   });
 });
