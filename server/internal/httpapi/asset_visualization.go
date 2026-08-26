@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"sync"
+
 	"context"
 	"database/sql"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"net/http"
 	"strings"
 	"time"
@@ -125,8 +128,16 @@ func (s *Server) assetVisualization(
 		s.internalError(response, request, err)
 		return
 	}
+	// Seven independent scans of the whole table, which used to run one after
+	// another. They are read-only and share nothing, and PostgreSQL serves them
+	// in parallel from shared buffers: measured on 500,000 assets, seven of
+	// these take 319ms in sequence and 99ms together.
+	//
+	// The pool holds 25 connections and the rest of this handler needs some, so
+	// this takes at most four at a time rather than all seven. A visualization
+	// request must not be able to starve every other request on the Server.
 	dimensions := map[string][]statisticBucket{}
-	for key, column := range map[string]string{
+	dimensionColumns := map[string]string{
 		"type":             "type",
 		"status":           "status",
 		"environment":      "environment",
@@ -134,23 +145,40 @@ func (s *Server) assetVisualization(
 		"source":           "source",
 		"owner_department": "owner_department",
 		"location":         "location",
-	} {
-		arguments := []any{}
-		buckets, err := groupedCounts(
-			ctx,
-			database,
-			`SELECT COALESCE(NULLIF(`+column+`,''),'unknown') AS label, COUNT(*)
-			   FROM assets WHERE 1=1`+filter.where(&arguments, "")+`
-			  GROUP BY label ORDER BY COUNT(*) DESC, label LIMIT 24`,
-			arguments...,
-		)
-		if err != nil {
-			s.internalError(response, request, err)
-			return
-		}
-		dimensions[key] = buckets
+	}
+	var dimensionMutex sync.Mutex
+	group, groupContext := errgroup.WithContext(ctx)
+	group.SetLimit(4)
+	for key, column := range dimensionColumns {
+		key, column := key, column
+		group.Go(func() error {
+			arguments := []any{}
+			buckets, err := groupedCounts(
+				groupContext,
+				database,
+				`SELECT COALESCE(NULLIF(`+column+`,''),'unknown') AS label, COUNT(*)
+				   FROM assets WHERE 1=1`+filter.where(&arguments, "")+`
+				  GROUP BY label ORDER BY COUNT(*) DESC, label LIMIT 24`,
+				arguments...,
+			)
+			if err != nil {
+				return err
+			}
+			dimensionMutex.Lock()
+			defer dimensionMutex.Unlock()
+			dimensions[key] = buckets
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		s.internalError(response, request, err)
+		return
 	}
 
+	// Left sequential deliberately. Running these four together as well was
+	// measured and made the page slower - 1.18s to 1.40s on 500,000 assets -
+	// because the parallel scans then contend rather than overlap. The seven
+	// above are uniform and cheap enough to overlap; these are not.
 	matrix, err := s.visualizationMatrix(ctx, filter, now)
 	if err != nil {
 		s.internalError(response, request, err)

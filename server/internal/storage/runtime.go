@@ -53,6 +53,11 @@ type ConnectionFailure struct {
 	Detail string `json:"-"`
 }
 
+// migrationTimeoutFactor is how much longer a migration may take than a
+// connection attempt. Both are still bounded, so a migration that is genuinely
+// stuck still fails rather than hanging the start-up forever.
+const migrationTimeoutFactor = 12
+
 type Options struct {
 	PostgresDSN string
 	SQLitePath  string
@@ -180,7 +185,18 @@ func openPostgres(ctx context.Context, options Options) (*sql.DB, *ConnectionFai
 	if connectionFailure != nil {
 		return nil, connectionFailure
 	}
-	timeoutContext, cancel := context.WithTimeout(ctx, options.Timeout)
+	// Migrating is not the same job as connecting, and it does not deserve the
+	// same deadline. Connecting either answers quickly or is unreachable; the
+	// first migration creates every table and index this product has, against a
+	// database that may be serving something else, and taking longer than five
+	// seconds there is ordinary rather than a fault. Sharing one timeout meant a
+	// slow first migration was reported as a failure and the Server refused to
+	// start - a crash loop over a database that was only busy.
+	migrationTimeout := options.Timeout * migrationTimeoutFactor
+	if migrationTimeout < time.Minute {
+		migrationTimeout = time.Minute
+	}
+	timeoutContext, cancel := context.WithTimeout(ctx, migrationTimeout)
 	defer cancel()
 	if err := applyMigrations(timeoutContext, database, "postgres"); err != nil {
 		database.Close()
