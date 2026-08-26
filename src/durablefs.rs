@@ -59,24 +59,40 @@ pub fn sync_directory(path: &Path) -> Result<()> {
 /// update for that would leave a host on the old version until someone noticed,
 /// so the rename is retried for a few seconds before it is called an error.
 pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    // Only Windows has a reason to wait. There a file that was just written is
+    // routinely held open for a moment by an indexer or a virus scanner, and the
+    // rename fails until the handle closes - so retrying is the difference
+    // between a write that works and one that does not.
+    //
+    // rename(2) does not care about open handles, so on every other platform a
+    // failure is EXDEV, ENOSPC, EACCES or EROFS. None of those clear up in five
+    // seconds. Waiting anyway would delay the state store's writes - which is
+    // new: they used to go straight to fs::rename before these two
+    // implementations were merged - and then report a cause that cannot be the
+    // cause, to a reader who is already looking for the real one.
+    let attempts = if cfg!(windows) { 20 } else { 1 };
     let mut last = None;
-    for attempt in 0..20 {
+    for attempt in 0..attempts {
         match rename_replacing(from, to) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last = Some(error);
-                if attempt < 19 {
+                if attempt < attempts - 1 {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
             }
         }
     }
-    Err(last.expect("at least one attempt")).with_context(|| {
-        format!(
-            "replace {} - the file is held open by another process",
-            to.display()
-        )
-    })
+    let error = last.expect("at least one attempt");
+    if cfg!(windows) {
+        return Err(error).with_context(|| {
+            format!(
+                "replace {} - the file is held open by another process",
+                to.display()
+            )
+        });
+    }
+    Err(error).with_context(|| format!("replace {}", to.display()))
 }
 
 #[cfg(not(windows))]
@@ -125,6 +141,42 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write that cannot succeed must fail now, and say why.
+    ///
+    /// The retry exists for Windows, where a file just written is routinely held
+    /// open for a moment. rename(2) does not care about open handles, so on
+    /// every other platform a failure is EXDEV, ENOSPC, EACCES or EROFS - none
+    /// of which clear up in five seconds. Waiting anyway delays the state
+    /// store's writes and then blames a cause that cannot be the cause.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_unrecoverable_replace_fails_at_once_and_names_the_real_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::write(&source, b"payload").unwrap();
+        // Renaming onto a path inside a file is EACCES or ENOTDIR - a failure
+        // that no amount of waiting resolves.
+        let blocked = source.join("inside-a-file").join("target");
+
+        let started = std::time::Instant::now();
+        let error = replace_file(&source, &blocked).unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "an unrecoverable rename waited {elapsed:?} before giving up"
+        );
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("held open by another process"),
+            "a cause that cannot apply on this platform was reported: {text}"
+        );
+        assert!(
+            text.contains("replace"),
+            "the error must name the operation and path: {text}"
+        );
+    }
 
     /// A temporary left behind by a process that died mid-write must not block
     /// the next write.
