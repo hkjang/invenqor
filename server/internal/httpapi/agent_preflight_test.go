@@ -13,6 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// getWithCookie issues an authenticated GET, for responses that are not JSON.
+func getWithCookie(
+	t *testing.T,
+	server *Server,
+	path string,
+	cookie *http.Cookie,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
 func getJSON(
 	t *testing.T,
 	server *Server,

