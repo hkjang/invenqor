@@ -83,6 +83,16 @@ func (s *Server) autoEnrollAgent(
 		if level != "info" {
 			details["remediation"] = enrollmentRemediation(code)
 		}
+		// An empty message means "whatever this code means", which is the table
+		// the enrollment panel reads. Repeating the sentence at the call site is
+		// how the two drifted apart.
+		if message == "" {
+			if summary := enrollmentSummary(code); summary != "" {
+				message = summary
+			} else {
+				message = code
+			}
+		}
 		s.recordDiagnostic(request, diagnostics.Event{
 			Level:     level,
 			Component: "agent_enrollment",
@@ -97,7 +107,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"warning",
 			"AGENT_ENROLLMENT_RATE_LIMITED",
-			"Too many Agent enrollment attempts were received.",
+			"",
 			"",
 			nil,
 		)
@@ -137,7 +147,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"warning",
 			"INVALID_AGENT_REQUEST",
-			"The Agent enrollment payload could not be decoded.",
+			"",
 			"",
 			map[string]any{"error": err.Error()},
 		)
@@ -151,7 +161,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"warning",
 			"INVALID_AGENT_HOSTNAME",
-			"The Agent hostname exceeded the supported length.",
+			"",
 			input.AgentID,
 			nil,
 		)
@@ -173,7 +183,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"info",
 			"AGENT_ENROLLMENT_SUCCEEDED",
-			"The Agent was enrolled and its host asset was created.",
+			"",
 			input.AgentID,
 			map[string]any{
 				"hostname":         strings.TrimSpace(input.Hostname),
@@ -187,7 +197,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"warning",
 			"AGENT_ALREADY_CLAIMED",
-			"The Agent identifier is bound to another device claim.",
+			"",
 			input.AgentID,
 			nil,
 		)
@@ -212,7 +222,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"warning",
 			"INVALID_AGENT_IDENTITY",
-			"The Agent enrollment identity is invalid.",
+			"",
 			input.AgentID,
 			map[string]any{"error": err.Error()},
 		)
@@ -224,7 +234,7 @@ func (s *Server) autoEnrollAgent(
 		recordEnrollment(
 			"error",
 			"AGENT_ENROLLMENT_FAILED",
-			"The server failed while creating the Agent or host asset.",
+			"",
 			input.AgentID,
 			map[string]any{"error": err.Error()},
 		)

@@ -96,9 +96,26 @@ var enrollmentGuidance = map[string][2]string{
 	},
 }
 
-func enrollmentRejectionMessage(code string) string {
+// enrollmentSummary is what a code means, or "" for a code with no entry. The
+// two callers want different wording when there is none, so the fallback is
+// theirs and the lookup is in one place.
+//
+// The summary used to be written out again at every recording site as well.
+// Twelve of those matched this table exactly and three had drifted from it, so
+// the same failure read one way in the diagnostic log and another in the
+// enrollment panel. A site still passes its own sentence where it genuinely
+// knows more - a blocked Agent trying to enrol and a blocked Agent trying to
+// send inventory are different events sharing one code.
+func enrollmentSummary(code string) string {
 	if guidance, found := enrollmentGuidance[code]; found {
 		return guidance[0]
+	}
+	return ""
+}
+
+func enrollmentRejectionMessage(code string) string {
+	if summary := enrollmentSummary(code); summary != "" {
+		return summary
 	}
 	return "The Agent enrollment attempt was rejected."
 }
