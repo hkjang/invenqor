@@ -143,6 +143,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	// The request ID is generated here and nowhere else. chi's RequestID takes
+	// an inbound X-Request-Id verbatim when one is present, and this value is
+	// written into every audit record and diagnostic event and is what the
+	// console filters by - so accepting it would let the subject of an audit
+	// record choose its own correlation identifier, and collide it with someone
+	// else's on purpose. Nothing needs the inbound form: the Agent and the
+	// console only ever read this header off a response.
+	s.router.Use(discardInboundRequestID)
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(s.securityHeaders)
@@ -681,6 +689,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 				"max-age=31536000; includeSubDomains",
 			)
 		}
+		next.ServeHTTP(response, request)
+	})
+}
+
+func discardInboundRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		request.Header.Del(middleware.RequestIDHeader)
 		next.ServeHTTP(response, request)
 	})
 }
