@@ -56,3 +56,47 @@ fn every_flag_named_in_guidance_is_one_the_agent_accepts() {
         offenders.join("\n")
     );
 }
+
+/// Platform-specific commands belong in the one function that branches on the
+/// platform.
+///
+/// A Windows service that could not read its config used to be told to run
+/// sudo, chown and chmod - none of which exist there - because the start-up
+/// path had its own copy of the Linux remedy while --diagnose had a properly
+/// branched one. Both now call config_permission_remedy.
+#[test]
+fn platform_specific_commands_stay_inside_the_function_that_branches() {
+    // diagnose.rs holds the branch itself, so it is the one place allowed to
+    // name these. Anywhere else means a second copy that only fits one platform.
+    let commands = ["sudo ", "chown ", "chmod 0", "icacls ", "Restart-Service"];
+    let mut offenders = Vec::new();
+    for file in [
+        "src/main.rs",
+        "src/scheduler.rs",
+        "src/health.rs",
+        "src/config.rs",
+    ] {
+        let Ok(source) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for (number, line) in source.lines().enumerate() {
+            // Tests build their own fixtures and may name whatever they like.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for command in commands {
+                if line.contains(command) {
+                    offenders.push(format!("  {file}:{}: {}", number + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these name a platform-specific command outside the function that \
+         branches on the platform:\n{}\n\n\
+         Call crate::diagnose::config_permission_remedy instead, so the reader \
+         gets a command their machine actually has.",
+        offenders.join("\n")
+    );
+}

@@ -207,17 +207,14 @@ async fn run() -> Result<i32> {
         // was not found. Refuse to start instead, and name the fix.
         ConfigAvailability::Unreadable => anyhow::bail!(
             "cannot read config {path}: the file or a directory on the way to it \
-             denies access to this account ({account}). The service account needs \
-             read access:\n  \
-             sudo chown root:invenqor-agent {parent} {path}\n  \
-             sudo chmod 0750 {parent}\n  \
-             sudo chmod 0640 {path}",
+             denies access to this account ({account}).\n  {remedy}",
             path = config_path.display(),
-            parent = config_path
-                .parent()
-                .map(|value| value.display().to_string())
-                .unwrap_or_else(|| default_config.display().to_string()),
             account = current_account(),
+            // The same remedy --diagnose prints, so both name commands that
+            // exist on the platform they are read on. This used to be sudo,
+            // chown and chmod regardless, which a Windows service operator
+            // cannot run.
+            remedy = diagnose::config_permission_remedy(&config_path),
         ),
         ConfigAvailability::Missing if config_path == default_config => Config::default(),
         ConfigAvailability::Missing => {

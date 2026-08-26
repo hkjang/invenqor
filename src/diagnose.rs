@@ -825,7 +825,12 @@ fn config_file_check(
     }
 }
 
-fn config_permission_remedy(config_path: &Path) -> String {
+/// The command that grants the service account read access to its config.
+///
+/// Shared with the start-up path so both say the same thing on each platform:
+/// a Windows service that cannot read its config used to be told to run sudo,
+/// chown and chmod, none of which exist there.
+pub fn config_permission_remedy(config_path: &Path) -> String {
     #[cfg(not(windows))]
     let parent = config_path
         .parent()
