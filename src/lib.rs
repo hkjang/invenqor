@@ -1,6 +1,7 @@
 pub mod collectors;
 pub mod config;
 pub mod diagnose;
+pub mod durablefs;
 pub mod health;
 pub mod identity;
 pub mod logfile;

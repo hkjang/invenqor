@@ -11,7 +11,7 @@ use std::ffi::CString;
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -773,13 +773,13 @@ fn stage(config: &Config, manifest: UpdateManifest, bytes: &[u8]) -> Result<()> 
     // extension: staged without .exe it cannot be run, so the test that protects
     // the fleet would fail on every Windows host for the wrong reason.
     let artifact = directory.join(staged_artifact_name(&manifest.version)?);
-    atomic_write(&artifact, bytes)?;
+    crate::durablefs::atomic_write(&artifact, bytes)?;
     crate::platform::make_executable(&artifact)?;
     // Cleanup runs while the unprivileged Agent owns the operation. The
     // privileged helper never enumerates or deletes marker-selected paths.
     prune_staged_artifacts(config, &manifest.version);
     let pending = serde_json::to_vec(&PendingUpdate { manifest })?;
-    atomic_write(&directory.join("pending.json"), &pending)
+    crate::durablefs::atomic_write(&directory.join("pending.json"), &pending)
 }
 
 fn atomic_install(target: &Path, bytes: &[u8], version: &str) -> Result<()> {
@@ -808,7 +808,7 @@ fn atomic_install_with_suffix(
         std::process::id(),
         executable_suffix
     ));
-    atomic_write(&temporary, bytes)?;
+    crate::durablefs::atomic_write(&temporary, bytes)?;
     crate::platform::make_executable(&temporary)?;
     // Run the candidate before it becomes the installed agent. A signed,
     // correctly hashed binary can still be unable to start - wrong architecture
@@ -831,15 +831,16 @@ fn atomic_install_with_suffix(
     let previous = previous_binary_path(target);
     if target.exists() {
         let _ = fs::remove_file(&previous);
-        replace_file(target, &previous).context("preserve previous agent binary")?;
+        crate::durablefs::replace_file(target, &previous)
+            .context("preserve previous agent binary")?;
     }
-    if let Err(error) = replace_file(&temporary, target) {
+    if let Err(error) = crate::durablefs::replace_file(&temporary, target) {
         if previous.exists() {
             let _ = fs::rename(&previous, target);
         }
         return Err(error).context("activate agent update");
     }
-    sync_directory(parent)
+    crate::durablefs::sync_directory(parent)
 }
 
 fn previous_binary_path(target: &Path) -> PathBuf {
@@ -934,7 +935,6 @@ extern "system" {
     fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
     fn TerminateJobObject(job: isize, exit_code: u32) -> i32;
     fn CloseHandle(handle: isize) -> i32;
-    fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
 }
 
 fn read_stream_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<BoundedStream> {
@@ -1073,99 +1073,6 @@ fn self_test_with_limits(
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    let mut file = crate::platform::create_private_file(&temporary)?;
-    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(&temporary);
-        return Err(error.into());
-    }
-    drop(file);
-    replace_file(&temporary, path)?;
-    sync_directory(path.parent().context("path has no parent")?)
-}
-
-/// Flushes the directory entry so a rename survives a power loss. Windows has no
-/// equivalent call for a directory handle opened this way, and NTFS metadata
-/// journaling covers the same ground, so it is a no-op there.
-fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        fs::File::open(path)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
-}
-
-/// Moves `from` onto `to`, retrying briefly.
-///
-/// On Windows a file that was just written is routinely held open for a moment by
-/// a virus scanner, and the rename fails with a sharing violation. Failing the
-/// update for that would leave a host on the old version until someone noticed,
-/// so the rename is retried for a few seconds before it is called an error.
-fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    let mut last = None;
-    for attempt in 0..20 {
-        match rename_replacing(from, to) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                last = Some(error);
-                if attempt < 19 {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            }
-        }
-    }
-    Err(last.expect("at least one attempt")).with_context(|| {
-        format!(
-            "replace {} - the file is held open by another process",
-            to.display()
-        )
-    })
-}
-
-#[cfg(not(windows))]
-fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::rename(from, to)
-}
-
-#[cfg(windows)]
-fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
-        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if value.contains(&0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "update path contains a NUL character",
-            ));
-        }
-        value.push(0);
-        Ok(value)
-    };
-    let existing = wide(from)?;
-    let replacement = wide(to)?;
-    if unsafe {
-        MoveFileExW(
-            existing.as_ptr(),
-            replacement.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
 fn update_client(config: &Config) -> Result<Client> {
     let mut builder = Client::builder()
         .https_only(!config.server.allows_http())
@@ -1214,6 +1121,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::io::Read;
+    use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::thread;
     use tempfile::tempdir;
@@ -1236,8 +1144,8 @@ mod tests {
     fn atomic_write_replaces_an_existing_marker_or_staged_artifact() {
         let root = tempdir().unwrap();
         let destination = root.path().join("pending.json");
-        atomic_write(&destination, b"first").unwrap();
-        atomic_write(&destination, b"second").unwrap();
+        crate::durablefs::atomic_write(&destination, b"first").unwrap();
+        crate::durablefs::atomic_write(&destination, b"second").unwrap();
         assert_eq!(fs::read(destination).unwrap(), b"second");
     }
 
@@ -1249,7 +1157,7 @@ mod tests {
         } else {
             format!("#!/bin/sh\necho \"invenqor-agent {version}\"\nexit {exit_code}\n")
         };
-        atomic_write(path, script.as_bytes()).unwrap();
+        crate::durablefs::atomic_write(path, script.as_bytes()).unwrap();
         crate::platform::make_executable(path).unwrap();
         script.into_bytes()
     }
@@ -1526,7 +1434,7 @@ mod tests {
     fn self_test_kills_a_hung_candidate_at_its_deadline() {
         let root = tempdir().unwrap();
         let candidate = root.path().join("hung-agent");
-        atomic_write(&candidate, b"#!/bin/sh\nexec sleep 30\n").unwrap();
+        crate::durablefs::atomic_write(&candidate, b"#!/bin/sh\nexec sleep 30\n").unwrap();
         crate::platform::make_executable(&candidate).unwrap();
         let started = Instant::now();
         let error = self_test_with_limits(&candidate, "9.0.0", Duration::from_millis(150), 1024)
@@ -1545,7 +1453,7 @@ mod tests {
             "#!/bin/sh\nsleep 30 &\necho $! > '{}'\necho 'invenqor-agent 9.0.0'\nexit 0\n",
             child_pid.display()
         );
-        atomic_write(&candidate, script.as_bytes()).unwrap();
+        crate::durablefs::atomic_write(&candidate, script.as_bytes()).unwrap();
         crate::platform::make_executable(&candidate).unwrap();
         let error = self_test_with_limits(&candidate, "9.0.0", Duration::from_millis(250), 1024)
             .unwrap_err();

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -116,7 +116,7 @@ impl StateStore {
 
     pub fn set_previous_inventory(&self, records: &[AssetRecord]) -> Result<()> {
         let bytes = serde_json::to_vec(records)?;
-        atomic_write(&self.root.join("inventory.json"), &bytes)
+        crate::durablefs::atomic_write(&self.root.join("inventory.json"), &bytes)
     }
 
     pub fn effective_inventory(
@@ -190,7 +190,7 @@ impl StateStore {
     }
 
     pub fn set_previous_hash(&self, value: &str) -> Result<()> {
-        atomic_write(&self.root.join("snapshot.sha256"), value.as_bytes())
+        crate::durablefs::atomic_write(&self.root.join("snapshot.sha256"), value.as_bytes())
     }
 
     pub fn last_heartbeat(&self) -> u64 {
@@ -200,7 +200,7 @@ impl StateStore {
     }
 
     pub fn set_last_heartbeat(&self, value: u64) -> Result<()> {
-        atomic_write(
+        crate::durablefs::atomic_write(
             &self.root.join("last-heartbeat"),
             value.to_string().as_bytes(),
         )
@@ -223,7 +223,7 @@ impl StateStore {
         let path = self
             .queue
             .join(format!("{:039}-{}.jsonl", *sequence, envelope.event_id));
-        atomic_write(&path, &bytes)?;
+        crate::durablefs::atomic_write(&path, &bytes)?;
         Ok(path)
     }
 
@@ -347,7 +347,7 @@ impl StateStore {
     pub fn write_status(&self, report: &StatusReport) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(report)?;
         bytes.push(b'\n');
-        atomic_write(&self.status_path(), &bytes)
+        crate::durablefs::atomic_write(&self.status_path(), &bytes)
     }
 
     pub fn read_status(&self) -> Option<StatusReport> {
@@ -366,7 +366,7 @@ impl StateStore {
             secret: secret.to_string(),
         };
         let bytes = serde_json::to_vec(&credential)?;
-        atomic_write(&self.root.join(name), &bytes)
+        crate::durablefs::atomic_write(&self.root.join(name), &bytes)
     }
 }
 
@@ -386,17 +386,6 @@ fn same_asset(left: &AssetRecord, right: &AssetRecord) -> bool {
 
 fn create_secure_dir(path: &Path) -> Result<()> {
     crate::platform::create_private_dir(path)
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", std::process::id()));
-    let temporary = PathBuf::from(temporary);
-    let mut file = crate::platform::create_private_file(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
 }
 
 fn read_trimmed(path: PathBuf) -> Option<String> {
