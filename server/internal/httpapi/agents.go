@@ -741,22 +741,35 @@ type rateWindow struct {
 }
 
 type agentRateLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	// entries only ever grew. The enrollment limiter is keyed by source address
+	// on endpoints that need no credentials, so every address that ever reached
+	// the Server kept a record in a long-running process - and one host holding
+	// an IPv6 /64 can spend addresses faster than an operator can notice the
+	// memory going. A counter is meaningless once its window has passed, so the
+	// expired ones are swept out rather than kept for an address that may never
+	// return.
 	entries map[string]rateWindow
+	sweptAt time.Time
+	// now is a field so the sweep can be exercised without a test sleeping
+	// through a real window.
+	now func() time.Time
 }
 
 func newAgentRateLimiter(limit int, window time.Duration) *agentRateLimiter {
 	return &agentRateLimiter{
 		limit: limit, window: window, entries: make(map[string]rateWindow),
+		now: time.Now,
 	}
 }
 
 func (l *agentRateLimiter) Allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := time.Now()
+	now := l.now()
+	l.sweep(now)
 	entry := l.entries[key]
 	if entry.start.IsZero() || now.Sub(entry.start) >= l.window {
 		l.entries[key] = rateWindow{start: now, count: 1}
@@ -768,6 +781,21 @@ func (l *agentRateLimiter) Allow(key string) bool {
 	entry.count++
 	l.entries[key] = entry
 	return true
+}
+
+// sweep drops the windows that have already passed. It runs at most once per
+// window so that a burst of distinct keys pays one pass over the map between
+// them rather than one pass each.
+func (l *agentRateLimiter) sweep(now time.Time) {
+	if !l.sweptAt.IsZero() && now.Sub(l.sweptAt) < l.window {
+		return
+	}
+	l.sweptAt = now
+	for key, entry := range l.entries {
+		if now.Sub(entry.start) >= l.window {
+			delete(l.entries, key)
+		}
+	}
 }
 
 // Marshal helper is intentionally unused by handlers but gives integration
