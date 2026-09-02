@@ -1,0 +1,88 @@
+package httpapi
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/google/uuid"
+)
+
+func insertAssetWithAttributes(
+	t *testing.T, server *Server, name string, attributes string,
+) {
+	t.Helper()
+	if _, err := server.database.DB().Exec(
+		`INSERT INTO assets(
+			id, asset_key, name, type, status, criticality, environment,
+			confidence, attributes_json, custom_fields_json, source,
+			first_seen_at, last_seen_at, created_at, updated_at
+		 ) VALUES($1,$2,$3,'host','active','normal','other',
+		          1.0,$4,'{}','manual',
+		          CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
+		          CURRENT_TIMESTAMP)`,
+		uuid.NewString(), "attributes-"+name, name, attributes,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Attribute keys are case sensitive in both storage modes, and an asset created
+// through the asset API carries whatever keys the caller wrote. The parser
+// folded the whole field to lower case, so a query naming such a key compiled
+// to a path the document does not have: HTTP 200, no rows, no error, and
+// /query/validate had already reported the expression as valid.
+func TestAttributeQueryFindsAKeyWrittenWithCapitals(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	insertAssetWithAttributes(
+		t, server, "tagged", `{"assetTag":"AT-1","os":{"Family":"rhel"}}`,
+	)
+	insertAssetWithAttributes(t, server, "untagged", `{"assetTag":"AT-2"}`)
+
+	found := executeQueryNames(
+		t, server, cookie, csrf, `attributes.assetTag = "AT-1"`,
+	)
+	if len(found) != 1 || found[0] != "tagged" {
+		t.Fatalf("attributes.assetTag = %v", found)
+	}
+	nested := executeQueryNames(
+		t, server, cookie, csrf, `attributes.os.Family = "rhel"`,
+	)
+	if len(nested) != 1 || nested[0] != "tagged" {
+		t.Fatalf("attributes.os.Family = %v", nested)
+	}
+	// The lower-cased spelling is a different key, and answering with the
+	// capitalised key's rows would only move the surprise elsewhere.
+	if folded := executeQueryNames(
+		t, server, cookie, csrf, `attributes.assettag = "AT-1"`,
+	); len(folded) != 0 {
+		t.Fatalf("attributes.assettag = %v", folded)
+	}
+}
+
+// A column is still named case-insensitively; only the JSON key after
+// "attributes." carries meaning in its case.
+func TestColumnClauseStaysCaseInsensitiveOverHTTP(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	insertAssetWithAttributes(t, server, "shouty", `{}`)
+
+	if found := executeQueryNames(
+		t, server, cookie, csrf, `NAME = "shouty"`,
+	); len(found) != 1 || found[0] != "shouty" {
+		t.Fatalf(`NAME = "shouty" returned %v`, found)
+	}
+
+	validate := performAuthenticatedJSON(
+		t, server, http.MethodPost, "/api/v1/query/validate",
+		map[string]any{"query": `Attributes.assetTag = "AT-1"`}, cookie, csrf,
+	)
+	if validate.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body = %s",
+			validate.Code, validate.Body.String())
+	}
+}

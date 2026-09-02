@@ -41,6 +41,60 @@ func TestRejectsSQLAndUnknownFields(t *testing.T) {
 	}
 }
 
+// An attribute path names a key in a JSON document, and JSON keys are case
+// sensitive. The parser folded the whole field to lower case, so a query for an
+// attribute written with a capital - every attribute on an asset created
+// through the API or imported from another system - asked for a key nobody
+// wrote and came back empty with no error.
+func TestAttributePathKeepsItsCase(t *testing.T) {
+	for _, testCase := range []struct {
+		input    string
+		postgres string
+		sqlite   string
+	}{
+		{`attributes.assetTag = "AT-1"`,
+			"attributes_json #>> '{assetTag}'",
+			"json_extract(attributes_json, '$.assetTag')"},
+		{`ATTRIBUTES.OS.Family = "rhel"`,
+			"attributes_json #>> '{OS,Family}'",
+			"json_extract(attributes_json, '$.OS.Family')"},
+	} {
+		query, err := Parse(testCase.input)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", testCase.input, err)
+		}
+		where, _, err := query.SQL(true)
+		if err != nil {
+			t.Fatalf("SQL(%q) error = %v", testCase.input, err)
+		}
+		if !strings.Contains(where, testCase.postgres) {
+			t.Fatalf("%q compiled to %s, want %s",
+				testCase.input, where, testCase.postgres)
+		}
+		where, _, err = query.SQL(false)
+		if err != nil {
+			t.Fatalf("SQL(%q) error = %v", testCase.input, err)
+		}
+		if !strings.Contains(where, testCase.sqlite) {
+			t.Fatalf("%q compiled to %s, want %s",
+				testCase.input, where, testCase.sqlite)
+		}
+	}
+}
+
+// Column names stay case-insensitive: only the JSON key after "attributes."
+// carries meaning in its case.
+func TestColumnFieldsStayCaseInsensitive(t *testing.T) {
+	query, err := Parse(`Type = "host" AND ENVIRONMENT = "production"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Clauses[0].Field != "type" ||
+		query.Clauses[1].Field != "environment" {
+		t.Fatalf("clauses = %#v", query.Clauses)
+	}
+}
+
 // A time clause has to reach the database as an instant. Text reached
 // PostgreSQL as text and failed the whole statement, and reached the SQLite
 // fallback as a byte-by-byte comparison against a differently formatted column.
