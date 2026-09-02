@@ -52,7 +52,7 @@ func Parse(input string) (Query, error) {
 		if match == nil {
 			return Query{}, fmt.Errorf("invalid clause %q", strings.TrimSpace(part))
 		}
-		field := strings.ToLower(match[1])
+		field := normalizeField(match[1])
 		if !allowedField(field) {
 			return Query{}, fmt.Errorf("field %q is not allowed", field)
 		}
@@ -196,7 +196,7 @@ var fields = []Field{
 	},
 	{
 		"attributes.*", "path",
-		"수집 속성 경로. 예: attributes.os_name",
+		"수집 속성 경로. 대소문자를 구분합니다. 예: attributes.os_name",
 		`attributes.os_name = "Ubuntu"`,
 	},
 }
@@ -222,24 +222,40 @@ func Describe() Grammar {
 	}
 }
 
+const attributePrefix = "attributes."
+
+// normalizeField folds a field name to the spelling the grammar uses. A column
+// is named case-insensitively, but everything after "attributes." is a key in
+// the stored JSON document and JSON keys are case sensitive. Folding the whole
+// field lowercased that key too, so "attributes.assetTag" asked the document
+// for "assettag", a key nobody wrote, and the query answered with no rows and
+// no error - and /query/validate had already called the expression valid.
+func normalizeField(field string) string {
+	if len(field) > len(attributePrefix) &&
+		strings.EqualFold(field[:len(attributePrefix)], attributePrefix) {
+		return attributePrefix + field[len(attributePrefix):]
+	}
+	return strings.ToLower(field)
+}
+
 func allowedField(field string) bool {
 	for _, candidate := range fields {
 		if candidate.Name == field {
 			return true
 		}
 	}
-	return strings.HasPrefix(field, "attributes.") &&
-		safePath.MatchString(strings.TrimPrefix(field, "attributes."))
+	return strings.HasPrefix(field, attributePrefix) &&
+		safePath.MatchString(strings.TrimPrefix(field, attributePrefix))
 }
 
 func columnFor(field string, postgres bool) (string, error) {
 	if !allowedField(field) {
 		return "", fmt.Errorf("field %q is not allowed", field)
 	}
-	if !strings.HasPrefix(field, "attributes.") {
+	if !strings.HasPrefix(field, attributePrefix) {
 		return field, nil
 	}
-	path := strings.Split(strings.TrimPrefix(field, "attributes."), ".")
+	path := strings.Split(strings.TrimPrefix(field, attributePrefix), ".")
 	if postgres {
 		return "attributes_json #>> '{" + strings.Join(path, ",") + "}'", nil
 	}
