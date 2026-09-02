@@ -86,3 +86,51 @@ func TestColumnClauseStaysCaseInsensitiveOverHTTP(t *testing.T) {
 			validate.Code, validate.Body.String())
 	}
 }
+
+// An attribute is stored in a JSON document and extracted as text, so an
+// ordering comparison compared digit strings: "16000000000" sorts before
+// "2000000000" because '1' < '2'. A host with 16 GB was therefore reported as
+// holding less than the 2 GB bound, with HTTP 200 and no hint of it.
+func TestOrderingAnAttributeComparesNumbersAsNumbers(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	insertAssetWithAttributes(
+		t, server, "big", `{"memory_bytes":16000000000,"cpu_count":10}`,
+	)
+	insertAssetWithAttributes(
+		t, server, "small", `{"memory_bytes":1000000000,"cpu_count":9}`,
+	)
+
+	roomy := executeQueryNames(
+		t, server, cookie, csrf, `attributes.memory_bytes >= 2000000000`,
+	)
+	if len(roomy) != 1 || roomy[0] != "big" {
+		t.Fatalf("attributes.memory_bytes >= 2000000000 returned %v", roomy)
+	}
+	// "10" > "9" only when the two are read as numbers.
+	if busy := executeQueryNames(
+		t, server, cookie, csrf, `attributes.cpu_count > 9`,
+	); len(busy) != 1 || busy[0] != "big" {
+		t.Fatalf("attributes.cpu_count > 9 returned %v", busy)
+	}
+}
+
+// A value stored as text still orders as text, so reading a numeric-looking
+// bound as a number cannot take rows away from a clause that works today.
+func TestOrderingAnAttributeStoredAsTextStaysATextComparison(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	insertAssetWithAttributes(t, server, "jammy", `{"os_version":"22.04"}`)
+	insertAssetWithAttributes(t, server, "focal", `{"os_version":"18.04"}`)
+
+	found := executeQueryNames(
+		t, server, cookie, csrf, `attributes.os_version > "20.04"`,
+	)
+	if len(found) != 1 || found[0] != "jammy" {
+		t.Fatalf(`attributes.os_version > "20.04" returned %v`, found)
+	}
+}

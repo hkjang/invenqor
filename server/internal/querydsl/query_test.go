@@ -167,3 +167,62 @@ func TestUnreadableTimeIsRefusedBeforeItReachesTheDatabase(t *testing.T) {
 		}
 	}
 }
+
+// An attribute is extracted from the document as text, so an ordering
+// comparison compared digit strings: "16000000000" sorts before "2000000000"
+// because '1' < '2', and a host with 16 GB fell outside "at least 2 GB".
+func TestOrderingComparesAStoredNumberAsANumber(t *testing.T) {
+	query, err := Parse(`attributes.memory_bytes >= 2000000000`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		postgres bool
+		want     string
+	}{
+		{true, "(CASE WHEN jsonb_typeof(attributes_json #> '{memory_bytes}') " +
+			"= 'number' THEN (attributes_json #>> '{memory_bytes}')" +
+			"::double precision >= $1 ELSE attributes_json #>> " +
+			"'{memory_bytes}' >= $2 END)"},
+		{false, "(CASE WHEN json_type(attributes_json, '$.memory_bytes') " +
+			"IN ('integer','real') THEN json_extract(attributes_json, " +
+			"'$.memory_bytes') >= $1 ELSE json_extract(attributes_json, " +
+			"'$.memory_bytes') >= $2 END)"},
+	} {
+		where, args, err := query.SQL(testCase.postgres)
+		if err != nil {
+			t.Fatalf("SQL(%v) error = %v", testCase.postgres, err)
+		}
+		if !strings.Contains(where, testCase.want) {
+			t.Fatalf("SQL(%v) = %s, want %s",
+				testCase.postgres, where, testCase.want)
+		}
+		if len(args) != 2 || args[0] != 2000000000.0 ||
+			args[1] != "2000000000" {
+			t.Fatalf("args = %#v", args)
+		}
+	}
+}
+
+// Only an ordering comparison reads the value as a number. Equality is already
+// right for text, and reading "1.10" as a number there would stop an attribute
+// holding a version from matching itself.
+func TestEqualityAndTextValuesStayTextComparisons(t *testing.T) {
+	for _, input := range []string{
+		`attributes.cpu_count = 4`,
+		`attributes.cpu_count != 4`,
+		`attributes.os_version > "20.04.1"`,
+	} {
+		query, err := Parse(input)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", input, err)
+		}
+		where, args, err := query.SQL(true)
+		if err != nil {
+			t.Fatalf("SQL(%q) error = %v", input, err)
+		}
+		if strings.Contains(where, "CASE") || len(args) != 1 {
+			t.Fatalf("%q compiled to %s with args %#v", input, where, args)
+		}
+	}
+}
