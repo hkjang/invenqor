@@ -31,6 +31,18 @@ func (s *Server) validateQuery(response http.ResponseWriter, request *http.Reque
 		})
 		return
 	}
+	// Compiling is part of the answer. Parsing alone accepts a clause whose
+	// value the compiler still refuses - an unreadable time, a confidence that
+	// is not a number - and calling that valid sends the operator to execute
+	// with an expression that is about to be rejected there.
+	if _, _, err := query.SQL(
+		s.database.Mode() != storage.ModeSQLiteFallback,
+	); err != nil {
+		writeJSON(response, 200, map[string]any{
+			"valid": false, "error": err.Error(),
+		})
+		return
+	}
 	writeJSON(response, 200, map[string]any{"valid": true, "ast": query})
 }
 

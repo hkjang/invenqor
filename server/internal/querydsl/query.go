@@ -90,16 +90,11 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 			value = number
 		}
 		if clause.Field == "last_seen_at" || clause.Field == "first_seen_at" {
-			if strings.HasPrefix(clause.Value, "now - ") {
-				durationText := strings.Trim(
-					strings.TrimPrefix(clause.Value, "now - "), `"`,
-				)
-				duration, err := time.ParseDuration(durationText)
-				if err != nil {
-					return "", nil, errors.New("relative time duration is invalid")
-				}
-				value = time.Now().UTC().Add(-duration)
+			moment, err := parseTime(clause.Value)
+			if err != nil {
+				return "", nil, err
 			}
+			value = moment
 		}
 		args = append(args, value)
 		conditions = append(
@@ -108,6 +103,61 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 		)
 	}
 	return strings.Join(conditions, " AND "), args, nil
+}
+
+// timeLayouts are the absolute forms a time clause may name, most specific
+// first. A form without a zone is read as UTC, which is the zone every stored
+// timestamp is written in.
+var timeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02",
+}
+
+// parseTime resolves a time clause's value to an instant. Only the relative
+// "now - 24h" form was resolved before and anything else was handed to the
+// database as text, which was wrong in both storage modes. PostgreSQL compares
+// TIMESTAMPTZ, so a value it could not read as a timestamp failed the statement
+// and the operator got HTTP 500 with no hint of the typo. The SQLite fallback
+// stores the column as text written from a Go time, so "2026-01-01T00:00:00Z"
+// was compared byte by byte against "2026-01-01 00:00:00 +0000 UTC" - no error,
+// just the wrong rows.
+func parseTime(value string) (time.Time, error) {
+	text := strings.TrimSpace(value)
+	if strings.EqualFold(text, "now") {
+		return time.Now().UTC(), nil
+	}
+	if rest, found := cutRelativeNow(text); found {
+		duration, err := time.ParseDuration(strings.TrimSpace(rest))
+		if err != nil {
+			return time.Time{}, errors.New("relative time duration is invalid")
+		}
+		return time.Now().UTC().Add(-duration), nil
+	}
+	for _, layout := range timeLayouts {
+		if moment, err := time.Parse(layout, text); err == nil {
+			return moment.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf(
+		"time value %q is neither %s nor a timestamp such as "+
+			`"2026-01-31T09:00:00Z"`,
+		text, `"now - 24h"`,
+	)
+}
+
+func cutRelativeNow(text string) (string, bool) {
+	if len(text) < 4 || !strings.EqualFold(text[:3], "now") {
+		return "", false
+	}
+	rest := strings.TrimSpace(text[3:])
+	if !strings.HasPrefix(rest, "-") {
+		return "", false
+	}
+	return strings.TrimPrefix(rest, "-"), true
 }
 
 // Field describes one queryable field for the console's reference panel. The
@@ -134,8 +184,16 @@ var fields = []Field{
 	{"location", "text", "위치", `location = "IDC-1"`},
 	{"source", "text", "수집 원천", `source = "agent"`},
 	{"confidence", "number", "분류 확신도 0~1", "confidence >= 0.8"},
-	{"first_seen_at", "time", "최초 확인 시각", `first_seen_at >= "now - 168h"`},
-	{"last_seen_at", "time", "최근 확인 시각", `last_seen_at < "now - 24h"`},
+	{
+		"first_seen_at", "time",
+		`최초 확인 시각. "now - 168h" 또는 "2026-01-31T09:00:00Z"`,
+		`first_seen_at >= "now - 168h"`,
+	},
+	{
+		"last_seen_at", "time",
+		`최근 확인 시각. "now - 24h" 또는 "2026-01-31T09:00:00Z"`,
+		`last_seen_at < "now - 24h"`,
+	},
 	{
 		"attributes.*", "path",
 		"수집 속성 경로. 예: attributes.os_name",
