@@ -81,6 +81,14 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 		if err != nil {
 			return "", nil, err
 		}
+		if number, ok := numericAttributeClause(clause); ok {
+			args = append(args, number, clause.Value)
+			conditions = append(conditions, numericAttributeCondition(
+				clause.Field, clause.Operator, postgres,
+				len(args)-1, len(args),
+			))
+			continue
+		}
 		value := any(clause.Value)
 		if clause.Field == "confidence" {
 			number, err := strconv.ParseFloat(clause.Value, 64)
@@ -196,7 +204,8 @@ var fields = []Field{
 	},
 	{
 		"attributes.*", "path",
-		"수집 속성 경로. 대소문자를 구분합니다. 예: attributes.os_name",
+		"수집 속성 경로. 대소문자를 구분하며, 숫자로 저장된 값은 " +
+			"<, <=, >, >= 비교에서 숫자로 비교합니다. 예: attributes.os_name",
 		`attributes.os_name = "Ubuntu"`,
 	},
 }
@@ -255,11 +264,67 @@ func columnFor(field string, postgres bool) (string, error) {
 	if !strings.HasPrefix(field, attributePrefix) {
 		return field, nil
 	}
+	text, _ := attributeExpressions(field, postgres)
+	return text, nil
+}
+
+// attributeExpressions returns the two things an attributes.* path is asked
+// for: the extracted value as text, and the JSON type of the stored value.
+func attributeExpressions(field string, postgres bool) (text, jsonType string) {
 	path := strings.Split(strings.TrimPrefix(field, attributePrefix), ".")
 	if postgres {
-		return "attributes_json #>> '{" + strings.Join(path, ",") + "}'", nil
+		braced := "'{" + strings.Join(path, ",") + "}'"
+		return "attributes_json #>> " + braced,
+			"jsonb_typeof(attributes_json #> " + braced + ")"
 	}
-	return "json_extract(attributes_json, '$." + strings.Join(path, ".") + "')", nil
+	dotted := "'$." + strings.Join(path, ".") + "'"
+	return "json_extract(attributes_json, " + dotted + ")",
+		"json_type(attributes_json, " + dotted + ")"
+}
+
+// numericAttributeClause reports the number an ordering comparison on an
+// attribute path is asking about. An attribute is extracted from the document
+// as text, so "attributes.memory_bytes >= 2000000000" compared digit strings:
+// "16000000000" sorts before "2000000000" because '1' < '2', and a host with
+// 16 GB was reported as having less memory than the bound. Equality is left
+// alone - it is already right for text, and reading "1.10" as a number there
+// would stop an attribute holding a version from matching itself.
+func numericAttributeClause(clause Clause) (float64, bool) {
+	if !strings.HasPrefix(clause.Field, attributePrefix) {
+		return 0, false
+	}
+	switch clause.Operator {
+	case "<", "<=", ">", ">=":
+	default:
+		return 0, false
+	}
+	number, err := strconv.ParseFloat(strings.TrimSpace(clause.Value), 64)
+	if err != nil {
+		return 0, false
+	}
+	return number, true
+}
+
+// numericAttributeCondition compares a stored JSON number as a number and
+// anything else as text, so the fix cannot take rows away from a clause that
+// orders text today, such as attributes.os_version > "20.04" over "22.04".
+func numericAttributeCondition(
+	field string,
+	operator string,
+	postgres bool,
+	numberArg int,
+	textArg int,
+) string {
+	text, jsonType := attributeExpressions(field, postgres)
+	stored, isNumber := text, jsonType+" IN ('integer','real')"
+	if postgres {
+		stored = "(" + text + ")::double precision"
+		isNumber = jsonType + " = 'number'"
+	}
+	return fmt.Sprintf(
+		"(CASE WHEN %s THEN %s %s $%d ELSE %s %s $%d END)",
+		isNumber, stored, operator, numberArg, text, operator, textArg,
+	)
 }
 
 func splitAND(input string) ([]string, error) {
