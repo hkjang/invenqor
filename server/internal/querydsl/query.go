@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -104,6 +106,13 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 			}
 			value = moment
 		}
+		if clause.Field == "id" {
+			identifier, err := parseIdentifier(clause.Value)
+			if err != nil {
+				return "", nil, err
+			}
+			value = identifier
+		}
 		args = append(args, value)
 		conditions = append(
 			conditions,
@@ -157,6 +166,28 @@ func parseTime(value string) (time.Time, error) {
 	)
 }
 
+// parseIdentifier resolves an id clause's value to the one spelling the column
+// holds. The value used to be handed to the database as the caller typed it,
+// and the id column is a UUID: PostgreSQL failed the statement on anything it
+// could not read as one, so a mistyped identifier came back as HTTP 500 with
+// no hint of the value, and the SQLite fallback compared it as text and
+// answered 200 with an empty list as though the asset did not exist. The two
+// modes also disagreed on a UUID that is merely spelled differently -
+// PostgreSQL reads an upper-cased or undashed one as the same value and the
+// fallback's text comparison does not - so the spelling is folded here to the
+// canonical form every asset is stored under.
+func parseIdentifier(value string) (string, error) {
+	identifier, err := uuid.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return "", fmt.Errorf(
+			"id value %q is not an asset UUID such as "+
+				`"0d0f4d64-9d5b-4f4a-9a1e-3a6f2c8b7e10"`,
+			value,
+		)
+	}
+	return identifier.String(), nil
+}
+
 func cutRelativeNow(text string) (string, bool) {
 	if len(text) < 4 || !strings.EqualFold(text[:3], "now") {
 		return "", false
@@ -183,7 +214,10 @@ type Field struct {
 var fields = []Field{
 	{"name", "text", "자산 이름", `name = "web-01"`},
 	{"asset_key", "text", "수집 원천이 부여한 고유 키", `asset_key = "host:web-01"`},
-	{"id", "text", "자산 UUID", `id = "0d0f…"`},
+	{
+		"id", "uuid", "자산 UUID. 대소문자와 하이픈 표기는 구분하지 않습니다",
+		`id = "0d0f4d64-9d5b-4f4a-9a1e-3a6f2c8b7e10"`,
+	},
 	{"type", "text", "자산 유형", `type = "host"`},
 	{"status", "text", "수명주기 상태", `status = "active"`},
 	{"environment", "text", "분류가 판정한 운영 환경", `environment = "production"`},
