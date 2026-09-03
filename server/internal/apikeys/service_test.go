@@ -179,6 +179,50 @@ func TestConcurrentAPIKeyScopeAdditionsDoNotLoseUpdates(t *testing.T) {
 	}
 }
 
+// Create refuses a key with no scopes because such a key authenticates and is
+// then refused by every scope check. ReplaceScopes and RemoveScope reach the
+// same stored state, so they have to refuse it too.
+func TestAPIKeyScopeListCannotBeEmptied(t *testing.T) {
+	runtime := storagetest.Open(t)
+	defer runtime.Close()
+	userID := uuid.NewString()
+	if _, err := runtime.DB().Exec(
+		`INSERT INTO users(
+		 id, username, normalized_username, display_name, active, super_admin
+		 ) VALUES ($1,'empty.owner','empty.owner','Empty Owner',TRUE,TRUE)`,
+		userID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	service := apikeys.NewService(runtime.DB())
+	created, err := service.Create(
+		context.Background(), userID, "reporting", []string{"assets.read"}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReplaceScopes(
+		context.Background(), created.Key.ID, []string{},
+	); !errors.Is(err, apikeys.ErrScopesRequired) {
+		t.Fatalf("ReplaceScopes() with an empty list error = %v", err)
+	}
+	if _, err := service.RemoveScope(
+		context.Background(), created.Key.ID, "assets.read",
+	); !errors.Is(err, apikeys.ErrScopesRequired) {
+		t.Fatalf("RemoveScope() of the last scope error = %v", err)
+	}
+	kept, err := service.Get(context.Background(), created.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Scopes) != 1 || kept.Scopes[0] != "assets.read" {
+		t.Fatalf("scopes after refused removals = %v", kept.Scopes)
+	}
+	if !errors.Is(apikeys.ErrScopesRequired, apikeys.ErrInvalid) {
+		t.Fatal("ErrScopesRequired must stay reportable as invalid input")
+	}
+}
+
 func TestAPIKeyRejectsUnknownScopesAndExpiredKeys(t *testing.T) {
 	runtime := storagetest.Open(t)
 	defer runtime.Close()
