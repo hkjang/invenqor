@@ -18,6 +18,7 @@ import (
 	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/audit"
 	"github.com/hkjang/invenqor/server/internal/classify"
+	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 type assetView struct {
@@ -103,8 +104,9 @@ func (filter assetListFilter) where() (string, []any) {
 	}
 	if filter.Search != "" {
 		add(
-			" AND (LOWER(name) LIKE $%[1]d OR LOWER(asset_key) LIKE $%[1]d)",
-			"%"+strings.ToLower(filter.Search)+"%",
+			" AND (LOWER(name) LIKE $%[1]d"+storage.LikeEscapeClause+
+				" OR LOWER(asset_key) LIKE $%[1]d"+storage.LikeEscapeClause+")",
+			storage.LikeContains(strings.ToLower(filter.Search)),
 		)
 	}
 	if filter.Type != "" {
@@ -121,8 +123,8 @@ func (filter assetListFilter) where() (string, []any) {
 	}
 	if filter.Owner != "" {
 		add(
-			" AND LOWER(owner_department) LIKE $%d",
-			"%"+strings.ToLower(filter.Owner)+"%",
+			" AND LOWER(owner_department) LIKE $%d"+storage.LikeEscapeClause,
+			storage.LikeContains(strings.ToLower(filter.Owner)),
 		)
 	}
 	if !filter.IncludeDeleted {

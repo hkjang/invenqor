@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hkjang/invenqor/server/internal/storage"
 	"github.com/hkjang/invenqor/server/internal/version"
 )
 
@@ -604,11 +605,13 @@ func (s *Server) mcpAssetSearch(r *http.Request, arguments *mcpArguments) (any, 
 	}
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT `+assetColumns+` FROM assets
-		 WHERE ($1='' OR LOWER(name) LIKE LOWER($2) OR LOWER(asset_key) LIKE LOWER($2))
+		 WHERE ($1='' OR LOWER(name) LIKE LOWER($2)`+storage.LikeEscapeClause+`
+		   OR LOWER(asset_key) LIKE LOWER($2)`+storage.LikeEscapeClause+`)
 		 AND ($3='' OR type=$3) AND ($4='' OR status=$4)
 		 AND deleted_at IS NULL AND ($7 OR type <> 'process')
 		 ORDER BY last_seen_at DESC, id LIMIT $5 OFFSET $6`,
-		strings.TrimSpace(input.Q), "%"+strings.TrimSpace(input.Q)+"%",
+		strings.TrimSpace(input.Q),
+		storage.LikeContains(strings.TrimSpace(input.Q)),
 		strings.TrimSpace(input.Type), strings.TrimSpace(input.Status),
 		input.Limit, input.Offset, input.IncludeObservations,
 	)
