@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/hkjang/invenqor/server/internal/apitime"
+	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 // softwareProductAttributes is the stable contract emitted by the automatic
@@ -301,10 +302,11 @@ func (s *Server) querySoftwareInventory(
 func softwareInventoryWhere(query softwareInventoryQuery, arguments *[]any) string {
 	var where strings.Builder
 	if query.Query != "" {
-		pattern := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(query.Query)
 		where.WriteString(" AND p.search_text LIKE ")
-		where.WriteString(appendSoftwareArgument(arguments, "%"+pattern+"%"))
-		where.WriteString(" ESCAPE '!'")
+		where.WriteString(appendSoftwareArgument(
+			arguments, storage.LikeContains(query.Query),
+		))
+		where.WriteString(storage.LikeEscapeClause)
 	}
 	for _, filter := range []struct {
 		column string

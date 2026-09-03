@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/apitime"
+	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 const (
@@ -164,11 +165,11 @@ func (store *Store) List(
 		addCondition("instance_id", filter.InstanceID)
 	}
 	if query := strings.ToLower(strings.TrimSpace(filter.Query)); query != "" {
-		arguments = append(arguments, "%"+query+"%")
+		arguments = append(arguments, storage.LikeContains(query))
 		where += fmt.Sprintf(
 			` AND LOWER(event_code || ' ' || message || ' ' ||
 			 request_id || ' ' || agent_id || ' ' || source_ip || ' ' ||
-			 instance_id) LIKE $%d`,
+			 instance_id) LIKE $%d`+storage.LikeEscapeClause,
 			len(arguments),
 		)
 	}

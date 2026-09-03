@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hkjang/invenqor/server/internal/storage"
 )
 
 // The audit log answers "who changed this, and when". The console used to fetch
@@ -94,14 +96,18 @@ func (filter auditFilter) conditions() (string, []any) {
 		add(" AND result = $%d", filter.Result)
 	}
 	if filter.Actor != "" {
-		add(" AND LOWER(actor_name) LIKE $%d", "%"+strings.ToLower(filter.Actor)+"%")
+		add(
+			" AND LOWER(actor_name) LIKE $%d"+storage.LikeEscapeClause,
+			storage.LikeContains(strings.ToLower(filter.Actor)),
+		)
 	}
 	if filter.Query != "" {
 		add(
 			` AND LOWER(action || ' ' || actor_name || ' ' || resource_type
 			 || ' ' || COALESCE(resource_id,'') || ' ' || request_id
-			 || ' ' || source_ip || ' ' || reason) LIKE $%d`,
-			"%"+strings.ToLower(filter.Query)+"%",
+			 || ' ' || source_ip || ' ' || reason) LIKE $%d`+
+				storage.LikeEscapeClause,
+			storage.LikeContains(strings.ToLower(filter.Query)),
 		)
 	}
 	if filter.From != nil {
