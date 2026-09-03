@@ -68,6 +68,10 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		input.Scopes,
 		expiry,
 	)
+	if errors.Is(err, apikeys.ErrScopesRequired) {
+		writeAPIError(w, r, 400, "INVALID_SCOPES", "At least one scope is required.")
+		return
+	}
 	if err != nil {
 		writeAPIError(w, r, 400, "INVALID_API_KEY", err.Error())
 		return
@@ -87,7 +91,7 @@ func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Scopes != nil {
-		if _, err := apikeys.ValidScopes(*input.Scopes); err != nil {
+		if _, err := apikeys.RequireScopes(*input.Scopes); err != nil {
 			writeAPIError(w, r, 400, "INVALID_SCOPES", err.Error())
 			return
 		}
@@ -224,6 +228,8 @@ func apiKeyError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, apikeys.ErrNotFound):
 		writeAPIError(w, r, 404, "API_KEY_NOT_FOUND", "The API key does not exist or is inactive.")
+	case errors.Is(err, apikeys.ErrScopesRequired):
+		writeAPIError(w, r, 400, "INVALID_SCOPES", "An API key must keep at least one scope. Revoke the key instead of emptying it.")
 	case errors.Is(err, apikeys.ErrInvalid):
 		writeAPIError(w, r, 400, "INVALID_API_KEY", err.Error())
 	case errors.Is(err, apikeys.ErrConflict):

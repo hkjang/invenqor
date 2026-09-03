@@ -24,6 +24,11 @@ var (
 	ErrNotFound     = errors.New("API key does not exist")
 	ErrConflict     = errors.New("API key changed concurrently")
 	ErrForbidden    = errors.New("API key operation is not allowed")
+	// ErrScopesRequired keeps the rule Create has always applied on the paths
+	// that change an existing key. A key with no scopes still authenticates,
+	// so it is not disabled: it is refused by every scope check instead, which
+	// reads as a broken endpoint rather than a retired credential.
+	ErrScopesRequired = fmt.Errorf("%w: at least one scope is required", ErrInvalid)
 )
 
 const scopeMutationAttempts = 8
@@ -114,6 +119,20 @@ func ValidScopes(scopes []string) ([]string, error) {
 	return result, nil
 }
 
+// RequireScopes validates a key's complete scope list. Callers that replace
+// the whole list use this instead of ValidScopes, which accepts an empty list
+// because AddScopes and RemoveScope pass it a fragment rather than the result.
+func RequireScopes(scopes []string) ([]string, error) {
+	validated, err := ValidScopes(scopes)
+	if err != nil {
+		return nil, err
+	}
+	if len(validated) == 0 {
+		return nil, ErrScopesRequired
+	}
+	return validated, nil
+}
+
 func (s *Service) Create(
 	ctx context.Context,
 	userID string,
@@ -125,12 +144,9 @@ func (s *Service) Create(
 	if name == "" || len(name) > 120 || userID == "" {
 		return Created{}, ErrInvalid
 	}
-	scopes, err := ValidScopes(scopes)
+	scopes, err := RequireScopes(scopes)
 	if err != nil {
 		return Created{}, err
-	}
-	if len(scopes) == 0 {
-		return Created{}, fmt.Errorf("%w: at least one scope is required", ErrInvalid)
 	}
 	if expiresAt != nil && !expiresAt.After(time.Now().UTC()) {
 		return Created{}, fmt.Errorf("%w: expiry must be in the future", ErrInvalid)
@@ -308,7 +324,7 @@ func (s *Service) mutateScopes(
 		if err != nil {
 			return Key{}, err
 		}
-		next, err = ValidScopes(next)
+		next, err = RequireScopes(next)
 		if err != nil {
 			return Key{}, err
 		}
@@ -361,7 +377,7 @@ func (s *Service) Update(
 	nextScopes := "[]"
 	expectedScopes := "[]"
 	if scopes != nil {
-		validated, err := ValidScopes(*scopes)
+		validated, err := RequireScopes(*scopes)
 		if err != nil {
 			return Key{}, err
 		}

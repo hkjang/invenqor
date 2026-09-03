@@ -866,7 +866,7 @@ paths:
               required: [name, scopes]
               properties:
                 name: {type: string, maxLength: 120}
-                scopes: {type: array, items: {$ref: "#/components/schemas/ApiKeyScope"}}
+                scopes: {type: array, minItems: 1, items: {$ref: "#/components/schemas/ApiKeyScope"}}
                 expires_at: {type: string, format: date-time}
       responses:
         "201": {description: API key and one-time secret}
@@ -884,11 +884,12 @@ paths:
     patch:
       operationId: updateApiKey
       summary: Rename an API key or replace all scopes
+      description: A replacement scope list must keep at least one scope; revoke the key to retire it.
       security: [{session: []}]
       parameters: [{$ref: "#/components/parameters/KeyId"}]
       responses:
         "200": {description: Updated}
-        "400": {description: Invalid input}
+        "400": {description: "Invalid input, including an empty scope list"}
         "409": {description: Concurrent scope update conflict; reload the key and retry}
     delete:
       operationId: revokeApiKey
@@ -931,12 +932,14 @@ paths:
     delete:
       operationId: removeApiKeyScope
       summary: Remove one scope from an API key
+      description: The key's last scope cannot be removed; revoke the key to retire it.
       security: [{session: []}]
       parameters:
         - {$ref: "#/components/parameters/KeyId"}
         - {in: path, name: scope, required: true, schema: {$ref: "#/components/schemas/ApiKeyScope"}}
       responses:
         "200": {description: Scope removed}
+        "400": {description: "Unassigned scope, or the key's last scope"}
         "404": {description: Key or scope not found}
         "409": {description: Concurrent scope update conflict; reload the key and retry}
   /api/v1/admin/settings/postgresql:
