@@ -226,3 +226,56 @@ func TestEqualityAndTextValuesStayTextComparisons(t *testing.T) {
 		}
 	}
 }
+
+// The id column holds a UUID. A value that is not one was handed to the
+// database as the caller typed it, and PostgreSQL failed the whole statement on
+// the type, so a mistyped identifier reached the operator as HTTP 500 with
+// nothing naming the value it could not read.
+func TestIdentifierValueMustBeAUUID(t *testing.T) {
+	for _, input := range []string{
+		`id = "web-01"`,
+		`id = "0d0f"`,
+		`id != "host:web-01"`,
+	} {
+		query, err := Parse(input)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", input, err)
+		}
+		for _, postgres := range []bool{true, false} {
+			_, _, err := query.SQL(postgres)
+			if err == nil {
+				t.Fatalf("SQL(%q, postgres=%v) accepted a value that is "+
+					"not a UUID", input, postgres)
+			}
+			if !strings.Contains(err.Error(), query.Clauses[0].Value) {
+				t.Fatalf("SQL(%q) error = %v, want the value named",
+					input, err)
+			}
+		}
+	}
+}
+
+// A UUID names the same asset however it is spelled. PostgreSQL reads an
+// upper-cased or undashed one as the same value and the SQLite fallback's text
+// comparison does not, so the spelling is folded to the one form every asset is
+// stored under before either mode sees it.
+func TestIdentifierValueIsFoldedToItsCanonicalSpelling(t *testing.T) {
+	canonical := "0d0f4d64-9d5b-4f4a-9a1e-3a6f2c8b7e10"
+	for _, spelling := range []string{
+		canonical,
+		"0D0F4D64-9D5B-4F4A-9A1E-3A6F2C8B7E10",
+		"0d0f4d649d5b4f4a9a1e3a6f2c8b7e10",
+	} {
+		query, err := Parse(`id = "` + spelling + `"`)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", spelling, err)
+		}
+		_, args, err := query.SQL(true)
+		if err != nil {
+			t.Fatalf("SQL(%q) error = %v", spelling, err)
+		}
+		if len(args) != 1 || args[0] != canonical {
+			t.Fatalf("%q compiled to args %#v", spelling, args)
+		}
+	}
+}
