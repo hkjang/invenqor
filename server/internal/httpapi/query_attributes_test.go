@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"sort"
 	"testing"
 
 	"github.com/google/uuid"
@@ -132,5 +133,34 @@ func TestOrderingAnAttributeStoredAsTextStaysATextComparison(t *testing.T) {
 	)
 	if len(found) != 1 || found[0] != "jammy" {
 		t.Fatalf(`attributes.os_version > "20.04" returned %v`, found)
+	}
+}
+
+// An attribute an asset never reported extracts SQL NULL, and "!=" against NULL
+// is unknown rather than true, so the asset fell out of a clause it plainly
+// satisfies. An operator asking which assets are not production got the answer
+// without the ones nobody had labelled at all, with HTTP 200 and no hint of it.
+func TestAttributeInequalityReturnsAssetsMissingTheKey(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	cookie, csrf := authenticateInitialAdmin(t, server, runtime)
+
+	insertAssetWithAttributes(t, server, "labelled", `{"env":"prod"}`)
+	insertAssetWithAttributes(t, server, "staged", `{"env":"staging"}`)
+	insertAssetWithAttributes(t, server, "unlabelled", `{"os_name":"Ubuntu"}`)
+
+	found := executeQueryNames(
+		t, server, cookie, csrf, `attributes.env != "prod"`,
+	)
+	sort.Strings(found)
+	if len(found) != 2 || found[0] != "staged" || found[1] != "unlabelled" {
+		t.Fatalf(`attributes.env != "prod" returned %v`, found)
+	}
+	// Equality still means the attribute says so, so the fix cannot hand an
+	// unlabelled asset to a clause asking for a value it never reported.
+	if labelled := executeQueryNames(
+		t, server, cookie, csrf, `attributes.env = "prod"`,
+	); len(labelled) != 1 || labelled[0] != "labelled" {
+		t.Fatalf(`attributes.env = "prod" returned %v`, labelled)
 	}
 }

@@ -83,6 +83,13 @@ func (q Query) SQL(postgres bool) (string, []any, error) {
 		if err != nil {
 			return "", nil, err
 		}
+		if isAttributeInequality(clause) {
+			args = append(args, clause.Value)
+			conditions = append(conditions, fmt.Sprintf(
+				"(%s IS NULL OR %s != $%d)", column, column, len(args),
+			))
+			continue
+		}
 		if number, ok := numericAttributeClause(clause); ok {
 			args = append(args, number, clause.Value)
 			conditions = append(conditions, numericAttributeCondition(
@@ -239,7 +246,8 @@ var fields = []Field{
 	{
 		"attributes.*", "path",
 		"수집 속성 경로. 대소문자를 구분하며, 숫자로 저장된 값은 " +
-			"<, <=, >, >= 비교에서 숫자로 비교합니다. 예: attributes.os_name",
+			"<, <=, >, >= 비교에서 숫자로 비교합니다. != 는 해당 속성이 " +
+			"없는 자산도 포함합니다. 예: attributes.os_name",
 		`attributes.os_name = "Ubuntu"`,
 	},
 }
@@ -314,6 +322,19 @@ func attributeExpressions(field string, postgres bool) (text, jsonType string) {
 	dotted := "'$." + strings.Join(path, ".") + "'"
 	return "json_extract(attributes_json, " + dotted + ")",
 		"json_type(attributes_json, " + dotted + ")"
+}
+
+// isAttributeInequality reports whether a clause asks which assets an attribute
+// does not describe. An attribute path is extracted from the stored document,
+// and an asset that never reported the key extracts SQL NULL, where "!=" is
+// unknown rather than true. The asset was therefore dropped from a clause it
+// plainly satisfies: attributes.env != "prod" answered without every asset
+// whose env was never collected - the unlabelled ones an operator asking what
+// is not production most needs to see - with HTTP 200 and nothing saying so.
+// Every queryable column is NOT NULL, so only an attribute path is affected.
+func isAttributeInequality(clause Clause) bool {
+	return clause.Operator == "!=" &&
+		strings.HasPrefix(clause.Field, attributePrefix)
 }
 
 // numericAttributeClause reports the number an ordering comparison on an

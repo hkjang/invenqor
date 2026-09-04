@@ -279,3 +279,51 @@ func TestIdentifierValueIsFoldedToItsCanonicalSpelling(t *testing.T) {
 		}
 	}
 }
+
+// An attribute path extracts SQL NULL from an asset that never reported the
+// key, and "!=" against NULL is unknown rather than true, so the clause dropped
+// the assets it most plainly holds for: the ones the attribute says nothing
+// about.
+func TestAttributeInequalityKeepsAssetsWithoutTheKey(t *testing.T) {
+	query, err := Parse(`attributes.env != "prod"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		postgres bool
+		want     string
+	}{
+		{true, "(attributes_json #>> '{env}' IS NULL OR " +
+			"attributes_json #>> '{env}' != $1)"},
+		{false, "(json_extract(attributes_json, '$.env') IS NULL OR " +
+			"json_extract(attributes_json, '$.env') != $1)"},
+	} {
+		where, args, err := query.SQL(testCase.postgres)
+		if err != nil {
+			t.Fatalf("SQL(%v) error = %v", testCase.postgres, err)
+		}
+		if !strings.Contains(where, testCase.want) {
+			t.Fatalf("SQL(%v) = %s, want %s",
+				testCase.postgres, where, testCase.want)
+		}
+		if len(args) != 1 || args[0] != "prod" {
+			t.Fatalf("args = %#v", args)
+		}
+	}
+}
+
+// Every queryable column is NOT NULL, so a column clause has no missing value
+// to account for and stays the plain comparison it already was.
+func TestColumnInequalityStaysAPlainComparison(t *testing.T) {
+	query, err := Parse(`environment != "production"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	where, args, err := query.SQL(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(where, "IS NULL OR") || len(args) != 1 {
+		t.Fatalf("compiled to %s with args %#v", where, args)
+	}
+}
