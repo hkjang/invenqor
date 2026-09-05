@@ -1,6 +1,6 @@
 [package]
 name = "invenqor-agent"
-version = "0.2.25"
+version = "0.2.26"
 edition = "2021"
 rust-version = "1.85"
 description = "Portable, progressively degrading Linux and Windows asset inventory agent"
