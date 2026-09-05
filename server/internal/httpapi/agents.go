@@ -722,6 +722,10 @@ func (s *Server) listAgents(
 		}
 		result = append(result, agent)
 	}
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, map[string]any{"agents": result})
 }
 

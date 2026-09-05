@@ -60,6 +60,10 @@ func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
 			"updated_by": user, "updated_at": apiTime(updated),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"items": items,
 		"categories": []string{
@@ -213,6 +217,10 @@ func (s *Server) settingHistory(w http.ResponseWriter, r *http.Request) {
 			"after":      maskedSettingValue(after, secret),
 			"changed_by": user, "reason": reason, "created_at": apiTime(created),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		s.internalError(w, r, err)
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }

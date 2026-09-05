@@ -298,6 +298,10 @@ func (s *Server) getAsset(response http.ResponseWriter, request *http.Request) {
 			"deleted_at": apiTime(deleted),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
 	writeJSON(response, 200, map[string]any{"asset": asset, "sources": sources})
 }
 
@@ -542,6 +546,10 @@ func (s *Server) assetHistory(response http.ResponseWriter, request *http.Reques
 			"actor_id": actorID, "reason": reason, "occurred_at": apiTime(occurred),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
 	writeJSON(response, 200, map[string]any{"items": items})
 }
 
@@ -584,6 +592,10 @@ func (s *Server) assetRelations(response http.ResponseWriter, request *http.Requ
 			"source_asset": map[string]any{"name": sourceName, "type": sourceType},
 			"target_asset": map[string]any{"name": targetName, "type": targetType},
 		})
+	}
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
 	}
 	writeJSON(response, 200, map[string]any{"items": items})
 }
@@ -671,8 +683,22 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		}
 		for rows.Next() {
 			var sourceID string
-			_ = rows.Scan(&sourceID)
+			if err := rows.Scan(&sourceID); err != nil {
+				rows.Close()
+				s.internalError(response, request, err)
+				return
+			}
 			moved = append(moved, sourceID)
+		}
+		// These identifiers are written into the asset_changes record below as
+		// the list of sources this merge moved. A failed scan used to append an
+		// empty string and a failed iteration used to stop early, either of
+		// which leaves a permanent record of a merge that did not happen the
+		// way it says it did.
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			s.internalError(response, request, err)
+			return
 		}
 		rows.Close()
 		if _, err := tx.ExecContext(

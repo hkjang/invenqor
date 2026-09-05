@@ -379,7 +379,15 @@ func (store *Store) prune(ctx context.Context) {
 			ids = append(ids, id)
 		}
 	}
+	// A failed iteration yields only the rows that arrived, so this pass holds
+	// a fragment of the page rather than the page. Every id in it is genuinely
+	// past the retention count and deleting them would be safe, but the pass is
+	// dropped rather than treated as a sweep; the next one reads the list again.
+	iterationErr := rows.Err()
 	_ = rows.Close()
+	if iterationErr != nil {
+		return
+	}
 	for _, id := range ids {
 		_, _ = store.database.ExecContext(
 			ctx,
