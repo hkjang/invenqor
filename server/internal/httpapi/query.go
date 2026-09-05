@@ -92,6 +92,14 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 		}
 		items = append(items, asset)
 	}
+	// An iteration that ended in a failure looks exactly like one that reached
+	// the last row, so without this a truncated result was returned as the
+	// answer - and the audit record below would have written down the short
+	// count as the number of assets matching the expression.
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
 	s.recordAdminAudit(
 		request, "query.execute", "query", "", nil,
 		map[string]any{"dsl": input.Query, "result_count": len(items)}, "",
