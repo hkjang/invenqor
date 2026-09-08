@@ -219,16 +219,20 @@ func (s *Server) exportAssets(response http.ResponseWriter, request *http.Reques
 	filter := parseAssetListFilter(request)
 	filter.Offset = 0
 	filter.Limit = queryInt(request, "limit", 10_000, 1, 100_000)
-	items, err := s.assetRows(request, filter)
+	// One row past the limit, so a result that ends exactly on it is not
+	// reported as cut short. See csvExportHeaders.
+	lookahead := filter
+	lookahead.Limit = filter.Limit + 1
+	items, err := s.assetRows(request, lookahead)
 	if err != nil {
 		s.internalError(response, request, err)
 		return
 	}
-	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	response.Header().Set(
-		"Content-Disposition",
-		`attachment; filename="invenqor-assets.csv"`,
-	)
+	truncated := len(items) > filter.Limit
+	if truncated {
+		items = items[:filter.Limit]
+	}
+	csvExportHeaders(response, "invenqor-assets", filter.Limit, truncated)
 	_, _ = response.Write([]byte{0xEF, 0xBB, 0xBF})
 	writer := csv.NewWriter(response)
 	_ = writer.Write([]string{
