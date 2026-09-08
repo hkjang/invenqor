@@ -1,6 +1,6 @@
 # Invenqor 자산 API·MCP·키 관리 가이드
 
-대상 Server 버전: v0.2.28 · 기준일: 2026-08-24
+대상 Server 버전: v0.2.29 · 기준일: 2026-08-24
 
 ## 1. 목적과 설계 원칙
 
@@ -192,6 +192,12 @@ Accept: application/json
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
   'https://invenqor.example.com:7070/api/v1/external/assets?q=ubuntu&type=host&status=active&limit=50'
 ```
+
+Query DSL 실행이 한 번에 돌려주는 자산 수는 기본 100건이고 `limit`으로 최대
+500건까지 조정합니다. 응답은 실제로 적용된 `limit`과, 조건에 맞는 자산이 그보다
+많아 결과가 잘렸는지를 알리는 `truncated`를 함께 돌려줍니다. 이 엔드포인트에는
+offset이 없으므로 `truncated`가 `true`이면 조건을 좁히거나 `limit`을 올려 다시
+실행하십시오.
 
 API key 인증에는 Cookie와 CSRF를 사용하지 않습니다. 키를 URL query, 로그,
 지원 티켓, source control에 넣지 마십시오.
