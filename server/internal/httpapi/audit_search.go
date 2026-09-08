@@ -300,6 +300,37 @@ func spreadsheetSafe(value string) string {
 	return value
 }
 
+// csvExportHeaders names the extract and says so when the row limit cut it
+// short.
+//
+// Both exports read a bounded number of rows, and a result that reached the
+// bound was written out as though it were the whole answer: an inventory
+// hand-off missing hosts, an audit extract missing entries, with nothing in the
+// file or the response to show it. A truncated evidence file is worse than a
+// refused one, because the reader has no reason to doubt it.
+//
+// The name is the part that survives the download. A browser saves the file
+// under whatever this says and the spreadsheet shows it in the title bar, so an
+// extract that is missing rows arrives called partial, long after the response
+// headers are gone. Those headers carry the same fact for an API client.
+func csvExportHeaders(
+	response http.ResponseWriter,
+	name string,
+	limit int,
+	truncated bool,
+) {
+	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	if truncated {
+		name += "-partial"
+		response.Header().Set("X-Invenqor-Truncated", "true")
+		response.Header().Set("X-Invenqor-Row-Limit", strconv.Itoa(limit))
+	}
+	response.Header().Set(
+		"Content-Disposition",
+		`attachment; filename="`+name+`.csv"`,
+	)
+}
+
 func (s *Server) exportAudit(response http.ResponseWriter, request *http.Request) {
 	filter, err := parseAuditFilter(request)
 	if err != nil {
@@ -311,16 +342,20 @@ func (s *Server) exportAudit(response http.ResponseWriter, request *http.Request
 	}
 	filter.Offset = 0
 	filter.Limit = queryInt(request, "limit", 5_000, 1, 50_000)
-	records, err := s.auditRecords(request, filter)
+	// One row past the limit, so a result that ends exactly on it is not
+	// reported as cut short.
+	lookahead := filter
+	lookahead.Limit = filter.Limit + 1
+	records, err := s.auditRecords(request, lookahead)
 	if err != nil {
 		s.internalError(response, request, err)
 		return
 	}
-	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	response.Header().Set(
-		"Content-Disposition",
-		`attachment; filename="invenqor-audit.csv"`,
-	)
+	truncated := len(records) > filter.Limit
+	if truncated {
+		records = records[:filter.Limit]
+	}
+	csvExportHeaders(response, "invenqor-audit", filter.Limit, truncated)
 	writer := csv.NewWriter(response)
 	// A BOM so the export opens correctly in Excel, which is where an audit
 	// extract usually ends up.
@@ -344,7 +379,10 @@ func (s *Server) exportAudit(response http.ResponseWriter, request *http.Request
 	writer.Flush()
 	s.recordAdminAudit(
 		request, "audit.export", "audit_log", "", nil,
-		map[string]any{"rows": len(records), "filter": filter.describe()}, "",
+		map[string]any{
+			"rows": len(records), "truncated": truncated,
+			"filter": filter.describe(),
+		}, "",
 	)
 }
 

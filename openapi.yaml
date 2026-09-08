@@ -2032,10 +2032,22 @@ paths:
       summary: Download the filtered inventory as CSV
       description: >-
         Accepts the same filters as listAssets and writes a UTF-8 CSV with a byte
-        order mark so it opens correctly in a spreadsheet.
+        order mark so it opens correctly in a spreadsheet. A result that reaches
+        the row limit is marked truncated and named invenqor-assets-partial.csv.
       security: [{session: []}]
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100000, default: 10000}}
       responses:
-        "200": {description: CSV inventory extract, content: {text/csv: {schema: {type: string}}}}
+        "200":
+          description: CSV inventory extract
+          headers:
+            X-Invenqor-Truncated:
+              description: Present as `true` only when the row limit cut the extract short.
+              schema: {type: string}
+            X-Invenqor-Row-Limit:
+              description: The row limit that cut the extract short.
+              schema: {type: integer}
+          content: {text/csv: {schema: {type: string}}}
         "403": {description: Missing assets.export permission}
   /api/v1/admin/audit:
     get:
@@ -2070,10 +2082,24 @@ paths:
     get:
       operationId: exportAudit
       summary: Download the filtered audit log as CSV
-      description: Taking an extract is itself recorded as audit.export.
+      description: >-
+        Taking an extract is itself recorded as audit.export, together with
+        whether the row limit cut it short. A truncated extract is named
+        invenqor-audit-partial.csv.
       security: [{session: []}]
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 50000, default: 5000}}
       responses:
-        "200": {description: CSV audit extract, content: {text/csv: {schema: {type: string}}}}
+        "200":
+          description: CSV audit extract
+          headers:
+            X-Invenqor-Truncated:
+              description: Present as `true` only when the row limit cut the extract short.
+              schema: {type: string}
+            X-Invenqor-Row-Limit:
+              description: The row limit that cut the extract short.
+              schema: {type: integer}
+          content: {text/csv: {schema: {type: string}}}
         "400": {description: Unusable date window}
         "403": {description: Missing audit.read permission}
   /api/v1/query/schema:
