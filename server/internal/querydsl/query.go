@@ -306,22 +306,43 @@ func columnFor(field string, postgres bool) (string, error) {
 	if !strings.HasPrefix(field, attributePrefix) {
 		return field, nil
 	}
-	text, _ := attributeExpressions(field, postgres)
+	text, _, _ := attributeExpressions(field, postgres)
 	return text, nil
 }
 
-// attributeExpressions returns the two things an attributes.* path is asked
-// for: the extracted value as text, and the JSON type of the stored value.
-func attributeExpressions(field string, postgres bool) (text, jsonType string) {
+// attributeExpressions returns the three things an attributes.* path is asked
+// for: the extracted value as text, the same value as a number, and the JSON
+// type of the stored value.
+//
+// The text form has to render a stored value the same way in both storage
+// modes, because every clause but an ordering comparison compares it with the
+// text the caller typed. PostgreSQL's #>> already does that. SQLite's
+// json_extract instead hands back the value with its SQL type, and a
+// comparison there converts nothing: an INTEGER is never equal to a TEXT
+// parameter, and a JSON boolean arrives as 1 or 0 rather than as 'true' or
+// 'false'. So "attributes.cpu_count = 8" answered HTTP 200 with an empty list
+// on a value an agent reports as a JSON number - and its mirror image,
+// "attributes.cpu_count != 8", kept every asset including the ones holding 8.
+func attributeExpressions(
+	field string, postgres bool,
+) (text, number, jsonType string) {
 	path := strings.Split(strings.TrimPrefix(field, attributePrefix), ".")
 	if postgres {
 		braced := "'{" + strings.Join(path, ",") + "}'"
-		return "attributes_json #>> " + braced,
+		extract := "attributes_json #>> " + braced
+		return extract, "(" + extract + ")::double precision",
 			"jsonb_typeof(attributes_json #> " + braced + ")"
 	}
 	dotted := "'$." + strings.Join(path, ".") + "'"
-	return "json_extract(attributes_json, " + dotted + ")",
-		"json_type(attributes_json, " + dotted + ")"
+	extract := "json_extract(attributes_json, " + dotted + ")"
+	kind := "json_type(attributes_json, " + dotted + ")"
+	// CAST leaves SQL NULL alone, so a path no asset reported still extracts
+	// NULL and the inequality clause below still recognises it.
+	return fmt.Sprintf(
+		"(CASE %s WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "+
+			"ELSE CAST(%s AS TEXT) END)",
+		kind, extract,
+	), extract, kind
 }
 
 // isAttributeInequality reports whether a clause asks which assets an attribute
@@ -370,15 +391,14 @@ func numericAttributeCondition(
 	numberArg int,
 	textArg int,
 ) string {
-	text, jsonType := attributeExpressions(field, postgres)
-	stored, isNumber := text, jsonType+" IN ('integer','real')"
+	text, number, jsonType := attributeExpressions(field, postgres)
+	isNumber := jsonType + " IN ('integer','real')"
 	if postgres {
-		stored = "(" + text + ")::double precision"
 		isNumber = jsonType + " = 'number'"
 	}
 	return fmt.Sprintf(
 		"(CASE WHEN %s THEN %s %s $%d ELSE %s %s $%d END)",
-		isNumber, stored, operator, numberArg, text, operator, textArg,
+		isNumber, number, operator, numberArg, text, operator, textArg,
 	)
 }
 

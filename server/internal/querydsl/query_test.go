@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// sqliteAttributeText spells the SQLite rendering of an attribute path as
+// text, which every clause but an ordering comparison compares against. It
+// exists so the tests below name the shape once rather than five times.
+func sqliteAttributeText(path string) string {
+	return "(CASE json_type(attributes_json, '$." + path + "') " +
+		"WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' " +
+		"ELSE CAST(json_extract(attributes_json, '$." + path +
+		"') AS TEXT) END)"
+}
+
 func TestParseAndCompileUsesBoundParameters(t *testing.T) {
 	query, err := Parse(
 		`type = "host" AND environment = "production" AND attributes.os.family = "rhel"`,
@@ -186,8 +196,8 @@ func TestOrderingComparesAStoredNumberAsANumber(t *testing.T) {
 			"'{memory_bytes}' >= $2 END)"},
 		{false, "(CASE WHEN json_type(attributes_json, '$.memory_bytes') " +
 			"IN ('integer','real') THEN json_extract(attributes_json, " +
-			"'$.memory_bytes') >= $1 ELSE json_extract(attributes_json, " +
-			"'$.memory_bytes') >= $2 END)"},
+			"'$.memory_bytes') >= $1 ELSE " +
+			sqliteAttributeText("memory_bytes") + " >= $2 END)"},
 	} {
 		where, args, err := query.SQL(testCase.postgres)
 		if err != nil {
@@ -199,6 +209,37 @@ func TestOrderingComparesAStoredNumberAsANumber(t *testing.T) {
 		}
 		if len(args) != 2 || args[0] != 2000000000.0 ||
 			args[1] != "2000000000" {
+			t.Fatalf("args = %#v", args)
+		}
+	}
+}
+
+// An equality clause compares the extracted value with the text the caller
+// typed, so the extraction has to render a stored value as text in both
+// modes. PostgreSQL's #>> does. SQLite's json_extract returns the value with
+// its SQL type and converts nothing in a comparison, so a JSON number never
+// equalled the parameter and a JSON boolean arrived as 1 rather than 'true'.
+func TestAttributeEqualityComparesTheValueAsText(t *testing.T) {
+	query, err := Parse(`attributes.cpu_count = 8`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		postgres bool
+		want     string
+	}{
+		{true, "attributes_json #>> '{cpu_count}' = $1"},
+		{false, sqliteAttributeText("cpu_count") + " = $1"},
+	} {
+		where, args, err := query.SQL(testCase.postgres)
+		if err != nil {
+			t.Fatalf("SQL(%v) error = %v", testCase.postgres, err)
+		}
+		if !strings.Contains(where, testCase.want) {
+			t.Fatalf("SQL(%v) = %s, want %s",
+				testCase.postgres, where, testCase.want)
+		}
+		if len(args) != 1 || args[0] != "8" {
 			t.Fatalf("args = %#v", args)
 		}
 	}
@@ -295,8 +336,8 @@ func TestAttributeInequalityKeepsAssetsWithoutTheKey(t *testing.T) {
 	}{
 		{true, "(attributes_json #>> '{env}' IS NULL OR " +
 			"attributes_json #>> '{env}' != $1)"},
-		{false, "(json_extract(attributes_json, '$.env') IS NULL OR " +
-			"json_extract(attributes_json, '$.env') != $1)"},
+		{false, "(" + sqliteAttributeText("env") + " IS NULL OR " +
+			sqliteAttributeText("env") + " != $1)"},
 	} {
 		where, args, err := query.SQL(testCase.postgres)
 		if err != nil {
