@@ -1651,7 +1651,10 @@ paths:
     post:
       operationId: externalExecuteQuery
       summary: Execute a parameter-bound Query DSL expression using an API key
-      description: Requires `queries.execute`; result size defaults to 100 and is capped at 500.
+      description: >-
+        Requires `queries.execute`; result size defaults to 100 and is capped
+        at 500. The endpoint pages no further, so `truncated` is the only
+        signal that the expression matches more assets than were returned.
       security: [{externalBearer: []}]
       requestBody:
         required: true
@@ -1660,15 +1663,21 @@ paths:
             schema: {$ref: "#/components/schemas/QueryInput"}
       responses:
         "200":
-          description: Matching assets, count, and parsed AST
+          description: Matching assets, count, enforced limit, truncation flag, and parsed AST
           content:
             application/json:
               schema:
                 type: object
-                required: [items, count, ast]
+                required: [items, count, limit, truncated, ast]
                 properties:
                   items: {type: array, items: {$ref: "#/components/schemas/Asset"}}
                   count: {type: integer}
+                  limit:
+                    type: integer
+                    description: The row limit actually enforced, after the default and the cap.
+                  truncated:
+                    type: boolean
+                    description: True when more assets match than the limit allowed to be returned.
                   ast: {type: object}
         "400": {description: Invalid JSON or Query DSL expression}
         "401": {description: Invalid API key}
@@ -2166,7 +2175,10 @@ paths:
     post:
       operationId: executeQuery
       summary: Execute a validated, parameter-bound Query DSL expression
-      description: Requires `queries.execute`; result size defaults to 100 and is capped at 500.
+      description: >-
+        Requires `queries.execute`; result size defaults to 100 and is capped
+        at 500. The endpoint pages no further, so `truncated` is the only
+        signal that the expression matches more assets than were returned.
       security: [{session: []}]
       requestBody:
         required: true
@@ -2174,7 +2186,7 @@ paths:
           application/json:
             schema: {$ref: "#/components/schemas/QueryInput"}
       responses:
-        "200": {description: "Matching assets, count, and parsed AST"}
+        "200": {description: "Matching assets, count, enforced limit, truncation flag, and parsed AST"}
         "400": {description: "Unsafe, invalid, or malformed query"}
         "401": {description: Authentication required}
         "403": {description: Missing `queries.execute` permission}

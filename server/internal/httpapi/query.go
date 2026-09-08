@@ -71,7 +71,9 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 	if limit > 500 {
 		limit = 500
 	}
-	args = append(args, limit)
+	// One row past the limit, so a result that ends exactly on it is not
+	// reported as cut short. See the truncation note below.
+	args = append(args, limit+1)
 	rows, err := s.database.DB().QueryContext(
 		request.Context(),
 		`SELECT `+assetColumns+` FROM assets WHERE `+where+
@@ -92,12 +94,27 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 		}
 		items = append(items, asset)
 	}
+	// The result is bounded, and whatever fitted used to be returned as though
+	// it were the whole answer: "last_seen_at < \"now - 720h\"" over 1,200
+	// stale hosts answered with 100 items and count 100, and neither the
+	// response nor the audit entry said the other 1,100 existed. There is no
+	// offset here either, so the flag is the only way a caller can learn the
+	// question has more answers than it was given - and an API key reading
+	// this endpoint from a script has no console to notice it in.
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
 	s.recordAdminAudit(
 		request, "query.execute", "query", "", nil,
-		map[string]any{"dsl": input.Query, "result_count": len(items)}, "",
+		map[string]any{
+			"dsl": input.Query, "result_count": len(items),
+			"truncated": truncated,
+		}, "",
 	)
 	writeJSON(response, 200, map[string]any{
 		"items": items, "count": len(items), "ast": query,
+		"limit": limit, "truncated": truncated,
 	})
 }
 

@@ -790,6 +790,10 @@ export function QueryPage({csrf}: {csrf: string}) {
   const [query, setQuery] = React.useState('type = "host" AND environment = "production"');
   const [limit, setLimit] = React.useState(100);
   const [result, setResult] = React.useState<Asset[]>([]);
+  // The Server says whether the limit cut the result short. This used to be
+  // guessed from the row count landing on the limit, which called a result
+  // that ended exactly there truncated as well.
+  const [truncated, setTruncated] = React.useState(false);
   const [ran, setRan] = React.useState(false);
   const [grammar, setGrammar] = React.useState<QueryGrammar|null>(null);
   const [validation, setValidation] = React.useState<{valid: boolean; error?: string; ast?: unknown}|null>(null);
@@ -807,11 +811,12 @@ export function QueryPage({csrf}: {csrf: string}) {
   };
   const run = async () => {
     try {
-      const value = await api<{items: Asset[]; ast: unknown}>("/api/v1/query/execute",
+      const value = await api<{items: Asset[]; ast: unknown; truncated?: boolean}>("/api/v1/query/execute",
         jsonRequest(csrf, {query, limit}));
-      setResult(value.items); setValidation({valid: true, ast: value.ast});
+      setResult(value.items); setTruncated(Boolean(value.truncated));
+      setValidation({valid: true, ast: value.ast});
       setRan(true); setError("");
-    } catch (reason) { setError((reason as Error).message); setRan(true); }
+    } catch (reason) { setError((reason as Error).message); setTruncated(false); setRan(true); }
   };
   const insert = (text: string) => {
     setQuery(current => current.trim() ? `${current.trim()} AND ${text}` : text);
@@ -849,9 +854,12 @@ export function QueryPage({csrf}: {csrf: string}) {
       </Panel>
     </div>
     {validation?.ast != null && <details className="json-details"><summary>파싱된 AST</summary><pre>{pretty(validation.ast)}</pre></details>}
-    <Panel title={`결과 ${number(result.length)}건`}
-      action={result.length === limit ? `limit ${limit}에서 잘렸을 수 있음` : `limit ${limit}`}>
+    <Panel title={`결과 ${number(result.length)}건${truncated ? " 이상" : ""}`}
+      action={truncated ? `limit ${limit}에서 잘림` : `limit ${limit}`}>
       <AssetTable items={result}/>
+      {truncated && <p className="hint">
+        조건에 맞는 자산이 limit {number(limit)}건보다 많아 결과가 잘렸습니다.
+        조건을 좁히거나 limit을 올려 다시 실행하십시오.</p>}
       {ran && !result.length && !error && <p className="hint">
         구문은 유효하지만 조건에 맞는 자산이 없습니다.</p>}
     </Panel>
