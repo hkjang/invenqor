@@ -96,7 +96,8 @@ var mcpTools = []mcpTool{
 		Name: "agents_list", Title: "List inventory agents",
 		Description: "List registered inventory agents and their latest status.",
 		InputSchema: objectSchema(map[string]any{
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"offset": map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
 		}, nil),
 		Annotations: map[string]any{"readOnlyHint": true, "idempotentHint": true},
 		Scope:       "agents.read",
@@ -613,7 +614,9 @@ func (s *Server) mcpAssetSearch(r *http.Request, arguments *mcpArguments) (any, 
 		strings.TrimSpace(input.Q),
 		storage.LikeContains(strings.TrimSpace(input.Q)),
 		strings.TrimSpace(input.Type), strings.TrimSpace(input.Status),
-		input.Limit, input.Offset, input.IncludeObservations,
+		// One row past the page is read and never returned, so has_more states
+		// whether another row exists instead of guessing from the page size.
+		input.Limit+1, input.Offset, input.IncludeObservations,
 	)
 	if err != nil {
 		return nil, err
@@ -627,13 +630,20 @@ func (s *Server) mcpAssetSearch(r *http.Request, arguments *mcpArguments) (any, 
 		}
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > input.Limit
+	if hasMore {
+		items = items[:input.Limit]
+	}
 	return map[string]any{
 		"items": items, "limit": input.Limit, "offset": input.Offset,
 		// A full page is indistinguishable from the last page without this, so a
 		// caller either stops early or pages forever.
-		"has_more":    len(items) == input.Limit,
+		"has_more":    hasMore,
 		"next_offset": input.Offset + len(items),
-	}, rows.Err()
+	}, nil
 }
 
 func (s *Server) mcpSoftwareInventory(r *http.Request, arguments *mcpArguments) (any, error) {
@@ -726,14 +736,23 @@ func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (an
 }
 
 func (s *Server) mcpAgentsList(r *http.Request, arguments *mcpArguments) (any, error) {
-	input := struct{ Limit int }{Limit: arguments.Int("limit", 50, 1, 100)}
+	input := struct {
+		Limit  int
+		Offset int
+	}{
+		Limit:  arguments.Int("limit", 50, 1, 100),
+		Offset: arguments.Int("offset", 0, 0, 1_000_000),
+	}
 	if err := arguments.Err(); err != nil {
 		return nil, err
 	}
 	rows, err := s.database.DB().QueryContext(r.Context(),
 		`SELECT agent_id, hostname, status, version, os_name, architecture,
 		 last_seen_at, last_inventory_at
-		 FROM agents ORDER BY last_seen_at DESC, agent_id LIMIT $1`, input.Limit,
+		 FROM agents ORDER BY last_seen_at DESC, agent_id LIMIT $1 OFFSET $2`,
+		// The extra row is read and never returned, so has_more reports whether
+		// one exists rather than inferring it from a full page.
+		input.Limit+1, input.Offset,
 	)
 	if err != nil {
 		return nil, err
@@ -753,10 +772,18 @@ func (s *Server) mcpAgentsList(r *http.Request, arguments *mcpArguments) (any, e
 			"last_seen_at": apiTime(lastSeen), "last_inventory_at": apiTime(lastInventory),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > input.Limit
+	if hasMore {
+		items = items[:input.Limit]
+	}
 	return map[string]any{
-		"agents": items, "limit": input.Limit, "count": len(items),
-		"has_more": len(items) == input.Limit,
-	}, rows.Err()
+		"agents": items, "limit": input.Limit, "offset": input.Offset,
+		"count": len(items), "has_more": hasMore,
+		"next_offset": input.Offset + len(items),
+	}, nil
 }
 
 func strictJSON(raw []byte, destination any) error {
