@@ -121,8 +121,11 @@ jobs:
         # is a call path and not just a version match. One advisory currently
         # sits in the tree without being called - golang.org/x/crypto/openpgp,
         # unmaintained, no fix published - and govulncheck correctly ignores it.
+        # Pinned: @latest tracks x/vuln, and v1.8.0 raised its floor to Go 1.26
+        # while this module builds on 1.25 - CI went red on a day nobody
+        # touched the tree. Raise this when the module's Go version moves.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
         working-directory: server
 
