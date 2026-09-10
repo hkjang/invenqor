@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // The MCP tools are read by a model, and a model believes what the page tells
@@ -131,6 +134,118 @@ func TestMCPAgentsListPagesPastTheFirstPage(t *testing.T) {
 	if last.Count != 1 || last.HasMore || last.Offset != 2 ||
 		last.Agents[0].Hostname != "page-agent-c" {
 		t.Fatalf("page after next_offset = %+v", last)
+	}
+}
+
+type mcpRelationPage struct {
+	Relations []struct {
+		TargetAssetID string `json:"target_asset_id"`
+	} `json:"relations"`
+	Limit      int  `json:"limit"`
+	Offset     int  `json:"offset"`
+	Count      int  `json:"count"`
+	HasMore    bool `json:"has_more"`
+	NextOffset int  `json:"next_offset"`
+}
+
+func mcpAssetRelationsPage(t *testing.T, server *Server, raw string) mcpRelationPage {
+	t.Helper()
+	result, err := server.mcpAssetRelations(
+		httptest.NewRequest("POST", "/mcp", nil),
+		mcpArgumentsForTest("asset_relations", []byte(raw)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var page mcpRelationPage
+	if err := json.Unmarshal(encoded, &page); err != nil {
+		t.Fatal(err)
+	}
+	return page
+}
+
+// asset_relations was the one read tool with no ceiling at all: it returned
+// every active edge of the asset, so a single host with thousands of `runs_on`
+// children answered with a reply large enough to swallow the model's context,
+// and the client was left to truncate it.
+func TestMCPAssetRelationsPagesInsteadOfReturningEveryEdge(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	now := time.Now().UTC()
+	hostID := insertSoftwareTestAsset(t, server, "relation-host", "relation-host",
+		"host", `{}`, 1, now)
+	targets := make([]string, 0, 3)
+	for index, name := range []string{"edge-a", "edge-b", "edge-c"} {
+		childID := insertSoftwareTestAsset(t, server, name, name, "process", `{}`, 1,
+			now.Add(-time.Duration(index)*time.Minute))
+		targets = append(targets, childID)
+		if _, err := server.database.DB().Exec(
+			`INSERT INTO asset_relations(
+				id,source_asset_id,relation_type,target_asset_id,source,confidence
+			 ) VALUES($1,$2,'runs_on',$3,'manual',1.0)`,
+			uuid.NewString(), hostID, childID,
+		); err != nil {
+			t.Fatalf("seed relation %s: %v", name, err)
+		}
+	}
+
+	all := mcpAssetRelationsPage(t, server,
+		`{"asset_id":"`+hostID+`","limit":3}`)
+	if all.Count != 3 || all.HasMore || all.NextOffset != 3 || all.Limit != 3 {
+		t.Fatalf("three edges read three at a time = %+v", all)
+	}
+
+	first := mcpAssetRelationsPage(t, server,
+		`{"asset_id":"`+hostID+`","limit":2}`)
+	if first.Count != 2 || len(first.Relations) != 2 || !first.HasMore ||
+		first.NextOffset != 2 {
+		t.Fatalf("first page of three edges = %+v", first)
+	}
+
+	last := mcpAssetRelationsPage(t, server,
+		`{"asset_id":"`+hostID+`","limit":2,"offset":2}`)
+	if last.Count != 1 || last.HasMore || last.Offset != 2 {
+		t.Fatalf("page after next_offset = %+v", last)
+	}
+	// The three pages together must be the three edges, each once: a lookahead
+	// row that leaks into a page would repeat one of them.
+	seen := map[string]int{}
+	for _, relation := range append(first.Relations, last.Relations...) {
+		seen[relation.TargetAssetID]++
+	}
+	for _, target := range targets {
+		if seen[target] != 1 {
+			t.Fatalf("edge %s appeared %d times across the pages", target, seen[target])
+		}
+	}
+}
+
+// A relation list with no limit at all is what this tool used to return, so the
+// default has to be a real ceiling rather than a value the caller must pass.
+func TestMCPAssetRelationsDefaultsToABoundedPage(t *testing.T) {
+	runtime := newRuntime(t)
+	server := testServer(t, runtime)
+	now := time.Now().UTC()
+	hostID := insertSoftwareTestAsset(t, server, "wide-host", "wide-host",
+		"host", `{}`, 1, now)
+	for index := 0; index < 55; index++ {
+		name := fmt.Sprintf("wide-edge-%02d", index)
+		childID := insertSoftwareTestAsset(t, server, name, name, "process", `{}`, 1, now)
+		if _, err := server.database.DB().Exec(
+			`INSERT INTO asset_relations(
+				id,source_asset_id,relation_type,target_asset_id,source,confidence
+			 ) VALUES($1,$2,'runs_on',$3,'manual',1.0)`,
+			uuid.NewString(), hostID, childID,
+		); err != nil {
+			t.Fatalf("seed relation %s: %v", name, err)
+		}
+	}
+
+	page := mcpAssetRelationsPage(t, server, `{"asset_id":"`+hostID+`"}`)
+	if page.Count != 50 || page.Limit != 50 || !page.HasMore ||
+		page.NextOffset != 50 {
+		t.Fatalf("default page of 55 edges = %+v", page)
 	}
 }
 
