@@ -1652,9 +1652,10 @@ paths:
       operationId: externalExecuteQuery
       summary: Execute a parameter-bound Query DSL expression using an API key
       description: >-
-        Requires `queries.execute`; result size defaults to 100 and is capped
-        at 500. The endpoint pages no further, so `truncated` is the only
-        signal that the expression matches more assets than were returned.
+        Requires `queries.execute`; page size defaults to 100 and is capped at
+        500. `total` reports how many assets the expression matches, and
+        `offset` walks past the cap using the `next_offset` of the previous
+        response.
       security: [{externalBearer: []}]
       requestBody:
         required: true
@@ -1663,21 +1664,32 @@ paths:
             schema: {$ref: "#/components/schemas/QueryInput"}
       responses:
         "200":
-          description: Matching assets, count, enforced limit, truncation flag, and parsed AST
+          description: One page of matching assets, the match total, paging cursors, and the parsed AST
           content:
             application/json:
               schema:
                 type: object
-                required: [items, count, limit, truncated, ast]
+                required: [items, count, limit, offset, total, has_more, next_offset, truncated, ast]
                 properties:
                   items: {type: array, items: {$ref: "#/components/schemas/Asset"}}
                   count: {type: integer}
                   limit:
                     type: integer
                     description: The row limit actually enforced, after the default and the cap.
+                  offset: {type: integer, description: The offset actually applied.}
+                  total:
+                    type: integer
+                    format: int64
+                    description: Assets matching the expression, ignoring limit and offset.
+                  has_more:
+                    type: boolean
+                    description: True when a further row exists past this page, read rather than guessed from the page size.
+                  next_offset:
+                    type: integer
+                    description: The offset to ask for next while `has_more` is true.
                   truncated:
                     type: boolean
-                    description: True when more assets match than the limit allowed to be returned.
+                    description: Same value as `has_more`, kept for callers written before offset existed.
                   ast: {type: object}
         "400": {description: Invalid JSON or Query DSL expression}
         "401": {description: Invalid API key}
@@ -2176,9 +2188,10 @@ paths:
       operationId: executeQuery
       summary: Execute a validated, parameter-bound Query DSL expression
       description: >-
-        Requires `queries.execute`; result size defaults to 100 and is capped
-        at 500. The endpoint pages no further, so `truncated` is the only
-        signal that the expression matches more assets than were returned.
+        Requires `queries.execute`; page size defaults to 100 and is capped at
+        500. `total` reports how many assets the expression matches, and
+        `offset` walks past the cap using the `next_offset` of the previous
+        response.
       security: [{session: []}]
       requestBody:
         required: true
@@ -2186,7 +2199,7 @@ paths:
           application/json:
             schema: {$ref: "#/components/schemas/QueryInput"}
       responses:
-        "200": {description: "Matching assets, count, enforced limit, truncation flag, and parsed AST"}
+        "200": {description: "One page of matching assets, the match total, paging cursors, and the parsed AST"}
         "400": {description: "Unsafe, invalid, or malformed query"}
         "401": {description: Authentication required}
         "403": {description: Missing `queries.execute` permission}
@@ -2304,6 +2317,12 @@ components:
       properties:
         query: {type: string}
         limit: {type: integer, minimum: 1, maximum: 500, default: 100}
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+          default: 0
+          description: Rows to skip; page with the `next_offset` of the previous response.
     Setting:
       type: object
       required: [key, value, secret, apply_mode, pending, version]
