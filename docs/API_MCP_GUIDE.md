@@ -194,10 +194,20 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 ```
 
 Query DSL 실행이 한 번에 돌려주는 자산 수는 기본 100건이고 `limit`으로 최대
-500건까지 조정합니다. 응답은 실제로 적용된 `limit`과, 조건에 맞는 자산이 그보다
-많아 결과가 잘렸는지를 알리는 `truncated`를 함께 돌려줍니다. 이 엔드포인트에는
-offset이 없으므로 `truncated`가 `true`이면 조건을 좁히거나 `limit`을 올려 다시
-실행하십시오.
+500건까지 조정합니다. 응답은 실제로 적용된 `limit`·`offset`과 함께, 조건에 맞는
+자산 전체 수인 `total`, 다음 행이 실제로 있는지를 나타내는 `has_more`, 이어서
+요청할 `next_offset`을 돌려줍니다. `truncated`는 `has_more`와 같은 값이며 offset이
+없던 시절의 호출자를 위해 유지합니다.
+
+한도를 넘는 결과는 `offset`으로 끝까지 순회합니다. `has_more`가 `true`인 동안
+직전 응답의 `next_offset`을 그대로 넣어 다시 실행하십시오.
+
+```bash
+curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"last_seen_at < \"now - 720h\"","limit":500,"offset":500}' \
+  'https://invenqor.example.com:7070/api/v1/external/query/execute'
+```
 
 API key 인증에는 Cookie와 CSRF를 사용하지 않습니다. 키를 URL query, 로그,
 지원 티켓, source control에 넣지 마십시오.

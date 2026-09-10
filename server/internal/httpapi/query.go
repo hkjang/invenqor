@@ -8,8 +8,9 @@ import (
 )
 
 type queryInput struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit,omitempty"`
+	Query  string `json:"query"`
+	Limit  int    `json:"limit,omitempty"`
+	Offset int    `json:"offset,omitempty"`
 }
 
 // queryGrammar publishes the field and operator list so the console can show
@@ -71,13 +72,37 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 	if limit > 500 {
 		limit = 500
 	}
+	offset := input.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 1_000_000 {
+		offset = 1_000_000
+	}
+	// How many assets the expression actually matches, asked before the page
+	// arguments join the list. "last_seen_at < \"now - 720h\"" over 1,200 stale
+	// hosts used to answer with 100 items and count 100, and neither the
+	// response nor the audit entry said the other 1,100 existed.
+	var total int64
+	if err := s.database.DB().QueryRowContext(
+		request.Context(),
+		`SELECT COUNT(*) FROM assets WHERE `+where,
+		args...,
+	).Scan(&total); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
 	// One row past the limit, so a result that ends exactly on it is not
 	// reported as cut short. See the truncation note below.
-	args = append(args, limit+1)
+	args = append(args, limit+1, offset)
 	rows, err := s.database.DB().QueryContext(
 		request.Context(),
 		`SELECT `+assetColumns+` FROM assets WHERE `+where+
-			` ORDER BY last_seen_at DESC LIMIT $`+itoa(len(args)),
+			// id breaks ties in last_seen_at. Assets ingested in one batch share
+			// a timestamp to the second, and without a total order a paged walk
+			// would return some of them twice and skip others.
+			` ORDER BY last_seen_at DESC, id LIMIT $`+itoa(len(args)-1)+
+			` OFFSET $`+itoa(len(args)),
 		args...,
 	)
 	if err != nil {
@@ -94,13 +119,14 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 		}
 		items = append(items, asset)
 	}
-	// The result is bounded, and whatever fitted used to be returned as though
-	// it were the whole answer: "last_seen_at < \"now - 720h\"" over 1,200
-	// stale hosts answered with 100 items and count 100, and neither the
-	// response nor the audit entry said the other 1,100 existed. There is no
-	// offset here either, so the flag is the only way a caller can learn the
-	// question has more answers than it was given - and an API key reading
-	// this endpoint from a script has no console to notice it in.
+	if err := rows.Err(); err != nil {
+		s.internalError(response, request, err)
+		return
+	}
+	// truncated keeps its meaning - rows the caller asked for exist beyond the
+	// ones handed over - and offset is now the way to go and get them, so a
+	// script reading this endpoint with an API key is no longer stuck narrowing
+	// the expression until it fits under the cap.
 	truncated := len(items) > limit
 	if truncated {
 		items = items[:limit]
@@ -109,12 +135,14 @@ func (s *Server) executeQuery(response http.ResponseWriter, request *http.Reques
 		request, "query.execute", "query", "", nil,
 		map[string]any{
 			"dsl": input.Query, "result_count": len(items),
-			"truncated": truncated,
+			"truncated": truncated, "offset": offset, "total": total,
 		}, "",
 	)
 	writeJSON(response, 200, map[string]any{
 		"items": items, "count": len(items), "ast": query,
-		"limit": limit, "truncated": truncated,
+		"limit": limit, "offset": offset, "total": total,
+		"has_more": truncated, "next_offset": offset + len(items),
+		"truncated": truncated,
 	})
 }
 

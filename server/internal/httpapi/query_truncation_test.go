@@ -13,9 +13,13 @@ type queryResult struct {
 	Items []struct {
 		Name string `json:"name"`
 	} `json:"items"`
-	Count     int  `json:"count"`
-	Limit     int  `json:"limit"`
-	Truncated bool `json:"truncated"`
+	Count      int   `json:"count"`
+	Limit      int   `json:"limit"`
+	Offset     int   `json:"offset"`
+	Total      int64 `json:"total"`
+	HasMore    bool  `json:"has_more"`
+	NextOffset int   `json:"next_offset"`
+	Truncated  bool  `json:"truncated"`
 }
 
 func executeQueryResult(
