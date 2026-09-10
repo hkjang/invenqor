@@ -59,6 +59,8 @@ var mcpTools = []mcpTool{
 		Description: "List active inbound and outbound relationships for an IT asset.",
 		InputSchema: objectSchema(map[string]any{
 			"asset_id": map[string]any{"type": "string", "format": "uuid"},
+			"limit":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"offset":   map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
 		}, []string{"asset_id"}),
 		Annotations: map[string]any{"readOnlyHint": true, "idempotentHint": true},
 		Scope:       "relations.read",
@@ -702,7 +704,15 @@ func (s *Server) mcpAssetGet(r *http.Request, arguments *mcpArguments) (any, err
 }
 
 func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (any, error) {
-	input := struct{ AssetID string }{AssetID: arguments.RequiredString("asset_id")}
+	input := struct {
+		AssetID string
+		Limit   int
+		Offset  int
+	}{
+		AssetID: arguments.RequiredString("asset_id"),
+		Limit:   arguments.Int("limit", 50, 1, 100),
+		Offset:  arguments.Int("offset", 0, 0, 1_000_000),
+	}
 	if err := arguments.Err(); err != nil {
 		return nil, err
 	}
@@ -711,7 +721,12 @@ func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (an
 		 valid_from, valid_to, source, confidence
 		 FROM asset_relations
 		 WHERE (source_asset_id=$1 OR target_asset_id=$1) AND valid_to IS NULL
-		 ORDER BY relation_type, id`, input.AssetID,
+		 ORDER BY relation_type, id LIMIT $2 OFFSET $3`,
+		input.AssetID,
+		// A host with thousands of runs_on edges used to answer with every one of
+		// them, and the model reading the reply is what had to cut it off. The
+		// extra row is read and never returned, so has_more is a fact.
+		input.Limit+1, input.Offset,
 	)
 	if err != nil {
 		return nil, err
@@ -732,7 +747,18 @@ func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (an
 			"valid_to": validTo, "source": source, "confidence": confidence,
 		})
 	}
-	return map[string]any{"relations": items}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > input.Limit
+	if hasMore {
+		items = items[:input.Limit]
+	}
+	return map[string]any{
+		"relations": items, "limit": input.Limit, "offset": input.Offset,
+		"count": len(items), "has_more": hasMore,
+		"next_offset": input.Offset + len(items),
+	}, nil
 }
 
 func (s *Server) mcpAgentsList(r *http.Request, arguments *mcpArguments) (any, error) {

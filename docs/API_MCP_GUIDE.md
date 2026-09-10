@@ -356,9 +356,9 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 | 도구 | Scope | 입력 | 결과 |
 |---|---|---|---|
 | `asset_get` | `assets.read` | `asset_id` | 자산 상세 |
-| `asset_relations` | `relations.read` | `asset_id` | 활성 inbound/outbound 관계 |
+| `asset_relations` | `relations.read` | `asset_id`, `limit`, `offset` | 활성 inbound/outbound 관계 |
 | `asset_search` | `assets.read` | `q`, `type`, `status`, `include_observations`, `limit`, `offset` | 정규화 자산 목록. 원시 process는 기본 제외 |
-| `software_inventory` | `assets.read` | `q`, `role`, `runtime_state`, `confidence`, `limit`, `offset` | 제품 요약·host·상태·확신도·evidence |
+| `software_inventory` | `assets.read` | `q`, `role`, `vendor`, `runtime_state`, `confidence`, `limit`, `offset` | 제품 요약·host·상태·확신도·evidence |
 | `agents_list` | `agents.read` | `limit`, `offset` | Agent 상태·버전·최근 수신 |
 
 도구 목록은 고정된 결정적 순서이며 키에 없는 scope의 도구는 아예 노출하지
@@ -373,10 +373,16 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 사고 조사나 판별 근거 검증처럼 원시 관찰이 필요한 경우에만
 `"include_observations":true`를 명시하십시오.
 
-`asset_search`와 `agents_list`의 `has_more`는 페이지 크기 추측이 아니라 서버가
-한 행을 더 읽어 확인한 사실이므로, 결과가 정확히 `limit`에서 끝나면 `false`이며
-빈 페이지를 한 번 더 요청할 필요가 없습니다. `has_more`가 `true`이면 응답의
-`next_offset`을 그대로 `offset`에 넣어 다음 페이지를 요청하십시오.
+`asset_search`, `agents_list`, `asset_relations`의 `has_more`는 페이지 크기
+추측이 아니라 서버가 한 행을 더 읽어 확인한 사실이므로, 결과가 정확히 `limit`에서
+끝나면 `false`이며 빈 페이지를 한 번 더 요청할 필요가 없습니다. `has_more`가
+`true`이면 응답의 `next_offset`을 그대로 `offset`에 넣어 다음 페이지를
+요청하십시오.
+
+`asset_relations`도 다른 도구와 같이 `limit` 기본 50, 최대 100으로 잘라
+돌려줍니다. `runs_on` 관계를 수천 개 가진 host 하나가 응답 하나로 모델의 context를
+차지하지 않도록 한 것이며, 전체 관계가 필요하면 `next_offset`으로 이어서
+조회하십시오. 관계 목록 자체는 이전과 같은 `relations` 키에 담겨 옵니다.
 
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
