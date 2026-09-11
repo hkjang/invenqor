@@ -24,10 +24,16 @@ Keycloak Secret을 공용 암호화 저장소로 이관하고 API Key 변경과 
 PostgreSQL compare-and-swap으로 보호합니다. MCP `2026-07-28`과 기존 client를 한
 endpoint에서 지원하며, 상세 변경과 검증 증적은 릴리즈 노트를 참조하십시오.
 
-PDF를 다시 생성하려면 저장소 루트에서 다음 명령을 실행합니다.
+임원 보고서·Server 설치 가이드·API·MCP 가이드의 PDF를 다시 생성하려면 저장소
+루트에서 다음 명령을 실행합니다.
 
 ```bash
 ./scripts/build-docs.sh
 ```
 
 빌드에는 Node.js 20 이상, `npx`, Chromium 계열 브라우저가 필요합니다.
+
+사용자 가이드와 관리자 가이드는 화면 캡처를 싣고 공통 가이드 표준을 따르므로
+PDF를 공용 도구로 만듭니다. 캡처를 다시 찍는 절차와 함께
+[관리자 가이드 20장](ADMIN_GUIDE.md#20-가이드-화면-캡처-다시-만들기)에
+정리했습니다.

@@ -39,16 +39,18 @@ if [ -z "$BROWSER" ]; then
     exit 1
 fi
 
+# USER_GUIDE and ADMIN_GUIDE are not built here. Those two carry screenshots
+# and follow the shared guide standard, so their PDFs come from the common
+# tool documented in docs/ADMIN_GUIDE.md section 20. Building them in both
+# places would give one document two different layouts.
 BUILD_DIR=$(mktemp -d "$DOCS/.pdf-build.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT HUP INT TERM
 
-for name in USER_GUIDE ADMIN_GUIDE EXECUTIVE_REPORT SERVER_INSTALLATION API_MCP_GUIDE; do
+for name in EXECUTIVE_REPORT SERVER_INSTALLATION API_MCP_GUIDE; do
     markdown="$DOCS/$name.md"
     html="$BUILD_DIR/$name.html"
     pdf="$DOCS/$name.pdf"
     case "$name" in
-        USER_GUIDE) title="Invenqor Agent 사용자 가이드" ;;
-        ADMIN_GUIDE) title="Invenqor Agent 관리자 가이드" ;;
         EXECUTIVE_REPORT) title="Invenqor Agent 임원 보고서" ;;
         SERVER_INSTALLATION) title="Invenqor Server 설치 및 운영 가이드" ;;
         API_MCP_GUIDE) title="Invenqor 자산 API·MCP·키 관리 가이드" ;;
