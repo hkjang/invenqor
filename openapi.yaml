@@ -464,6 +464,55 @@ paths:
         "200": {description: Agent binary}
         "401": {description: Invalid agent credential}
         "404": {description: Artifact not found}
+  /api/v1/tracking/csp-report:
+    post:
+      operationId: receiveCSPReport
+      summary: Receive a content security policy violation report from a browser
+      description: >-
+        Unauthenticated, because browsers send reports without credentials. The policy names this endpoint only while
+        tracking is on. Bodies over 8 KB are truncated, anything unparsable is dropped, and the answer is always 204 so a
+        page never sees an error from it. Only http(s) origins are kept, at most 100 per Server pod, in memory.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/csp-report:
+            schema:
+              type: object
+              properties:
+                csp-report:
+                  type: object
+                  properties:
+                    blocked-uri: {type: string}
+                    effective-directive: {type: string}
+                    violated-directive: {type: string}
+                    document-uri: {type: string}
+      responses:
+        "204": {description: Report accepted or ignored}
+        "4XX": {description: Method or path mismatch; the report body itself is never rejected}
+  /momento/*:
+    get:
+      operationId: proxyMomentoGet
+      summary: Forward a Momento tracker request to the self-hosted collector
+      description: >-
+        Same-origin proxy for the Momento tracking provider. Active only while tracking is on with provider momento and
+        momento_proxy true; otherwise 404. The path after /momento is appended to momento_url, the visitor's Invenqor
+        session cookie and Authorization header are not forwarded, and Set-Cookie from the collector is dropped.
+      security: []
+      responses:
+        "200": {description: "Collector response, typically /momento/tracker.js"}
+        "404": {description: The proxy is off}
+        "502": {description: The collector did not answer}
+    post:
+      operationId: proxyMomentoPost
+      summary: Forward a Momento event batch to the self-hosted collector
+      description: Same rules as the GET form. Bodies are limited to 256 KB.
+      security: []
+      responses:
+        "2XX": {description: Collector response}
+        "404": {description: The proxy is off}
+        "413": {description: Event batch over 256 KB}
+        "502": {description: The collector did not answer}
   /api/v1/admin/agents:
     get:
       operationId: listAgents
@@ -1082,6 +1131,119 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/AgentEnrollmentPolicy"}
         "4XX": {description: "Invalid request, authentication failure, or permission denied"}
+  /api/v1/admin/settings/tracking:
+    get:
+      operationId: getTrackingSettings
+      summary: Read the database-backed visitor tracking configuration
+      description: Requires settings.read. Tracking is off on a fresh installation; the console shell then carries no snippet and the content security policy is unchanged.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current configuration shared by all Server pods
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TrackingPolicy"}
+        "401": {description: Authentication required}
+    patch:
+      operationId: updateTrackingSettings
+      summary: Choose a tracking provider, switch tracking on or off, or edit the allow list
+      description: >-
+        Requires settings.write and X-CSRF-Token. Only the fields present are changed. The snippet is injected into the
+        console shell with a per-request nonce that is also written into script-src; 'unsafe-inline' is never emitted.
+        Origins a pasted snippet loads from are read from the snippet and added to script-src, connect-src and img-src.
+        A custom snippet over 8 KB, an allow list entry that is not an http(s) origin, or an enabled provider missing its
+        identifiers is refused.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                provider: {type: string, enum: [none, momento, ga4, gtm, matomo, custom]}
+                momento_url: {type: string, format: uri}
+                momento_site_id: {type: string}
+                momento_environment: {type: string, default: prd}
+                momento_proxy:
+                  type: boolean
+                  default: true
+                  description: Load the tracker and post events through this Server at /momento/* so no external origin enters the policy
+                measurement_id: {type: string, description: GA4 or GTM container id}
+                matomo_url: {type: string, format: uri}
+                matomo_site_id: {type: string}
+                custom_snippet: {type: string, maxLength: 8192}
+                allowed_hosts:
+                  type: array
+                  maxItems: 64
+                  items: {type: string, description: "http(s) origin, optionally with a leading *. label"}
+                placement: {type: string, enum: [head, body], default: head}
+                reason: {type: string}
+      responses:
+        "200":
+          description: Configuration applied to the next page load on every pod
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TrackingPolicy"}
+        "400": {description: "Invalid provider, oversized snippet, non-origin allow list entry, or missing identifiers"}
+        "409": {description: Concurrent update conflict}
+  /api/v1/admin/settings/tracking/violations:
+    get:
+      operationId: listTrackingViolations
+      summary: List the origins the content security policy blocked on this Server pod
+      description: >-
+        Requires settings.read. Browsers post what they refused to the report endpoint while tracking is on; this Server
+        keeps at most 100 distinct origin/directive pairs in memory, per pod, so the list is a troubleshooting aid rather
+        than an audit record. Entries the current configuration already allows are marked.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Blocked origins, most recent first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, active, maximum]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/TrackingViolation"}
+                  active: {type: boolean, description: Whether tracking is currently injecting a snippet}
+                  maximum: {type: integer, const: 100}
+        "401": {description: Authentication required}
+    delete:
+      operationId: clearTrackingViolations
+      summary: Forget the recorded policy violations on this Server pod
+      description: Requires settings.write and X-CSRF-Token. Used after fixing a snippet to see whether anything is still blocked.
+      security: [{session: []}]
+      responses:
+        "204": {description: Violations forgotten}
+        "4XX": {description: "Authentication failure or permission denied"}
+  /api/v1/admin/settings/tracking/allowed-hosts:
+    post:
+      operationId: allowTrackingHost
+      summary: Add one blocked origin to the tracking allow list
+      description: Requires settings.write and X-CSRF-Token. The one-click fix for a listed violation; adding an origin already present is a no-op.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origin]
+              properties:
+                origin: {type: string, description: "http(s) origin such as https://momento.corp.example"}
+                reason: {type: string}
+      responses:
+        "200":
+          description: Allow list updated
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TrackingPolicy"}
+        "400": {description: The origin is not an http(s) origin}
+        "409": {description: Concurrent update conflict}
   /api/v1/admin/settings/keycloak:
     get:
       operationId: getKeycloakSettings
@@ -2418,6 +2580,50 @@ components:
         updated_at: {type: string, format: date-time}
         updated_by: {type: string}
         source: {type: string, const: database}
+    TrackingPolicy:
+      type: object
+      required: [enabled, active, provider, providers, momento_url, momento_site_id, momento_environment, momento_proxy, momento_proxy_path, measurement_id, matomo_url, matomo_site_id, custom_snippet, allowed_hosts, placement, policy_sources, version, updated_at, updated_by, source]
+      properties:
+        enabled: {type: boolean}
+        active: {type: boolean, description: Whether a snippet is actually injected - enabled with a complete provider}
+        provider: {type: string, enum: [none, momento, ga4, gtm, matomo, custom]}
+        providers:
+          type: array
+          items: {type: string}
+          description: Accepted provider names, Momento first
+        momento_url: {type: string}
+        momento_site_id: {type: string}
+        momento_environment: {type: string}
+        momento_proxy: {type: boolean}
+        momento_proxy_path: {type: string, const: /momento}
+        measurement_id: {type: string}
+        matomo_url: {type: string}
+        matomo_site_id: {type: string}
+        custom_snippet: {type: string, maxLength: 8192}
+        allowed_hosts:
+          type: array
+          maxItems: 64
+          items: {type: string}
+        placement: {type: string, enum: [head, body]}
+        policy_sources:
+          type: array
+          items: {type: string}
+          description: The origins the current configuration adds to script-src, connect-src and img-src
+        version: {type: integer, minimum: 0}
+        updated_at: {type: string, format: date-time}
+        updated_by: {type: string}
+        source: {type: string, const: database}
+    TrackingViolation:
+      type: object
+      required: [origin, directive, page, count, first_seen, last_seen, allowed]
+      properties:
+        origin: {type: string}
+        directive: {type: string, description: "The policy directive that refused the request, such as connect-src"}
+        page: {type: string, description: The document that reported it most recently}
+        count: {type: integer, minimum: 1}
+        first_seen: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        allowed: {type: boolean, description: Whether the current configuration already allows this origin}
     DiagnosticLog:
       type: object
       required: [id, occurred_at, level, component, event_code, message, request_id, instance_id, agent_id, source_ip, details]

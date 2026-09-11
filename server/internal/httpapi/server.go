@@ -21,6 +21,7 @@ import (
 	"github.com/hkjang/invenqor/server/internal/ingest"
 	"github.com/hkjang/invenqor/server/internal/spool"
 	"github.com/hkjang/invenqor/server/internal/storage"
+	"github.com/hkjang/invenqor/server/internal/tracking"
 	"github.com/hkjang/invenqor/server/internal/updates"
 	"github.com/hkjang/invenqor/server/internal/version"
 	"github.com/hkjang/invenqor/server/internal/webui"
@@ -52,6 +53,12 @@ type Server struct {
 	databaseTimeout              time.Duration
 	diagnosticStore              *diagnostics.Store
 	listenAddress                string
+	// violations remembers what the browser's content security policy
+	// refused while visitor tracking is on. It is per process by design; see
+	// tracking.Recorder.
+	violations       *tracking.Recorder
+	momentoTransport http.RoundTripper
+	console          http.Handler
 }
 
 type Options struct {
@@ -113,6 +120,13 @@ func New(options Options) *Server {
 		databaseTimeout:             options.DatabaseTimeout,
 		diagnosticStore:             diagnostics.NewStore(options.Database.DB()),
 		listenAddress:               options.ListenAddress,
+		violations:                  tracking.NewRecorder(),
+		momentoTransport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: 10 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          16,
+		},
 	}
 	if options.AgentEnrollmentToken != "" {
 		server.agentEnrollmentTokenHash = sha256.Sum256(
@@ -156,7 +170,9 @@ func (s *Server) routes() {
 	s.router.Use(s.securityHeaders)
 	s.router.Use(s.requestLog)
 
-	s.router.Get("/", webui.Handler().ServeHTTP)
+	console := webui.Decorated(decorateConsole)
+	s.console = console
+	s.router.Get("/", console.ServeHTTP)
 	s.router.Get("/health/live", s.live)
 	s.router.Get("/health/ready", s.ready)
 	s.router.Get("/api/v1/system/info", s.publicSystemInfo)
@@ -171,6 +187,9 @@ func (s *Server) routes() {
 	s.router.Post("/v1/agent/events", s.receiveAgentEvent)
 	s.router.Get("/v1/agent/updates", s.agentUpdateManifest)
 	s.router.Get("/v1/agent/updates/{artifact}/artifact", s.agentUpdateArtifact)
+	s.router.Post(cspReportPath, s.receiveCSPReport)
+	s.router.Get(tracking.MomentoProxyPath+"/*", s.momentoProxy)
+	s.router.Post(tracking.MomentoProxyPath+"/*", s.momentoProxy)
 	s.router.Group(func(external chi.Router) {
 		external.Use(s.authenticateAPIKey)
 		external.With(s.requirePermission("assets.read")).Get(
@@ -272,6 +291,26 @@ func (s *Server) routes() {
 		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Delete(
 			"/api/v1/admin/settings/agent-enrollment/token",
 			s.deleteAgentEnrollmentToken,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/tracking",
+			s.getTrackingSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/tracking",
+			s.updateTrackingSettings,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/tracking/violations",
+			s.listTrackingViolations,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Delete(
+			"/api/v1/admin/settings/tracking/violations",
+			s.clearTrackingViolations,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/tracking/allowed-hosts",
+			s.allowTrackingHost,
 		)
 		protected.With(s.requirePermission("agents.read")).Get(
 			"/api/v1/admin/agents",
@@ -502,7 +541,7 @@ func (s *Server) notFound(
 		)
 		return
 	}
-	webui.Handler().ServeHTTP(response, request)
+	s.console.ServeHTTP(response, request)
 }
 
 func (s *Server) methodNotAllowed(
@@ -679,10 +718,23 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		response.Header().Set("X-Frame-Options", "DENY")
 		response.Header().Set("Referrer-Policy", "no-referrer")
-		response.Header().Set(
-			"Content-Security-Policy",
-			"default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
-		)
+		// A page gets the console policy - widened only by what an active
+		// tracking snippet needs, with a nonce that the console handler
+		// writes into the snippet. Everything else is never a document and
+		// gets the closed policy.
+		policy := apiPolicy
+		if strings.HasPrefix(request.URL.Path, "/assets/") {
+			policy = basePagePolicy
+		} else if isDocumentPath(request.URL.Path) {
+			var page *trackingPage
+			policy, page = s.pagePolicy(request)
+			if page != nil {
+				request = request.WithContext(context.WithValue(
+					request.Context(), trackingPageKey{}, page,
+				))
+			}
+		}
+		response.Header().Set("Content-Security-Policy", policy)
 		if request.TLS != nil {
 			response.Header().Set(
 				"Strict-Transport-Security",
@@ -758,8 +810,12 @@ func shouldPersistRequestLog(path string, status int) bool {
 	if status >= http.StatusBadRequest {
 		return true
 	}
+	// Browser policy reports and proxied tracking events arrive on every
+	// page view; recording them would fill the retention with noise.
 	return path != "/" &&
 		!strings.HasPrefix(path, "/assets/") &&
+		!strings.HasPrefix(path, tracking.MomentoProxyPath+"/") &&
+		path != cspReportPath &&
 		path != "/health/live" && path != "/health/ready"
 }
 

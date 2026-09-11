@@ -19,6 +19,7 @@ export type SettingsTab =
   | "classification"
   | "keycloak"
   | "general"
+  | "tracking"
   | "system";
 
 const consolePages = new Set<ConsolePage>([
@@ -42,6 +43,7 @@ const settingsTabs = new Set<SettingsTab>([
   "classification",
   "keycloak",
   "general",
+  "tracking",
   "system",
 ]);
 

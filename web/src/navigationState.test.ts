@@ -12,6 +12,8 @@ describe("console navigation state", () => {
       settingsTab: "keycloak",
     });
     expect(parseConsoleHash(consoleHash("software")).page).toBe("software");
+    // The tracking tab is reached from the administrator guide by URL.
+    expect(parseConsoleHash(consoleHash("settings", "tracking")).settingsTab).toBe("tracking");
   });
 
   it("ignores unknown routes and invalid settings tabs", () => {

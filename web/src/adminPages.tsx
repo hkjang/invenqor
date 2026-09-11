@@ -10,6 +10,7 @@ import {
   LockKeyholeOpen,
   Pencil,
   Power,
+  Radar,
   RadioTower,
   RefreshCw,
   RotateCcw,
@@ -218,6 +219,7 @@ export function SettingsPage({
         <button aria-current={tab === "classification" ? "page" : undefined} className={tab === "classification" ? "active" : ""} onClick={() => selectTab("classification")}><Layers size={17}/>자산 분류</button>
         <button aria-current={tab === "keycloak" ? "page" : undefined} className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
         <button aria-current={tab === "general" ? "page" : undefined} className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
+        <button aria-current={tab === "tracking" ? "page" : undefined} className={tab === "tracking" ? "active" : ""} onClick={() => selectTab("tracking")}><Radar size={17}/>방문 추적</button>
         <button aria-current={tab === "system" ? "page" : undefined} className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
       </nav>
       <div className="settings-content"
@@ -227,6 +229,7 @@ export function SettingsPage({
         {tab === "classification" && <ClassificationSettingsPanel csrf={csrf} access={access}/>}
         {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "general" && <GeneralSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "tracking" && <TrackingSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "system" && <SystemSettingsInfo info={systemInfo}/>}
       </div>
     </div>
@@ -479,6 +482,247 @@ function AgentEnrollmentSettingsPanel({csrf, canWrite}: {csrf: string; canWrite:
         <strong>URL-only Agent 설정 예시</strong>
         <pre>{`[server]\nurl = "https://invenqor.example.com:7070"`}</pre>
         <small>Open 모드에서는 등록 토큰이나 사전 자산 생성이 필요하지 않습니다. Agent가 최초 수집을 전송하면 자동 등록됩니다.</small>
+      </div>
+    </div>
+  </AdminPanel>;
+}
+
+type TrackingProvider = "none"|"momento"|"ga4"|"gtm"|"matomo"|"custom";
+type TrackingSettings = {
+  enabled: boolean;
+  active: boolean;
+  provider: TrackingProvider;
+  providers: TrackingProvider[];
+  momento_url: string;
+  momento_site_id: string;
+  momento_environment: string;
+  momento_proxy: boolean;
+  momento_proxy_path: string;
+  measurement_id: string;
+  matomo_url: string;
+  matomo_site_id: string;
+  custom_snippet: string;
+  allowed_hosts: string[];
+  placement: "head"|"body";
+  policy_sources: string[];
+  version: number;
+  updated_at: string;
+  updated_by: string;
+  source: "database";
+};
+export type TrackingViolation = {
+  origin: string;
+  directive: string;
+  page: string;
+  count: number;
+  first_seen: string;
+  last_seen: string;
+  allowed: boolean;
+};
+
+// Momento comes first: it is the self-hosted collector, the one choice that
+// keeps visitor data inside the network.
+export const TRACKING_PROVIDERS: {value: TrackingProvider; title: string; description: string}[] = [
+  {value: "momento", title: "Momento (사내 수집기)", description: "사내 자체 호스팅 수집기입니다. 같은 오리진 프록시를 쓰면 외부 출처가 정책에 등장하지 않습니다."},
+  {value: "ga4", title: "Google Analytics 4", description: "측정 ID(G-…)로 gtag.js 를 붙입니다. googletagmanager.com·google-analytics.com 이 정책에 더해집니다."},
+  {value: "gtm", title: "Google Tag Manager", description: "컨테이너 ID(GTM-…)로 gtm.js 를 붙입니다."},
+  {value: "matomo", title: "Matomo", description: "Matomo 주소와 사이트 ID로 matomo.js 를 붙입니다. 그 주소가 정책에 더해집니다."},
+  {value: "custom", title: "직접 붙여넣기", description: "받은 스니펫을 그대로 붙입니다(8KB 이하). 스니펫 안의 http(s) 출처를 읽어 정책에 더합니다."},
+];
+
+// Exported so a test can render the list without the panel's fetch on mount.
+export function TrackingViolationList({items, canWrite, busy, onAllow}: {
+  items: TrackingViolation[];
+  canWrite: boolean;
+  busy: boolean;
+  onAllow: (origin: string) => void;
+}) {
+  if (!items.length) {
+    return <div className="admin-empty">이 Server 프로세스가 받은 차단 신고가 없습니다.</div>;
+  }
+  return <div className="setting-list tracking-violations">{items.map(item => <div key={`${item.directive} ${item.origin}`}>
+    <div>
+      <strong>{item.origin}{item.allowed && <em className="badge good">허용됨</em>}</strong>
+      <span>{item.directive} · {item.count}회 · 마지막 {formatAdminDate(item.last_seen)}{item.page ? ` · ${item.page}` : ""}</span>
+    </div>
+    {!item.allowed && <button className="secondary" disabled={!canWrite || busy} aria-disabled={!canWrite || busy}
+      title={canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE}
+      onClick={() => onAllow(item.origin)}><CheckCircle2 size={14}/>허용 목록에 추가</button>}
+  </div>)}</div>;
+}
+
+function TrackingSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
+  const [policy, setPolicy] = React.useState<TrackingSettings|null>(null);
+  const [form, setForm] = React.useState<TrackingSettings|null>(null);
+  const [violations, setViolations] = React.useState<TrackingViolation[]>([]);
+  const [reason, setReason] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const loadViolations = React.useCallback(() =>
+    api<{items: TrackingViolation[]}>("/api/v1/admin/settings/tracking/violations")
+      .then(value => setViolations(value.items)),
+  []);
+  const load = React.useCallback(() => Promise.all([
+    api<TrackingSettings>("/api/v1/admin/settings/tracking").then(value => { setPolicy(value); setForm(value); }),
+    loadViolations(),
+  ]), [loadViolations]);
+  React.useEffect(() => {
+    load().catch(reason => setError((reason as Error).message));
+  }, [load]);
+  const apply = async (body: Record<string, unknown>, done: string) => {
+    if (!canWrite) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = await api<TrackingSettings>("/api/v1/admin/settings/tracking", jsonRequest(csrf, {...body, reason}, "PATCH"));
+      setPolicy(value); setForm(value); setReason(""); setMessage(done);
+      await loadViolations();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = () => form && apply({
+    enabled: form.enabled,
+    provider: form.provider,
+    momento_url: form.momento_url,
+    momento_site_id: form.momento_site_id,
+    momento_environment: form.momento_environment,
+    momento_proxy: form.momento_proxy,
+    measurement_id: form.measurement_id,
+    matomo_url: form.matomo_url,
+    matomo_site_id: form.matomo_site_id,
+    custom_snippet: form.custom_snippet,
+    allowed_hosts: parseNetworkEntries(form.allowed_hosts.join("\n")),
+    placement: form.placement,
+  }, form.enabled
+    ? "방문 추적을 켰습니다. 다음 페이지 로드부터 스니펫이 nonce 와 함께 붙습니다."
+    : "방문 추적 설정을 저장했습니다. 추적은 꺼져 있고 정책은 원래대로입니다.");
+  const allow = async (origin: string) => {
+    if (!canWrite) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const value = await api<TrackingSettings>("/api/v1/admin/settings/tracking/allowed-hosts", jsonRequest(csrf, {origin, reason}));
+      setPolicy(value); setForm(value); setMessage(`${origin} 을(를) 허용 목록에 추가했습니다.`);
+      await loadViolations();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const clearViolations = async () => {
+    if (!canWrite) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await api("/api/v1/admin/settings/tracking/violations", jsonRequest(csrf, {}, "DELETE"));
+      setViolations([]); setMessage("차단 기록을 비웠습니다. 화면을 새로 열어 다시 차단되는지 확인하십시오.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!policy || !form) {
+    return <AdminPanel title="방문 추적" action="DB 정책">
+      <div className="settings-body">{error || "추적 설정을 불러오는 중입니다."}</div>
+    </AdminPanel>;
+  }
+  const update = (patch: Partial<TrackingSettings>) => setForm({...form, ...patch});
+  const changed = JSON.stringify(form) !== JSON.stringify(policy);
+  const selected = TRACKING_PROVIDERS.find(option => option.value === form.provider);
+  return <AdminPanel title="방문 추적" action={`DB 정책 v${policy.version} · ${policy.active ? "ACTIVE" : "OFF"}`}>
+    <div className="settings-body agent-enrollment-settings">
+      <div className="enrollment-status status-grid">
+        <StatusItem label="현재 상태" value={policy.active ? "붙는 중" : policy.enabled ? "켜짐 · 설정 미완성" : "꺼짐"} good={policy.active}/>
+        <StatusItem label="Provider" value={selected ? selected.title : "선택 안 함"}/>
+        <StatusItem label="정책에 더해진 출처" value={policy.policy_sources.length ? `${policy.policy_sources.length}개` : "없음"} good={policy.active && !policy.policy_sources.length}/>
+        <StatusItem label="정책 공유" value="DB · 모든 Pod" good/>
+      </div>
+      <Notice tone="info" title="스니펫은 요청마다 nonce 를 달고 나갑니다.">
+        콘솔의 정책은 script-src 'self' 로 잠겨 있습니다. 추적을 켜면 요청마다 nonce 를 만들어 스니펫의 모든
+        &lt;script&gt; 와 script-src 에 함께 넣고, 스니펫이 부르는 출처만 정책에 더합니다. 'unsafe-inline' 은
+        쓰지 않으므로 추적을 끄면 정책은 원래대로 좁아집니다.
+      </Notice>
+      <label className="toggle-row"><input type="checkbox" checked={form.enabled}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => update({enabled: event.target.checked})}/>
+        <span><strong>방문 추적 켜기</strong><small>기본값은 꺼짐입니다. 켜기 전에 아래 provider 와 식별자를 채우십시오.</small></span></label>
+      <div className="enrollment-mode-grid" role="radiogroup" aria-label="추적 provider">
+        {TRACKING_PROVIDERS.map(option => <label key={option.value}
+          className={form.provider === option.value ? "enrollment-mode selected" : "enrollment-mode"} title={mutationTitle}>
+          <input type="radio" name="tracking-provider" value={option.value} checked={form.provider === option.value}
+            disabled={!canWrite} aria-disabled={!canWrite} onChange={() => update({provider: option.value})}/>
+          <span><strong>{option.title}{option.value === "momento" && <b>ON-PREM</b>}</strong><small>{option.description}</small></span>
+          {form.provider === option.value && <CheckCircle2 size={19}/>}
+        </label>)}
+      </div>
+      <div className="admin-form">
+        {form.provider === "momento" && <>
+          <label>Momento 수집기 주소<input value={form.momento_url} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="https://momento.corp.example" onChange={event => update({momento_url: event.target.value})}/></label>
+          <label>사이트 ID<input value={form.momento_site_id} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="invenqor" onChange={event => update({momento_site_id: event.target.value})}/></label>
+          <label>환경<input value={form.momento_environment} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="prd" onChange={event => update({momento_environment: event.target.value})}/></label>
+          <label className="toggle-row"><input type="checkbox" checked={form.momento_proxy}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => update({momento_proxy: event.target.checked})}/>
+            <span><strong>같은 오리진 프록시 사용</strong><small>브라우저는 이 Server 의 {policy.momento_proxy_path}/* 만 부르고 Server 가 수집기로 넘깁니다. 정책에 외부 출처가 들어가지 않습니다.</small></span></label>
+        </>}
+        {(form.provider === "ga4" || form.provider === "gtm") &&
+          <label className="wide">{form.provider === "ga4" ? "측정 ID" : "컨테이너 ID"}<input value={form.measurement_id}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder={form.provider === "ga4" ? "G-XXXXXXXXXX" : "GTM-XXXXXXX"} onChange={event => update({measurement_id: event.target.value})}/></label>}
+        {form.provider === "matomo" && <>
+          <label>Matomo 주소<input value={form.matomo_url} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="https://matomo.corp.example" onChange={event => update({matomo_url: event.target.value})}/></label>
+          <label>사이트 ID<input value={form.matomo_site_id} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="1" onChange={event => update({matomo_site_id: event.target.value})}/></label>
+        </>}
+        {form.provider === "custom" &&
+          <label className="wide">스니펫 (8KB 이하)<textarea value={form.custom_snippet} spellCheck={false}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder={'<script async src="https://tracker.corp.example/t.js" data-site="…"></script>'}
+            onChange={event => update({custom_snippet: event.target.value})}/></label>}
+        <label>삽입 위치<select value={form.placement} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({placement: event.target.value as TrackingSettings["placement"]})}>
+          <option value="head">head 끝</option><option value="body">body 끝</option></select></label>
+        <label>추가 허용 출처 (한 줄에 하나)<textarea value={form.allowed_hosts.join("\n")} spellCheck={false}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder={"https://pixel.corp.example\nhttps://*.corp.example"}
+          onChange={event => update({allowed_hosts: event.target.value.split("\n")})}/></label>
+      </div>
+      {policy.policy_sources.length > 0 && <div className="env-help">
+        <strong>정책에 더해진 출처</strong>{policy.policy_sources.map(source => <code key={source}>{source}</code>)}
+      </div>}
+      <label className="enrollment-reason">변경 사유
+        <input value={reason} onChange={event => setReason(event.target.value)}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder="예: Momento 파일럿 시작"/>
+      </label>
+      <div className="form-actions enrollment-actions">
+        <button className="secondary" disabled={busy} onClick={() => load().catch(reason => setError((reason as Error).message))}><RefreshCw size={16}/>새로고침</button>
+        <button className="primary compact" disabled={!canWrite || busy || !changed} aria-disabled={!canWrite || busy || !changed}
+          title={mutationTitle} onClick={save}><Save size={16}/>설정 적용</button>
+      </div>
+      <ActionMessage message={message} error={error}/>
+      <div className="enrollment-network-policy">
+        <div className="section-heading">
+          <div>
+            <strong>정책이 차단한 출처</strong>
+            <small>추적이 켜져 있는 동안 브라우저가 신고한, 정책에 없는 출처입니다. 이 Server 프로세스 기준이며 서로 다른 출처 100개까지 기억합니다. 한 번 눌러 허용 목록에 넣으십시오.</small>
+          </div>
+          <Shield size={18}/>
+        </div>
+        <TrackingViolationList items={violations} canWrite={canWrite} busy={busy} onAllow={allow}/>
+        <div className="form-actions enrollment-actions">
+          <button className="secondary" disabled={busy} onClick={() => loadViolations().catch(reason => setError((reason as Error).message))}><RefreshCw size={16}/>다시 읽기</button>
+          <button className="secondary" disabled={!canWrite || busy || !violations.length} aria-disabled={!canWrite || busy || !violations.length}
+            title={mutationTitle} onClick={clearViolations}><Trash2 size={16}/>기록 비우기</button>
+        </div>
       </div>
     </div>
   </AdminPanel>;
