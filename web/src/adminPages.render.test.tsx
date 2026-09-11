@@ -1,6 +1,12 @@
 import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
-import {Notice, SystemSettingsInfo} from "./adminPages";
+import {
+  Notice,
+  SystemSettingsInfo,
+  TRACKING_PROVIDERS,
+  TrackingViolationList,
+  type TrackingViolation,
+} from "./adminPages";
 import type {SystemInfo} from "./productVersion";
 
 const info: SystemInfo = {
@@ -62,4 +68,56 @@ describe("Notice", () => {
       expect(markup).not.toContain("undefined");
     });
   }
+});
+
+describe("TrackingViolationList", () => {
+  const blocked: TrackingViolation = {
+    origin: "https://momento.corp.example",
+    directive: "connect-src",
+    page: "https://invenqor.corp.example/",
+    count: 12,
+    first_seen: "2026-09-12T08:00:00Z",
+    last_seen: "2026-09-12T08:05:00Z",
+    allowed: false,
+  };
+
+  it("offers the one-click allow only for an origin the policy still blocks", () => {
+    const markup = renderToStaticMarkup(
+      <TrackingViolationList
+        items={[blocked, {...blocked, directive: "script-src", allowed: true}]}
+        canWrite busy={false} onAllow={() => undefined}
+      />,
+    );
+    noUndefined(markup);
+    expect(markup).toContain("https://momento.corp.example");
+    expect(markup).toContain("connect-src");
+    expect(markup).toContain("12회");
+    expect(markup).toContain("허용됨");
+    // One row is already allowed, so exactly one button remains.
+    expect(markup.split("허용 목록에 추가").length - 1).toBe(1);
+  });
+
+  it("keeps the button visible but disabled for settings.read", () => {
+    const markup = renderToStaticMarkup(
+      <TrackingViolationList items={[blocked]} canWrite={false} busy={false} onAllow={() => undefined}/>,
+    );
+    expect(markup).toContain("허용 목록에 추가");
+    expect(markup).toContain('aria-disabled="true"');
+  });
+
+  it("says so when nothing was blocked", () => {
+    const markup = renderToStaticMarkup(
+      <TrackingViolationList items={[]} canWrite busy={false} onAllow={() => undefined}/>,
+    );
+    expect(markup).toContain("차단 신고가 없습니다");
+  });
+});
+
+describe("TRACKING_PROVIDERS", () => {
+  // The self-hosted collector is the only choice that keeps data inside, so
+  // it is the first thing an administrator sees.
+  it("lists Momento first and never offers 'none' as a provider card", () => {
+    expect(TRACKING_PROVIDERS[0].value).toBe("momento");
+    expect(TRACKING_PROVIDERS.map(option => option.value)).not.toContain("none");
+  });
 });

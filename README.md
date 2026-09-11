@@ -66,6 +66,8 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
 - 로컬/SSO 역할 원천 분리, 계정 잠금·세션 폐기와 안전장치를 갖춘 사용자 관리
 - 자산 최신성·Agent 건전성·수집 실패·7일 추이를 제공하는 운영 통계 화면
 - 자산·관계·병합/분리·Query·감사·키·설정 API를 실제로 연결한 관리 콘솔
+- 콘솔에 방문 추적 스니펫을 요청별 nonce CSP 로 붙이고, 차단된 출처를 보여 주며,
+  사내 Momento 수집기를 같은 오리진 프록시로 연결하는 설정 화면(기본 꺼짐)
 - 로그인 화면과 콘솔 상단의 실행 Server 버전 표시
 - scoped API key 수명주기와 stateless Streamable HTTP MCP 자산 도구
 - systemd, SysV init, OpenRC 서비스 정의

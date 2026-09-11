@@ -1476,8 +1476,8 @@ Server 프로세스가 읽는 설정은 아래가 전부입니다. 이 표는
 
 ## 19. 운영 설정 화면
 
-**설정**은 PostgreSQL, Agent 등록, 자산 분류, Keycloak, 고급 설정, 시스템 정보
-여섯 개 하위 화면으로 나뉩니다. 선택한 하위 화면은 `#/settings/agents` 같은 URL과
+**설정**은 PostgreSQL, Agent 등록, 자산 분류, Keycloak, 고급 설정, 방문 추적,
+시스템 정보 일곱 개 하위 화면으로 나뉩니다. 선택한 하위 화면은 `#/settings/agents` 같은 URL과
 사용자별 브라우저 상태에 함께 저장되어 새로고침 후에도 유지됩니다.
 
 **PostgreSQL**은 DSN을 저장하기 전에 실제 연결을 시험합니다. 현재 실행 중인
@@ -1511,7 +1511,131 @@ Server 프로세스가 읽는 설정은 아래가 전부입니다. 이 표는
 
 ![API · MCP 키 — 최소권한 scope로 키를 발급하고 이름 변경·회전·폐기를 수행한다](assets/guide/api-keys.png)
 
-## 20. 가이드 화면 캡처 다시 만들기
+## 20. 방문 추적 스크립트와 CSP
+
+**설정 → 방문 추적**(`#/settings/tracking`)에서 콘솔에 방문 추적 스크립트를
+붙입니다. 설정은 다른 운영 정책과 같이 공용 DB(`server_metadata` 의
+`tracking_policy`)에 저장되어 모든 Pod 에 즉시 적용되며, 재기동이나 재배포가
+필요하지 않습니다. **기본값은 꺼짐**입니다. 새로 설치한 곳에서는 아무 스니펫도
+붙지 않고 정책 헤더도 이전 버전과 바이트 단위로 같습니다.
+
+### 20.1 설정 항목
+
+| 항목 | 뜻 |
+|---|---|
+| 방문 추적 켜기 | 꺼짐이 기본값입니다. 켜기 전에 provider 와 그 식별자를 채워야 저장됩니다 |
+| Provider | `momento` · `ga4` · `gtm` · `matomo` · `custom`. Momento 가 첫 자리입니다 |
+| Momento 수집기 주소 · 사이트 ID · 환경 | 사내 Momento 수집기의 주소와 사이트 id, `data-environment` 값(기본 `prd`) |
+| 같은 오리진 프록시 사용 | Momento 전용. 기본 켜짐. 아래 20.3 참조 |
+| 측정 ID / 컨테이너 ID | GA4 의 `G-…`, GTM 의 `GTM-…` |
+| Matomo 주소 · 사이트 ID | Matomo 설치 주소와 사이트 id |
+| 스니펫 | `custom` 에서 받은 스니펫을 그대로 붙여 넣습니다. **8KB 를 넘으면 저장되지 않습니다** |
+| 삽입 위치 | `head` 끝(기본) 또는 `body` 끝 |
+| 추가 허용 출처 | 스니펫에서 자동으로 못 읽은 출처를 한 줄에 하나씩. `https://host` 꼴의 http(s) 출처만 받으며 `https://*.corp.example` 같은 와일드카드 라벨은 허용됩니다 |
+| 변경 사유 | 감사 기록(`tracking.policy.update`)에 남습니다 |
+
+Invenqor 콘솔은 하나의 SPA 셸(`/`)이고 화면 구분은 `#/…` 해시 경로라 Server 가
+어느 화면이 열렸는지 알 수 없습니다. 그래서 다른 서비스에 있는 "관리 화면 제외"
+(`include_admin`) 설정은 두지 않았습니다 — 콘솔 전체가 관리 화면이므로 켜면 로그인
+화면을 포함한 모든 화면에 붙습니다. 추적 도구가 URL 을 보낼 때 해시 경로가 함께
+갈 수 있으니, 개인 식별 값을 보내지 않도록 도구 쪽에서 설정하십시오.
+
+### 20.2 CSP 와 nonce — 스니펫이 조용히 막히지 않게 하는 방법
+
+콘솔은 `Content-Security-Policy: default-src 'self'; …` 로 잠겨 있습니다.
+이 정책 아래에서는 인라인 `<script>` 도, 외부 주소의 `<script src>` 도 브라우저가
+실행하지 않으며, 그 사실은 브라우저 개발자 도구의 콘솔에만 나타납니다. 스니펫을
+그냥 붙이면 화면은 멀쩡하지만 수집은 하나도 들어오지 않습니다.
+
+추적을 켜면 Server 는 페이지 요청마다 다음을 합니다.
+
+1. 무작위 **nonce** 를 만들어 스니펫의 모든 `<script>` 태그에 `nonce="…"` 로
+   붙이고, 같은 값을 `script-src 'self' 'nonce-…'` 로 정책에 넣습니다. nonce 는
+   요청마다 다르므로 응답을 가로채 재사용할 수 없습니다.
+2. 스니펫이 부르는 **출처를 정책에 더합니다**. provider 가 정해진 것(GA4·GTM·
+   Matomo)은 알려진 주소를, `custom` 은 붙여 넣은 문자열에서 `http(s)://…` 출처를
+   읽어 `script-src` · `connect-src` · `img-src` 에 넣습니다. "추가 허용 출처"의
+   값도 같은 세 지시어에 들어갑니다.
+3. `report-uri /api/v1/tracking/csp-report` 를 정책에 넣어 브라우저가 차단한
+   요청을 Server 에 신고하게 합니다(20.4).
+
+`'unsafe-inline'` 은 **어떤 경우에도 넣지 않습니다**. 한 번 넣으면 콘솔의 모든
+인라인 스크립트가 함께 허용되고 추적을 끈 뒤에도 정책은 느슨한 채 남기 때문입니다.
+"추가 허용 출처"에 `'unsafe-inline'` 같은 키워드를 넣으면 400 으로 거절됩니다.
+추적을 끄면 정책은 원래 문자열로 돌아갑니다.
+
+`/api/*` · `/v1/*` · `/health/*` · `/mcp` · `/momento/*` 처럼 화면이 아닌 응답에는
+스니펫이 붙지 않으며 정책도 `default-src 'none'; frame-ancestors 'none'` 으로 더
+좁습니다.
+
+### 20.3 Momento 같은 오리진 프록시
+
+Momento 는 사내 자체 호스팅 수집기라 데이터가 밖으로 나가지 않는 유일한 선택지입니다.
+"같은 오리진 프록시 사용"(기본 켜짐)을 두면 스니펫은 다음과 같이 나가고,
+
+```html
+<script async src="/momento/tracker.js" nonce="…"
+        data-site-id="<사이트 ID>" data-environment="prd"
+        data-contract-version="1" data-endpoint="/momento"></script>
+```
+
+브라우저는 Invenqor Server 의 `/momento/*` 만 부릅니다. Server 가 그 경로를
+"Momento 수집기 주소"로 넘기므로 **정책에 외부 출처가 아예 등장하지 않고**,
+Ingress 나 사내 프록시가 브라우저에서 수집기로 가는 길을 열어 주지 않아도 됩니다.
+프록시는 다음 규칙을 따릅니다.
+
+- Momento 추적이 켜져 있을 때만 동작합니다. 그 밖에는 `/momento/*` 가 404 입니다.
+- 방문자의 Invenqor 세션 쿠키와 `Authorization` 헤더는 수집기로 보내지 않고,
+  수집기가 돌려주는 `Set-Cookie` 는 버립니다.
+- 한 번에 넘기는 본문은 256KB 까지이며, 수집기가 10초 안에 응답하지 않으면 502 로
+  끝냅니다. 정상 응답은 Server 로그(진단 기록)에 남기지 않고, 실패한 요청만 남습니다.
+- 수집기는 `X-Forwarded-For` 로 방문자 주소를 받습니다.
+
+프록시를 끄면 스니펫이 수집기 주소를 직접 부르고 그 출처가 세 지시어에 더해집니다.
+Server 에서 수집기로 가는 경로가 없고 브라우저에서 가는 경로만 있는 배치라면 이
+쪽을 쓰십시오.
+
+### 20.4 차단된 출처 확인과 한 번에 허용
+
+추적이 켜져 있으면 브라우저는 정책이 막은 요청을 `POST /api/v1/tracking/csp-report`
+로 신고합니다. Server 는 인증 없이 그 신고를 받아 **출처와 지시어**를 메모리에
+기억합니다 — 같은 차단이 페이지마다 반복되므로 횟수가 아니라 서로 다른 출처가
+중요하고, Pod 당 100개까지만 담으며 재기동하면 사라집니다. 감사 기록이 아니라
+스니펫을 고치는 사람을 위한 작업 보조입니다. 8KB 를 넘는 본문은 잘라 읽고, 파싱이
+안 되면 버리며, 응답은 항상 204 입니다.
+
+**방문 추적** 화면 아래의 "정책이 차단한 출처"가 이 목록입니다. 항목의 **허용
+목록에 추가**를 누르면 그 출처가 "추가 허용 출처"에 들어가고
+(`tracking.allowed_host.add` 감사 기록), 이미 허용된 출처는 "허용됨"으로 표시됩니다.
+**기록 비우기**로 목록을 지운 뒤 화면을 새로 열면 여전히 막히는 것이 있는지 알 수
+있습니다. 여러 Pod 를 운영하면 신고가 어느 Pod 로 갔는지에 따라 목록이 다를 수
+있으니, 비어 있어도 "다시 읽기"를 몇 번 눌러 보십시오.
+
+### 20.5 API
+
+| 메서드·경로 | 권한 | 뜻 |
+|---|---|---|
+| `GET /api/v1/admin/settings/tracking` | settings.read | 현재 설정과 정책에 더해진 출처 목록 |
+| `PATCH /api/v1/admin/settings/tracking` | settings.write + CSRF | 있는 필드만 바꿉니다. 잘못된 값은 400, 동시 변경은 409 |
+| `GET /api/v1/admin/settings/tracking/violations` | settings.read | 이 Pod 가 받은 차단 신고 |
+| `DELETE /api/v1/admin/settings/tracking/violations` | settings.write + CSRF | 차단 기록 비우기 |
+| `POST /api/v1/admin/settings/tracking/allowed-hosts` | settings.write + CSRF | `{"origin":"https://…"}` 를 허용 목록에 추가 |
+| `POST /api/v1/tracking/csp-report` | 없음 | 브라우저의 정책 위반 신고. 항상 204 |
+| `GET·POST /momento/*` | 없음 | Momento 같은 오리진 프록시. 꺼져 있으면 404 |
+
+```bash
+curl -sS -b cookie.txt -H "X-CSRF-Token: $CSRF" -X PATCH \
+  -H 'Content-Type: application/json' \
+  https://invenqor.corp.example:7070/api/v1/admin/settings/tracking \
+  -d '{"enabled":true,"provider":"momento","momento_url":"https://momento.corp.example","momento_site_id":"invenqor","reason":"Momento 파일럿"}'
+```
+
+켜고 나서 확인할 것: 콘솔을 새로 열어 응답 헤더 `Content-Security-Policy` 에
+`'nonce-…'` 와 `report-uri` 가 있고, 페이지 소스의 스니펫 `<script>` 에 같은
+nonce 가 붙어 있으며, Momento 관리 화면에 페이지뷰가 들어오는지 봅니다. 들어오지
+않으면 20.4 의 목록을 먼저 보십시오.
+
+## 21. 가이드 화면 캡처 다시 만들기
 
 이 문서와 [사용자 가이드](USER_GUIDE.md)의 화면 캡처는 저장소의 스크립트가
 생성합니다.
