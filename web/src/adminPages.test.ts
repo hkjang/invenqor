@@ -109,6 +109,9 @@ describe("Keycloak mapping editor", () => {
     expect(settings.allowed_email_domains).toEqual([]);
     expect(settings.role_mappings).toEqual({});
     expect(settings.group_mappings).toEqual({});
+    // Silent SSO is opt-in; a settings document saved before the field
+    // existed must not turn it on.
+    expect(settings.auto_login).toBe(false);
   });
 });
 

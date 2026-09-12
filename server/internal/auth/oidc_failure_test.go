@@ -56,7 +56,7 @@ func authorize(
 	provider *mockOIDCProvider,
 ) url.Values {
 	t.Helper()
-	start, err := service.Start(context.Background(), "/", "192.0.2.20", "test-agent")
+	start, err := service.Start(context.Background(), "/", false, "192.0.2.20", "test-agent")
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestKeycloakStartPrunesFinishedAndExpiredFlows(t *testing.T) {
 		t.Fatalf("seed stale flow error = %v", err)
 	}
 	if _, err := service.Start(
-		context.Background(), "/", "192.0.2.20", "test-agent",
+		context.Background(), "/", false, "192.0.2.20", "test-agent",
 	); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}

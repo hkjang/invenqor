@@ -55,26 +55,31 @@ type oidcClientSecretEnvelope struct {
 }
 
 type OIDCSettings struct {
-	Enabled              bool              `json:"enabled"`
-	IssuerURL            string            `json:"issuer_url"`
-	Realm                string            `json:"realm"`
-	ClientID             string            `json:"client_id"`
-	RedirectURI          string            `json:"redirect_uri"`
-	LogoutRedirectURI    string            `json:"logout_redirect_uri"`
-	Scopes               []string          `json:"scopes"`
-	UsernameClaim        string            `json:"username_claim"`
-	EmailClaim           string            `json:"email_claim"`
-	NameClaim            string            `json:"name_claim"`
-	GroupClaim           string            `json:"group_claim"`
-	RoleClaim            string            `json:"role_claim"`
-	RoleMappings         map[string]string `json:"role_mappings"`
-	GroupMappings        map[string]string `json:"group_mappings"`
-	AutoCreateUsers      bool              `json:"auto_create_users"`
-	DefaultRole          string            `json:"default_role"`
-	AllowedEmailDomains  []string          `json:"allowed_email_domains"`
-	PrivateCAPEM         string            `json:"private_ca_pem,omitempty"`
-	LastConnectionTestAt *time.Time        `json:"last_connection_test_at,omitempty"`
-	LastConnectionOK     bool              `json:"last_connection_ok"`
+	Enabled           bool              `json:"enabled"`
+	IssuerURL         string            `json:"issuer_url"`
+	Realm             string            `json:"realm"`
+	ClientID          string            `json:"client_id"`
+	RedirectURI       string            `json:"redirect_uri"`
+	LogoutRedirectURI string            `json:"logout_redirect_uri"`
+	Scopes            []string          `json:"scopes"`
+	UsernameClaim     string            `json:"username_claim"`
+	EmailClaim        string            `json:"email_claim"`
+	NameClaim         string            `json:"name_claim"`
+	GroupClaim        string            `json:"group_claim"`
+	RoleClaim         string            `json:"role_claim"`
+	RoleMappings      map[string]string `json:"role_mappings"`
+	GroupMappings     map[string]string `json:"group_mappings"`
+	AutoCreateUsers   bool              `json:"auto_create_users"`
+	// AutoLogin lets the console sign a visitor in silently (prompt=none) when
+	// the Keycloak session is still valid. Off by default: a silent attempt is a
+	// top-level redirect, and the place where one can happen has to be bound to
+	// an administrator decision, not to a query parameter anyone can append.
+	AutoLogin            bool       `json:"auto_login"`
+	DefaultRole          string     `json:"default_role"`
+	AllowedEmailDomains  []string   `json:"allowed_email_domains"`
+	PrivateCAPEM         string     `json:"private_ca_pem,omitempty"`
+	LastConnectionTestAt *time.Time `json:"last_connection_test_at,omitempty"`
+	LastConnectionOK     bool       `json:"last_connection_ok"`
 }
 
 type OIDCAutoConfig struct {
@@ -192,6 +197,25 @@ func (settings OIDCSettings) Validate() error {
 
 type OIDCStart struct {
 	AuthorizationURL string `json:"authorization_url"`
+	// Silent reports whether prompt=none was actually sent. A caller asking for
+	// a silent attempt while auto_login is off gets an ordinary login instead.
+	Silent bool `json:"silent"`
+}
+
+// Every error a provider returns to prompt=none when it has no usable session.
+// These are ordinary answers, not failures: the visitor simply is not signed in
+// at the provider and has to be shown the login screen.
+var silentLoginRefusals = map[string]struct{}{
+	"login_required":             {},
+	"interaction_required":       {},
+	"consent_required":           {},
+	"account_selection_required": {},
+}
+
+// SilentLoginRefused reports whether providerError is a prompt=none refusal.
+func SilentLoginRefused(providerError string) bool {
+	_, refused := silentLoginRefusals[strings.TrimSpace(providerError)]
+	return refused
 }
 
 type OIDCService struct {
@@ -564,9 +588,15 @@ func (service *OIDCService) validateRoleMappings(
 	return nil
 }
 
+// Start begins an authorization-code flow. With silent set the provider is
+// asked for prompt=none - answer from an existing session or refuse, never
+// render a screen - but only when the administrator turned auto_login on;
+// otherwise the request is quietly downgraded to an ordinary login so that a
+// query parameter cannot change the flow.
 func (service *OIDCService) Start(
 	ctx context.Context,
 	returnTo string,
+	silent bool,
 	sourceIP string,
 	userAgent string,
 ) (OIDCStart, error) {
@@ -574,6 +604,7 @@ func (service *OIDCService) Start(
 	if err != nil {
 		return OIDCStart{}, err
 	}
+	silent = silent && settings.AutoLogin
 	state, _, err := newSecret()
 	if err != nil {
 		return OIDCStart{}, err
@@ -608,8 +639,8 @@ func (service *OIDCService) Start(
 		ctx,
 		`INSERT INTO oidc_flows(
 			id, state_hash, nonce_hash, pkce_verifier, redirect_uri,
-			return_to, source_ip, user_agent, expires_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			return_to, source_ip, user_agent, expires_at, silent
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		uuid.NewString(),
 		hashSecret(state),
 		hashSecret(nonce),
@@ -619,18 +650,64 @@ func (service *OIDCService) Start(
 		sourceIP,
 		userAgent,
 		expiresAt,
+		silent,
 	); err != nil {
 		return OIDCStart{}, fmt.Errorf("store OIDC flow: %w", err)
 	}
 	challengeHash := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(challengeHash[:])
-	authorizationURL := oauthConfig.AuthCodeURL(
-		state,
+	options := []oauth2.AuthCodeOption{
 		oidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
-	)
-	return OIDCStart{AuthorizationURL: authorizationURL}, nil
+	}
+	if silent {
+		options = append(options, oauth2.SetAuthURLParam("prompt", "none"))
+	}
+	authorizationURL := oauthConfig.AuthCodeURL(state, options...)
+	return OIDCStart{AuthorizationURL: authorizationURL, Silent: silent}, nil
+}
+
+// RefusedSilently answers the callback when the provider returned an error
+// instead of a code. It reports true only for a flow this server started with
+// prompt=none that the provider refused for lack of a session - the ordinary
+// outcome for a visitor who is not signed in at Keycloak. The flow is consumed
+// either way so the state cannot be replayed. Any other combination is a real
+// failure and is left to the usual reporting.
+func (service *OIDCService) RefusedSilently(
+	ctx context.Context,
+	state string,
+	providerError string,
+) (bool, error) {
+	if state == "" {
+		return false, nil
+	}
+	var silent bool
+	var expiresAt, consumedAt flexibleTime
+	err := service.db.QueryRowContext(
+		ctx,
+		`SELECT silent, expires_at, consumed_at FROM oidc_flows
+		 WHERE state_hash = $1`,
+		hashSecret(state),
+	).Scan(&silent, &expiresAt, &consumedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load OIDC flow for provider error: %w", err)
+	}
+	if !expiresAt.Valid || time.Now().UTC().After(expiresAt.Time) || consumedAt.Valid {
+		return false, nil
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		`UPDATE oidc_flows SET consumed_at = CURRENT_TIMESTAMP
+		 WHERE state_hash = $1 AND consumed_at IS NULL`,
+		hashSecret(state),
+	); err != nil {
+		return false, fmt.Errorf("consume refused OIDC flow: %w", err)
+	}
+	return silent && SilentLoginRefused(providerError), nil
 }
 
 func (service *OIDCService) Callback(

@@ -171,7 +171,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [local, keycloak, keycloak_enabled, keycloak_client_secret, keycloak_incomplete, keycloak_provider_issuer]
+                required: [local, keycloak, keycloak_enabled, keycloak_client_secret, keycloak_incomplete, keycloak_provider_issuer, keycloak_auto_login]
                 properties:
                   local: {type: boolean, const: true}
                   keycloak: {type: boolean}
@@ -179,6 +179,7 @@ paths:
                   keycloak_client_secret: {type: boolean}
                   keycloak_incomplete: {type: boolean}
                   keycloak_provider_issuer: {type: string}
+                  keycloak_auto_login: {type: boolean, description: "True when Keycloak is ready and `auto_login` is on, so the console may attempt one silent (`prompt=none`) sign-in before drawing the login screen"}
         "500": {description: Authentication settings unavailable}
   /api/v1/auth/keycloak/start:
     get:
@@ -190,6 +191,10 @@ paths:
           name: return_to
           schema: {type: string, default: /}
           description: Safe same-origin path used after a successful callback; unsafe values become `/`.
+        - in: query
+          name: prompt
+          schema: {type: string, enum: [none]}
+          description: "`none` asks Keycloak to answer from an existing session only, never rendering a screen. Honoured only when the administrator enabled `auto_login`; otherwise the request is quietly downgraded to an ordinary login."
       responses:
         "302": {description: "Redirect to Keycloak, or back to the console with a stable `auth_error` code"}
         "4XX": {description: Invalid request}
@@ -204,7 +209,7 @@ paths:
         - {in: query, name: error, schema: {type: string}, description: Provider error instead of `code`}
         - {in: query, name: error_description, schema: {type: string}}
       responses:
-        "302": {description: "Redirect to the requested console path on success, or to the login screen with `auth_error` on failure"}
+        "302": {description: "Redirect to the requested console path on success, or to the login screen with `auth_error` on failure. A `login_required`-class error answering a `prompt=none` attempt is not a failure: it redirects to `/?sso=none`, the marker the console reads as \"do not try silently again\"."}
         "4XX": {description: Invalid request}
   /api/v1/auth/me:
     get:
@@ -2667,6 +2672,7 @@ components:
         role_mappings: {type: object, additionalProperties: {type: string}}
         group_mappings: {type: object, additionalProperties: {type: string}}
         auto_create_users: {type: boolean}
+        auto_login: {type: boolean, default: false, description: "Sign a visitor in silently with `prompt=none` when a Keycloak session exists. Off by default; the Server ignores `prompt=none` while it is off."}
         default_role: {type: string, example: viewer}
         allowed_email_domains: {type: array, items: {type: string}}
         private_ca_pem: {type: string, writeOnly: true}
