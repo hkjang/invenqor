@@ -47,6 +47,11 @@ func keycloakRemediation(code string) string {
 	return keycloakGuidance["KEYCLOAK_LOGIN_FAILED"]
 }
 
+// silentLoginRefusedPath is where a refused prompt=none attempt lands. The
+// console's login screen lives at the root of the SPA (there is no /login
+// route), and it reads sso=none as "do not try silently again".
+const silentLoginRefusedPath = "/?sso=none"
+
 type keycloakSettingsUpdate struct {
 	Settings     auth.OIDCSettings `json:"settings"`
 	ClientSecret *string           `json:"client_secret,omitempty"`
@@ -99,6 +104,10 @@ func (s *Server) authMethods(response http.ResponseWriter, request *http.Request
 		"keycloak_incomplete":        settings.Enabled && !secretConfigured,
 		"keycloak_secret_unreadable": unreadable,
 		"keycloak_provider_issuer":   settings.EffectiveIssuer(),
+		// Published so the console knows whether to try a silent sign-in before
+		// it draws the login screen. Tied to readiness: a silent attempt against
+		// a provider that cannot complete the login only produces a redirect.
+		"keycloak_auto_login": ready && settings.AutoLogin,
 	})
 }
 
@@ -106,6 +115,7 @@ func (s *Server) keycloakStart(response http.ResponseWriter, request *http.Reque
 	start, err := s.oidcService.Start(
 		request.Context(),
 		request.URL.Query().Get("return_to"),
+		request.URL.Query().Get("prompt") == "none",
 		clientIP(request),
 		request.UserAgent(),
 	)
@@ -124,6 +134,24 @@ func (s *Server) keycloakCallback(response http.ResponseWriter, request *http.Re
 	if providerError := strings.TrimSpace(
 		request.URL.Query().Get("error"),
 	); providerError != "" {
+		// A prompt=none attempt that finds no provider session comes back here
+		// as error=login_required. That is the ordinary answer for a visitor who
+		// is not signed in, not a failure: show the login screen, and leave the
+		// marker in the address so the console does not try again even when its
+		// sessionStorage was wiped in between. Retrying here is the loop.
+		refused, err := s.oidcService.RefusedSilently(
+			request.Context(),
+			request.URL.Query().Get("state"),
+			providerError,
+		)
+		if err != nil {
+			s.internalError(response, request, err)
+			return
+		}
+		if refused {
+			http.Redirect(response, request, silentLoginRefusedPath, http.StatusFound)
+			return
+		}
 		// Keycloak reports consent denial and policy failures this way; without
 		// this branch the user only saw the generic flow-expired message.
 		s.recordKeycloakFailure(

@@ -85,6 +85,7 @@ type KeycloakSettings = {
   role_mappings: Record<string, string>;
   group_mappings: Record<string, string>;
   auto_create_users: boolean;
+  auto_login: boolean;
   default_role: string;
   allowed_email_domains: string[];
   private_ca_pem: string;
@@ -107,6 +108,7 @@ const defaultKeycloakSettings: KeycloakSettings = {
   role_mappings: {},
   group_mappings: {},
   auto_create_users: true,
+  auto_login: false,
   default_role: "viewer",
   allowed_email_domains: [],
   private_ca_pem: "",
@@ -1078,6 +1080,9 @@ function KeycloakSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolea
       <label className="toggle-row"><input type="checkbox" checked={settings.auto_create_users}
         disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
         onChange={event => change("auto_create_users", event.target.checked)}/><span><strong>최초 로그인 사용자 자동 생성</strong><small>기본 역할과 mapping 정책을 적용합니다.</small></span></label>
+      <label className="toggle-row"><input type="checkbox" checked={settings.auto_login}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => change("auto_login", event.target.checked)}/><span><strong>Keycloak 세션이 있으면 자동 로그인</strong><small>Keycloak에 이미 로그인한 사용자는 로그인 화면 없이 콘솔로 들어옵니다(prompt=none). 세션이 없으면 로그인 화면이 보이며, 한 탭에서 한 번만 시도하고 로그아웃 뒤에는 시도하지 않습니다.</small></span></label>
       <div className="form-actions">
         <button className="secondary" disabled={!canWrite || busy || !settings.enabled}
           aria-disabled={!canWrite || busy || !settings.enabled} title={mutationTitle}

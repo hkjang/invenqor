@@ -36,6 +36,13 @@ import {
   type UserPreferences,
 } from "./preferences";
 import {formatDate, formatRelative} from "./format";
+import {
+  beginSilentSso,
+  clearSilentSsoState,
+  currentReturnTo,
+  markSignedOut,
+  shouldAttemptSilentSsoHere,
+} from "./silentSso";
 import "./styles.css";
 import "./personalization.css";
 
@@ -227,15 +234,25 @@ function App() {
   const [keycloakEnabled, setKeycloakEnabled] = React.useState(false);
   const [keycloakIncomplete, setKeycloakIncomplete] = React.useState(false);
   const [keycloakUnreadable, setKeycloakUnreadable] = React.useState(false);
+  const [keycloakAutoLogin, setKeycloakAutoLogin] = React.useState(false);
+  // The login screen waits for these two answers so that a visitor who is
+  // signed in at Keycloak is sent there silently instead of seeing the form
+  // flash first.
+  const [identityResolved, setIdentityResolved] = React.useState(false);
+  const [methodsResolved, setMethodsResolved] = React.useState(false);
+  const [silentSsoPending, setSilentSsoPending] = React.useState(false);
   const [bootstrap, setBootstrap] = React.useState<BootstrapStatus|null>(null);
   const [preferences, setPreferences] = React.useState<UserPreferences>(defaultPreferences);
   const [security,setSecurity]=React.useState<AccountSecurity|undefined>(undefined);
   const loadIdentity=React.useCallback(()=>api<{user:User; security?:AccountSecurity}>("/api/v1/auth/me")
     .then(v=>{
       setUser(v.user); setSecurity(v.security);
+      // A session exists again, so a later signed-out visit in this tab may
+      // try silently once more.
+      clearSilentSsoState();
       const currentCsrf = csrfTokenFromCookie();
       if (currentCsrf) { setCsrf(currentCsrf); sessionStorage.setItem("csrf", currentCsrf); }
-    }).catch(()=>{}),[]);
+    }).catch(()=>{}).finally(()=>setIdentityResolved(true)),[]);
   React.useEffect(()=>{ void loadIdentity(); },[loadIdentity]);
   React.useEffect(()=>{
     const canReadSettings = user?.super_admin || user?.permissions.includes("settings.read");
@@ -243,11 +260,20 @@ function App() {
     api<SystemInfo>(path).then(setSystemInfo).catch(()=>{});
   },[user?.id]);
   React.useEffect(()=>{
-    api<{keycloak:boolean; keycloak_incomplete?:boolean; keycloak_secret_unreadable?:boolean}>("/api/v1/auth/methods")
+    api<{keycloak:boolean; keycloak_incomplete?:boolean; keycloak_secret_unreadable?:boolean; keycloak_auto_login?:boolean}>("/api/v1/auth/methods")
       .then(v=>{ setKeycloakEnabled(v.keycloak); setKeycloakIncomplete(!!v.keycloak_incomplete);
-        setKeycloakUnreadable(!!v.keycloak_secret_unreadable); })
-      .catch(()=>{});
+        setKeycloakUnreadable(!!v.keycloak_secret_unreadable); setKeycloakAutoLogin(!!v.keycloak_auto_login); })
+      .catch(()=>{}).finally(()=>setMethodsResolved(true));
   },[]);
+  React.useEffect(()=>{
+    // Silent SSO: one top-level trip to Keycloak with prompt=none, decided
+    // only after the Server said there is no session here and auto_login is
+    // on. The guards in silentSso.ts make sure a refusal never starts another.
+    if (user || !identityResolved || !methodsResolved || !bootstrap || bootstrap.required) return;
+    if (!shouldAttemptSilentSsoHere(keycloakAutoLogin)) return;
+    setSilentSsoPending(true);
+    beginSilentSso(currentReturnTo());
+  },[user, identityResolved, methodsResolved, bootstrap, keycloakAutoLogin]);
   React.useEffect(()=>{ api<BootstrapStatus>("/api/v1/bootstrap/status").then(setBootstrap).catch(()=>{}); },[]);
   React.useEffect(() => {
     if (!user) return;
@@ -290,7 +316,13 @@ function App() {
     return () => media.removeEventListener("change", synchronize);
   }, [preferences]);
   if (bootstrap?.required) return <BootstrapSetup onComplete={() => setBootstrap({required:false})}/>;
-  if (!user) return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} keycloakUnreadable={keycloakUnreadable} onLogin={(u,c)=>{setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
+  if (!user) {
+    // Nothing is drawn until both answers are in, and nothing while the
+    // browser is on its way to Keycloak: showing the form for a moment and
+    // then leaving is exactly the flicker silent SSO exists to remove.
+    if (!identityResolved || !methodsResolved || silentSsoPending) return null;
+    return <Login systemInfo={systemInfo} keycloakEnabled={keycloakEnabled} keycloakIncomplete={keycloakIncomplete} keycloakUnreadable={keycloakUnreadable} onLogin={(u,c)=>{clearSilentSsoState();setUser(u);setCsrf(c);sessionStorage.setItem("csrf",c)}}/>;
+  }
   const visibleNavigation=navigation.filter(item=>canOpenNavigationItem(item,user));
   const personalPage=page==="account"||page==="preferences";
   const activePage=personalPage||visibleNavigation.some(item=>item.id===page) ? page : visibleNavigation[0]?.id;
@@ -306,6 +338,9 @@ function App() {
   const logout=async()=>{
     const result=await api<{logout_url?:string}>("/api/v1/auth/logout",{method:"POST",headers:{"X-CSRF-Token":csrf}});
     sessionStorage.clear();
+    // After the clear, so the mark survives: signing the user straight back in
+    // silently would make the logout look broken.
+    markSignedOut();
     setUser(null);
     if(result.logout_url) window.location.assign(result.logout_url);
   };

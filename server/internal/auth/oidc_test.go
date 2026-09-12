@@ -66,6 +66,7 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 	start, err := service.Start(
 		context.Background(),
 		"/assets",
+		false,
 		"192.0.2.20",
 		"test-agent",
 	)
@@ -146,6 +147,7 @@ func TestOIDCAuthorizationCodePKCEProvisioningAndReplayProtection(t *testing.T) 
 	secondStart, err := service.Start(
 		context.Background(),
 		"/audit",
+		false,
 		"192.0.2.20",
 		"test-agent",
 	)
