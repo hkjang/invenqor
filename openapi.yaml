@@ -1295,7 +1295,7 @@ paths:
                 events:
                   type: object
                   additionalProperties: {type: boolean}
-                  description: Per-event switches keyed by event name, for example {"account.locked": false}
+                  description: 'Per-event switches keyed by event name, for example {"account.locked": false}'
                 reason: {type: string}
       responses:
         "200":
