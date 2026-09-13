@@ -1249,6 +1249,112 @@ paths:
               schema: {$ref: "#/components/schemas/TrackingPolicy"}
         "400": {description: The origin is not an http(s) origin}
         "409": {description: Concurrent update conflict}
+  /api/v1/admin/settings/mail:
+    get:
+      operationId: getMailSettings
+      summary: Read the SMTP relay settings for event notification mail
+      description: >-
+        Requires settings.read. Mail is off on a fresh installation and nothing is stored until an administrator
+        saves. The settings live in the shared settings table under the company-standard mail.* keys, so every
+        Server pod reads the same value. mail.password is never returned; password_configured says whether one is stored.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current mail settings without the password
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailSettings"}
+        "401": {description: Authentication required}
+    patch:
+      operationId: updateMailSettings
+      summary: Change the SMTP relay settings or switch an event off
+      description: >-
+        Requires settings.write and X-CSRF-Token. Only the fields present are changed. The defaults suit an internal
+        relay - port 25, no credentials, no TLS - and authentication and encryption are optional. A password is stored
+        encrypted only when the field is present; an empty string clears it and an absent field keeps it. Enabling
+        without mail.smtp_host or mail.from_address, an unknown mail.security, or an unknown event name is refused.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean, default: false}
+                smtp_host: {type: string}
+                smtp_port: {type: integer, minimum: 1, maximum: 65535, default: 25}
+                security: {type: string, enum: [auto, none, starttls, tls], default: auto, description: auto follows what the relay advertises}
+                skip_tls_verify: {type: boolean, default: false}
+                username: {type: string}
+                password: {type: string, writeOnly: true, description: Stored encrypted; never returned}
+                from_address: {type: string, format: email}
+                from_name: {type: string, default: Invenqor}
+                base_url: {type: string, format: uri, description: Address of this console used for links in mail bodies}
+                timeout_seconds: {type: integer, minimum: 1, default: 10}
+                events:
+                  type: object
+                  additionalProperties: {type: boolean}
+                  description: 'Per-event switches keyed by event name, for example {"account.locked": false}'
+                reason: {type: string}
+      responses:
+        "200":
+          description: Settings applied to the next notification on every pod
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailSettings"}
+        "400": {description: "Invalid port, security mode, address, or event name; or enabled without a relay host"}
+  /api/v1/admin/settings/mail/test:
+    post:
+      operationId: sendTestMail
+      summary: Send one test message with the saved relay settings
+      description: >-
+        Requires settings.write and X-CSRF-Token. Delivers synchronously and reports the SMTP step that failed, which
+        is what a relay that is almost right needs. The recipient defaults to the caller's own address. The attempt is
+        recorded in the delivery log like any other.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipient: {type: string, format: email}
+      responses:
+        "200":
+          description: The relay accepted the message
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailTestResult"}
+        "400":
+          description: Mail is off, the saved settings are incomplete, or the recipient is not an address
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailTestResult"}
+        "502":
+          description: The relay refused or did not answer
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailTestResult"}
+  /api/v1/admin/mail/deliveries:
+    get:
+      operationId: listMailDeliveries
+      summary: List notification mail attempts, newest first
+      description: >-
+        Requires settings.read. Every attempt is recorded - sent and failed - with the event, recipient, subject and
+        error, but never the body. The summary counts the whole log regardless of the filter. Entries are kept 90 days.
+      security: [{session: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [queued, sent, failed]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+      responses:
+        "200":
+          description: Delivery log page
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MailDeliveryPage"}
+        "401": {description: Authentication required}
   /api/v1/admin/settings/keycloak:
     get:
       operationId: getKeycloakSettings
@@ -2585,6 +2691,68 @@ components:
         updated_at: {type: string, format: date-time}
         updated_by: {type: string}
         source: {type: string, const: database}
+    MailSettings:
+      type: object
+      required: [enabled, ready, smtp_host, smtp_port, security, securities, skip_tls_verify, username, password_configured, from_address, from_name, base_url, timeout_seconds, events, event_names]
+      properties:
+        enabled: {type: boolean}
+        ready: {type: boolean, description: "Enabled with a relay host and sender address, so notifications actually go out"}
+        smtp_host: {type: string}
+        smtp_port: {type: integer}
+        security: {type: string, enum: [auto, none, starttls, tls]}
+        securities:
+          type: array
+          items: {type: string}
+        skip_tls_verify: {type: boolean}
+        username: {type: string}
+        password_configured: {type: boolean, description: Whether a password is stored; the value itself is never returned}
+        from_address: {type: string}
+        from_name: {type: string}
+        base_url: {type: string}
+        timeout_seconds: {type: integer}
+        events:
+          type: object
+          additionalProperties: {type: boolean}
+          description: Per-event switch state keyed by event name
+        event_names:
+          type: array
+          items: {type: string, enum: [account.locked, account.unlocked, account.created, agent_update.halted]}
+    MailTestResult:
+      type: object
+      required: [sent, recipient]
+      properties:
+        sent: {type: boolean}
+        recipient: {type: string}
+        error: {type: string, description: The SMTP step that failed and why; present when sent is false}
+    MailDelivery:
+      type: object
+      required: [id, event, recipient, subject, actor_id, status, attempts, error_message, created_at, updated_at]
+      properties:
+        id: {type: string}
+        event: {type: string}
+        recipient: {type: string}
+        subject: {type: string}
+        actor_id: {type: string, description: The account whose action caused the mail; empty for a failed login}
+        status: {type: string, enum: [queued, sent, failed]}
+        attempts: {type: integer}
+        error_message: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    MailDeliveryPage:
+      type: object
+      required: [items, summary]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/MailDelivery"}
+        summary:
+          type: object
+          required: [total, status]
+          properties:
+            total: {type: integer}
+            status:
+              type: object
+              additionalProperties: {type: integer}
     TrackingPolicy:
       type: object
       required: [enabled, active, provider, providers, momento_url, momento_site_id, momento_environment, momento_proxy, momento_proxy_path, measurement_id, matomo_url, matomo_site_id, custom_snippet, allowed_hosts, placement, policy_sources, version, updated_at, updated_by, source]

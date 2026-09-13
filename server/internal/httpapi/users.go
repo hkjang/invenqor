@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/auth"
+	notify "github.com/hkjang/invenqor/server/internal/mail"
 )
 
 type userCreateInput struct {
@@ -314,6 +315,15 @@ func (s *Server) createUser(response http.ResponseWriter, request *http.Request)
 		},
 		input.Reason,
 	)
+	s.notifyMail(
+		request.Context(),
+		notify.AccountCreated(
+			username, strings.TrimSpace(input.DisplayName), actorLabel(request),
+			roleNames(roles),
+		),
+		principalFromContext(request.Context()).User.ID,
+		[]string{userID},
+	)
 	writeJSON(response, http.StatusCreated, map[string]any{
 		"user": map[string]any{
 			"id":           userID,
@@ -591,6 +601,18 @@ func (s *Server) unlockUser(response http.ResponseWriter, request *http.Request)
 		map[string]any{"locked": false},
 		"",
 	)
+	var username, displayName string
+	if err := s.database.DB().QueryRowContext(
+		request.Context(),
+		`SELECT username,display_name FROM users WHERE id=$1`, userID,
+	).Scan(&username, &displayName); err == nil {
+		s.notifyMail(
+			request.Context(),
+			notify.AccountUnlocked(username, displayName, actorLabel(request)),
+			principalFromContext(request.Context()).User.ID,
+			[]string{userID},
+		)
+	}
 	writeJSON(response, http.StatusOK, map[string]any{"unlocked": true})
 }
 
