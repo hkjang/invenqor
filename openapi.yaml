@@ -1303,7 +1303,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/MailSettings"}
-        "400": {description: Invalid port, security mode, address, or event name; or enabled without a relay host}
+        "400": {description: "Invalid port, security mode, address, or event name; or enabled without a relay host"}
   /api/v1/admin/settings/mail/test:
     post:
       operationId: sendTestMail
@@ -2696,7 +2696,7 @@ components:
       required: [enabled, ready, smtp_host, smtp_port, security, securities, skip_tls_verify, username, password_configured, from_address, from_name, base_url, timeout_seconds, events, event_names]
       properties:
         enabled: {type: boolean}
-        ready: {type: boolean, description: Enabled with a relay host and sender address, so notifications actually go out}
+        ready: {type: boolean, description: "Enabled with a relay host and sender address, so notifications actually go out"}
         smtp_host: {type: string}
         smtp_port: {type: integer}
         security: {type: string, enum: [auto, none, starttls, tls]}
