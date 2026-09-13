@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$root"
-docker build -q -t invenqor-server:e2e-admin .
+docker build -q -t invenqor:e2e-admin .
 docker network create "$network" >/dev/null
 docker volume create "$state_volume" >/dev/null
 docker volume create "$pg_volume" >/dev/null
@@ -44,7 +44,7 @@ docker run -d --name "$server" --network "$network" \
   -e bootstrap_admin=actual.admin \
   -e bootstrap_admin_password='ActualAdmin@42-Strong' \
   -v "$state_volume:/var/lib/invenqor-server" \
-  invenqor-server:e2e-admin >/dev/null
+  invenqor:e2e-admin >/dev/null
 wait_until 60 "the Server on port $port" \
   curl -fsS "http://127.0.0.1:$port/health/ready"
 

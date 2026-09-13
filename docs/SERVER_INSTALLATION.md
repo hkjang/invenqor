@@ -75,8 +75,8 @@ curl -fsS http://127.0.0.1:7070/health/ready
 GitHub Release의 Server image 묶음과 체크섬을 인터넷 연결 구간에서 내려받아
 승인된 매체로 반입합니다.
 
-- `invenqor-0.2.34.tar.gz`
-- `invenqor-0.2.34.tar.gz.sha256`
+- `invenqor-v0.2.34.tar.gz`
+- `invenqor-v0.2.34.tar.gz.sha256`
 - 함께 제공되는 `compose.offline.yaml`
 
 Agent 전체 배포본도 함께 반입하려면 다음 두 파일을 사용합니다. Server image
@@ -92,10 +92,10 @@ Agent 묶음에는 Linux x86_64·aarch64, Windows x86_64 패키지와 각 체크
 무결성 검증 후 Docker에 Server와 PostgreSQL 이미지를 한 번에 적재합니다.
 
 ```bash
-sha256sum -c invenqor-0.2.34.tar.gz.sha256
-gzip -t invenqor-0.2.34.tar.gz
-docker load < invenqor-0.2.34.tar.gz
-docker image inspect invenqor-server:0.2.34 --format '{{.Id}} {{.Architecture}}'
+sha256sum -c invenqor-v0.2.34.tar.gz.sha256
+gzip -t invenqor-v0.2.34.tar.gz
+docker load < invenqor-v0.2.34.tar.gz
+docker image inspect invenqor:v0.2.34 --format '{{.Id}} {{.Architecture}}'
 docker image inspect postgres:17-alpine --format '{{.Id}} {{.Architecture}}'
 ```
 
@@ -149,7 +149,7 @@ docker run -d --name invenqor-server \
   -v invenqor-server-state:/var/lib/invenqor-server \
   -e INVENQOR_BOOTSTRAP_ADMIN=admin \
   -e INVENQOR_BOOTSTRAP_ADMIN_PASSWORD='CorrectHorse!42' \
-  invenqor-server:0.2.34
+  invenqor:v0.2.34
 ```
 
 Compose는 호스트의 `BOOTSTRAP_ADMIN`과 `BOOTSTRAP_ADMIN_PASSWORD`를 위 표준
@@ -951,7 +951,7 @@ docker run -d --name invenqor-server \
   -p 7070:7070 \
   -e postgres_dsn='postgres://invenqor:password@db:5432/invenqor?sslmode=require' \
   -v invenqor-server-state:/var/lib/invenqor-server \
-  invenqor-server:0.2.34
+  invenqor:v0.2.34
 ```
 
 환경변수가 적용 중이면 화면에 **환경변수 우선** 경고가 표시됩니다. 이때 화면에서

@@ -64,7 +64,7 @@ docker build -q --build-arg BASE_IMAGE=ubuntu:22.04 \
   -t "invenqor-agent:e2e-ubuntu2204" -f e2e/Dockerfile.agent-enterprise .
 docker build -q --build-arg BASE_IMAGE=ubuntu:24.04 \
   -t "invenqor-agent:e2e-ubuntu2404" -f e2e/Dockerfile.agent-enterprise .
-docker build -q -t "invenqor-server:e2e" .
+docker build -q -t "invenqor:e2e" .
 docker network create "$network" >/dev/null
 docker volume create "$state_volume" >/dev/null
 docker volume create "$pg_volume" >/dev/null
@@ -81,7 +81,7 @@ update_public_key=$(
 docker run -d --name "$server" --network "$network" -p "127.0.0.1:$port:7070" \
   -e INVENQOR_POSTGRES_DSN='postgres://invenqor:e2e-contract-password@invenqor-e2e-postgres-'$suffix':5432/invenqor?sslmode=disable' \
   -e INVENQOR_UPDATE_PUBLIC_KEY="$update_public_key" \
-  -v "$state_volume:/var/lib/invenqor-server" invenqor-server:e2e >/dev/null
+  -v "$state_volume:/var/lib/invenqor-server" invenqor:e2e >/dev/null
 wait_until 60 "the Server on port $port" \
   curl -fsS "http://127.0.0.1:$port/health/ready"
 

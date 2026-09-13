@@ -55,7 +55,7 @@ replace openapi.yaml "version: $OLD" "version: $NEW"
 replace deploy/helm/invenqor/Chart.yaml "version: $OLD" "version: $NEW"
 replace deploy/helm/invenqor/Chart.yaml "appVersion: \"$OLD\"" "appVersion: \"$NEW\""
 replace deploy/helm/invenqor/values.yaml "tag: \"$OLD\"" "tag: \"$NEW\""
-replace compose.offline.yaml "invenqor-server:$OLD" "invenqor-server:$NEW"
+replace compose.offline.yaml "invenqor:v$OLD" "invenqor:v$NEW"
 replace scripts/build-offline-images.sh "{1:-$OLD}" "{1:-$NEW}"
 
 # Documentation mentions the version in prose, headings, download URLs and the
