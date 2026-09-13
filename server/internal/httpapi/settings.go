@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/hkjang/invenqor/server/internal/mail"
 )
 
 type settingUpdate struct {
@@ -302,7 +304,8 @@ func validSettingKey(value string) bool {
 
 func dedicatedSetting(key string) bool {
 	return key == keycloakDedicatedSetting ||
-		key == keycloakClientSecretSetting
+		key == keycloakClientSecretSetting ||
+		key == mail.KeyPassword
 }
 
 func valueString(value any) string {

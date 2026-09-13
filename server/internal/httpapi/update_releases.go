@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hkjang/invenqor/server/internal/mail"
 	"github.com/hkjang/invenqor/server/internal/updates"
 )
 
@@ -176,6 +177,17 @@ func (s *Server) updateAgentUpdateRollout(
 		},
 		input.Reason,
 	)
+	if *input.RolloutPercent == 0 {
+		s.notifyMail(
+			request.Context(),
+			mail.AgentUpdateHalted(
+				manifest.Version, manifest.Architecture, actorLabel(request),
+				input.Reason,
+			),
+			principalFromContext(request.Context()).User.ID,
+			s.superAdminIDs(request.Context()),
+		)
+	}
 	writeJSON(response, http.StatusOK, map[string]any{"release": manifest})
 }
 

@@ -1,6 +1,8 @@
 import {renderToStaticMarkup} from "react-dom/server";
 import {describe, expect, it} from "vitest";
 import {
+  MAIL_EVENTS,
+  MailDeliveryTable,
   Notice,
   SystemSettingsInfo,
   TRACKING_PROVIDERS,
@@ -119,5 +121,36 @@ describe("TRACKING_PROVIDERS", () => {
   it("lists Momento first and never offers 'none' as a provider card", () => {
     expect(TRACKING_PROVIDERS[0].value).toBe("momento");
     expect(TRACKING_PROVIDERS.map(option => option.value)).not.toContain("none");
+  });
+});
+
+describe("MailDeliveryTable", () => {
+  it("renders the empty log and a log with a failure", () => {
+    const empty = renderToStaticMarkup(<MailDeliveryTable page={{items: [], summary: {total: 0, status: {}}}}/>);
+    expect(empty).toContain("시험 발송");
+    const markup = renderToStaticMarkup(<MailDeliveryTable page={{
+      items: [
+        {id: "1", event: "account.locked", recipient: "ops@corp.example", subject: "[Invenqor] ops 계정이 잠겼습니다",
+          actor_id: "", status: "failed", attempts: 2, error_message: "SMTP connect to relay:25 failed: connection refused",
+          created_at: "2026-09-13T12:00:00Z", updated_at: "2026-09-13T12:00:05Z"},
+        {id: "2", event: "test", recipient: "admin@corp.example", subject: "[Invenqor] SMTP 시험 발송",
+          actor_id: "u1", status: "sent", attempts: 1, error_message: "",
+          created_at: "2026-09-13T12:01:00Z", updated_at: "2026-09-13T12:01:01Z"},
+      ],
+      summary: {total: 2, status: {failed: 1, sent: 1}},
+    }}/>);
+    noUndefined(markup);
+    expect(markup).toContain("badge bad");
+    expect(markup).toContain("badge good");
+    expect(markup).toContain("connection refused");
+    expect(markup).not.toContain("undefined");
+  });
+
+  // Every switchable event the Server offers has a title the operator can
+  // read; a bare event name would be the first thing a new installation shows.
+  it("describes every event the Server sends", () => {
+    for (const name of ["account.locked", "account.unlocked", "account.created", "agent_update.halted"]) {
+      expect(MAIL_EVENTS[name]?.title).toBeTruthy();
+    }
   });
 });

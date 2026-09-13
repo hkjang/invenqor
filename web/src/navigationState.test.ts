@@ -14,6 +14,7 @@ describe("console navigation state", () => {
     expect(parseConsoleHash(consoleHash("software")).page).toBe("software");
     // The tracking tab is reached from the administrator guide by URL.
     expect(parseConsoleHash(consoleHash("settings", "tracking")).settingsTab).toBe("tracking");
+    expect(parseConsoleHash(consoleHash("settings", "mail")).settingsTab).toBe("mail");
   });
 
   it("ignores unknown routes and invalid settings tabs", () => {

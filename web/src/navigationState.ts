@@ -20,6 +20,7 @@ export type SettingsTab =
   | "keycloak"
   | "general"
   | "tracking"
+  | "mail"
   | "system";
 
 const consolePages = new Set<ConsolePage>([
@@ -44,6 +45,7 @@ const settingsTabs = new Set<SettingsTab>([
   "keycloak",
   "general",
   "tracking",
+  "mail",
   "system",
 ]);
 

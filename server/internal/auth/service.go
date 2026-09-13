@@ -44,6 +44,23 @@ type Service struct {
 	dummyHash string
 	audit     audit.Recorder
 	totp      *TOTPService
+	// locked is told when repeated failures lock an account. The mail
+	// notifier hangs here so the auth package stays unaware of mail.
+	locked func(ctx context.Context, user User, sourceIP string, until time.Time)
+}
+
+// SetAccountLockedHook registers the function called when a login failure
+// locks an account. It runs on the login request path and must not block.
+func (service *Service) SetAccountLockedHook(
+	hook func(ctx context.Context, user User, sourceIP string, until time.Time),
+) {
+	service.locked = hook
+}
+
+func (service *Service) noteLocked(ctx context.Context, user User, sourceIP string, now time.Time) {
+	if service.locked != nil {
+		service.locked(ctx, user, sourceIP, now.Add(service.options.LockoutDuration))
+	}
 }
 
 type databaseUser struct {
@@ -129,6 +146,7 @@ func (service *Service) Authenticate(
 		}
 		service.recordLoginAudit(ctx, &user, user.Username, sourceIP, userAgent, requestID, "failure")
 		if user.FailedLoginCount+1 >= service.options.LockoutThreshold {
+			service.noteLocked(ctx, user.User, sourceIP, now)
 			return Session{}, ErrAccountLocked
 		}
 		return Session{}, ErrInvalidCredentials
@@ -156,6 +174,7 @@ func (service *Service) Authenticate(
 				}
 				service.recordLoginAudit(ctx, &user, user.Username, sourceIP, userAgent, requestID, "mfa_failure")
 				if user.FailedLoginCount+1 >= service.options.LockoutThreshold {
+					service.noteLocked(ctx, user.User, sourceIP, now)
 					return Session{}, ErrAccountLocked
 				}
 				return Session{}, ErrMFAInvalid

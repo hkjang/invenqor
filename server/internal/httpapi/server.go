@@ -19,6 +19,7 @@ import (
 	"github.com/hkjang/invenqor/server/internal/bootstrap"
 	"github.com/hkjang/invenqor/server/internal/diagnostics"
 	"github.com/hkjang/invenqor/server/internal/ingest"
+	"github.com/hkjang/invenqor/server/internal/mail"
 	"github.com/hkjang/invenqor/server/internal/spool"
 	"github.com/hkjang/invenqor/server/internal/storage"
 	"github.com/hkjang/invenqor/server/internal/tracking"
@@ -59,6 +60,10 @@ type Server struct {
 	violations       *tracking.Recorder
 	momentoTransport http.RoundTripper
 	console          http.Handler
+	// mail sends event notifications through the company relay. It reads
+	// its configuration from the settings table on every use, so it is
+	// shared by every Pod and off until an administrator turns it on.
+	mail *mail.Service
 }
 
 type Options struct {
@@ -133,6 +138,13 @@ func New(options Options) *Server {
 			[]byte(options.AgentEnrollmentToken),
 		)
 		server.agentEnrollmentTokenRequired = true
+	}
+	server.mail = mail.NewService(
+		options.Database.DB(), server.loadMailConfig,
+		userDirectory{db: options.Database.DB()}, options.Logger,
+	)
+	if server.authService != nil {
+		server.authService.SetAccountLockedHook(server.onAccountLocked)
 	}
 	if server.databaseSchema == "" {
 		server.databaseSchema = "public"
@@ -299,6 +311,18 @@ func (s *Server) routes() {
 		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
 			"/api/v1/admin/settings/tracking",
 			s.updateTrackingSettings,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/mail", s.getMailSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/mail", s.updateMailSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Post(
+			"/api/v1/admin/settings/mail/test", s.sendTestMail,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/mail/deliveries", s.listMailDeliveries,
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/settings/tracking/violations",

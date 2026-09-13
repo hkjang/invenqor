@@ -8,6 +8,7 @@ import {
   KeyRound,
   Layers,
   LockKeyholeOpen,
+  Mail,
   Pencil,
   Power,
   Radar,
@@ -23,6 +24,7 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "./api";
+import { formatDate } from "./format";
 import { ClassificationSettingsPanel } from "./classificationPage";
 import {
   consoleHash,
@@ -222,6 +224,7 @@ export function SettingsPage({
         <button aria-current={tab === "keycloak" ? "page" : undefined} className={tab === "keycloak" ? "active" : ""} onClick={() => selectTab("keycloak")}><KeyRound size={17}/>Keycloak</button>
         <button aria-current={tab === "general" ? "page" : undefined} className={tab === "general" ? "active" : ""} onClick={() => selectTab("general")}><SlidersHorizontal size={17}/>고급 설정</button>
         <button aria-current={tab === "tracking" ? "page" : undefined} className={tab === "tracking" ? "active" : ""} onClick={() => selectTab("tracking")}><Radar size={17}/>방문 추적</button>
+        <button aria-current={tab === "mail" ? "page" : undefined} className={tab === "mail" ? "active" : ""} onClick={() => selectTab("mail")}><Mail size={17}/>메일 알림</button>
         <button aria-current={tab === "system" ? "page" : undefined} className={tab === "system" ? "active" : ""} onClick={() => selectTab("system")}><ServerCog size={17}/>시스템 정보</button>
       </nav>
       <div className="settings-content"
@@ -232,6 +235,7 @@ export function SettingsPage({
         {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "general" && <GeneralSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "tracking" && <TrackingSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "mail" && <MailSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "system" && <SystemSettingsInfo info={systemInfo}/>}
       </div>
     </div>
@@ -1465,6 +1469,235 @@ export function UsersPage({
 function AdminPageTitle({kicker, title, subtitle}: {kicker: string; title: string; subtitle: string}) {
   return <div className="page-title"><p className="eyebrow dark">{kicker}</p><h1>{title}</h1><p>{subtitle}</p></div>;
 }
+type MailSettings = {
+  enabled: boolean;
+  ready: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  security: "auto"|"none"|"starttls"|"tls";
+  securities: string[];
+  skip_tls_verify: boolean;
+  username: string;
+  password_configured: boolean;
+  from_address: string;
+  from_name: string;
+  base_url: string;
+  timeout_seconds: number;
+  events: Record<string, boolean>;
+  event_names: string[];
+};
+type MailDelivery = {
+  id: string; event: string; recipient: string; subject: string; actor_id: string;
+  status: "queued"|"sent"|"failed"; attempts: number; error_message: string;
+  created_at: string; updated_at: string;
+};
+type MailDeliveryPage = {items: MailDelivery[]; summary: {total: number; status: Record<string, number>}};
+
+export const MAIL_EVENTS: Record<string, {title: string; description: string}> = {
+  "account.locked": {title: "계정 잠김", description: "로그인 실패 누적으로 계정이 잠기면 본인과 모든 super_admin 에게. 잠긴 사람은 해제를 기다립니다."},
+  "account.unlocked": {title: "계정 잠금 해제", description: "관리자가 잠금을 풀면 그 계정 주인에게. 기다리던 바로 그 소식입니다."},
+  "account.created": {title: "계정 생성", description: "관리자가 로컬 계정을 만들면 새 사용자에게. 비밀번호는 담지 않습니다."},
+  "agent_update.halted": {title: "Agent 배포 중단", description: "운영자가 배포를 0% 로 멈추면 다른 super_admin 에게. 멈춘 배포를 고장으로 오해하지 않게 합니다."},
+};
+export const MAIL_SECURITIES: Record<string, string> = {
+  auto: "auto · 릴레이가 알리는 대로", none: "none · 평문", starttls: "starttls · 반드시 STARTTLS", tls: "tls · 처음부터 TLS (465)",
+};
+
+export function MailDeliveryTable({page}: {page: MailDeliveryPage|null}) {
+  if (!page) return <div className="settings-body">발송 기록을 불러오는 중입니다.</div>;
+  if (!page.items.length) return <div className="empty"><Mail size={28}/><p>아직 보낸 메일이 없습니다. 시험 발송으로 릴레이를 확인하십시오.</p></div>;
+  return <div className="table-wrap"><table><thead><tr>
+    <th>시각</th><th>이벤트</th><th>수신자</th><th>제목</th><th>상태</th><th>시도</th><th>오류</th>
+  </tr></thead><tbody>
+    {page.items.map(item => <tr key={item.id}>
+      <td>{formatDate(item.created_at)}</td>
+      <td><code>{item.event}</code></td>
+      <td>{item.recipient}</td>
+      <td style={{whiteSpace: "normal"}}>{item.subject}</td>
+      <td><span className={item.status === "sent" ? "badge good" : item.status === "failed" ? "badge bad" : "badge"}>{item.status}</span></td>
+      <td>{item.attempts}</td>
+      <td style={{whiteSpace: "normal", color: "#b42318", fontSize: 12}}>{item.error_message}</td>
+    </tr>)}
+  </tbody></table></div>;
+}
+
+function MailSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
+  const [saved, setSaved] = React.useState<MailSettings|null>(null);
+  const [form, setForm] = React.useState<MailSettings|null>(null);
+  const [password, setPassword] = React.useState("");
+  const [clearPassword, setClearPassword] = React.useState(false);
+  const [recipient, setRecipient] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState("");
+  const [deliveries, setDeliveries] = React.useState<MailDeliveryPage|null>(null);
+  const [reason, setReason] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const loadDeliveries = React.useCallback((status: string) =>
+    api<MailDeliveryPage>(`/api/v1/admin/mail/deliveries?limit=100&status=${encodeURIComponent(status)}`).then(setDeliveries),
+  []);
+  const load = React.useCallback(() => Promise.all([
+    api<MailSettings>("/api/v1/admin/settings/mail").then(value => { setSaved(value); setForm(value); }),
+    loadDeliveries(statusFilter),
+  ]), [loadDeliveries, statusFilter]);
+  React.useEffect(() => {
+    load().catch(reason => setError((reason as Error).message));
+  }, [load]);
+  const save = async () => {
+    if (!canWrite || !form) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const body: Record<string, unknown> = {
+        enabled: form.enabled, smtp_host: form.smtp_host, smtp_port: Number(form.smtp_port) || 25,
+        security: form.security, skip_tls_verify: form.skip_tls_verify, username: form.username,
+        from_address: form.from_address, from_name: form.from_name, base_url: form.base_url,
+        timeout_seconds: Number(form.timeout_seconds) || 10, events: form.events, reason,
+      };
+      // The password travels only when it changes: an absent field keeps the
+      // stored one, an empty string clears it.
+      if (clearPassword) body.password = "";
+      else if (password) body.password = password;
+      const value = await api<MailSettings>("/api/v1/admin/settings/mail", jsonRequest(csrf, body, "PATCH"));
+      setSaved(value); setForm(value); setReason(""); setPassword(""); setClearPassword(false);
+      setMessage(value.ready
+        ? "메일 알림을 켰습니다. 아래에서 시험 발송으로 릴레이를 확인하십시오."
+        : value.enabled ? "저장했지만 릴레이 주소나 보내는 주소가 비어 있어 아직 보내지 않습니다."
+        : "메일 설정을 저장했습니다. 알림은 꺼져 있습니다.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const sendTest = async () => {
+    if (!canWrite) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await api<{sent: boolean; recipient: string; error?: string}>(
+        "/api/v1/admin/settings/mail/test", jsonRequest(csrf, {recipient}));
+      setMessage(`${result.recipient} 로 시험 메일을 보냈습니다. 받은 편지함을 확인하십시오.`);
+    } catch (reason) {
+      setError(`시험 발송 실패: ${(reason as Error).message}`);
+    } finally {
+      setBusy(false);
+      loadDeliveries(statusFilter).catch(() => undefined);
+    }
+  };
+  if (!saved || !form) {
+    return <AdminPanel title="메일 알림" action="SMTP 릴레이">
+      <div className="settings-body">{error || "메일 설정을 불러오는 중입니다."}</div>
+    </AdminPanel>;
+  }
+  const update = (patch: Partial<MailSettings>) => setForm({...form, ...patch});
+  const changed = JSON.stringify(form) !== JSON.stringify(saved) || password !== "" || clearPassword;
+  return <AdminPanel title="메일 알림" action={saved.ready ? "ON" : saved.enabled ? "설정 미완성" : "OFF"}>
+    <div className="settings-body agent-enrollment-settings">
+      <div className="enrollment-status status-grid">
+        <StatusItem label="현재 상태" value={saved.ready ? "보내는 중" : saved.enabled ? "켜짐 · 설정 미완성" : "꺼짐"} good={saved.ready}/>
+        <StatusItem label="릴레이" value={saved.smtp_host ? `${saved.smtp_host}:${saved.smtp_port}` : "없음"}/>
+        <StatusItem label="비밀번호" value={saved.password_configured ? "설정됨" : "없음"} good={!saved.username || saved.password_configured}/>
+        <StatusItem label="설정 공유" value="DB · 모든 Pod" good/>
+      </div>
+      <Notice tone="info" title="사내 릴레이는 포트 25 · 인증 없음 · TLS 없음이 흔합니다.">
+        그것이 기본값입니다. 인증과 암호화는 릴레이가 요구할 때만 채우십시오. 메일은 배경에서 보내므로 릴레이가
+        죽어 있어도 콘솔의 작업은 평소처럼 끝나고, 시도는 모두 아래 발송 기록에 남습니다. 비밀번호는 저장한 뒤
+        다시 읽을 수 없습니다.
+      </Notice>
+      <label className="toggle-row"><input type="checkbox" checked={form.enabled}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => update({enabled: event.target.checked})}/>
+        <span><strong>메일 알림 켜기</strong><small>기본값은 꺼짐입니다. 켜기 전에 릴레이 주소와 보내는 주소를 채우십시오.</small></span></label>
+      <div className="admin-form">
+        <label>SMTP 릴레이 주소 (mail.smtp_host)<input value={form.smtp_host} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder="postra.corp.example" onChange={event => update({smtp_host: event.target.value})}/></label>
+        <label>포트 (mail.smtp_port)<input type="number" min={1} max={65535} value={form.smtp_port} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({smtp_port: Number(event.target.value)})}/></label>
+        <label>보안 (mail.security)<select value={form.security} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({security: event.target.value as MailSettings["security"]})}>
+          {form.securities.map(option => <option key={option} value={option}>{MAIL_SECURITIES[option] ?? option}</option>)}</select></label>
+        <label className="toggle-row"><input type="checkbox" checked={form.skip_tls_verify}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({skip_tls_verify: event.target.checked})}/>
+          <span><strong>인증서 검증 건너뛰기</strong><small>사내 인증서가 사설일 때만 켜십시오.</small></span></label>
+        <label>사용자 이름 (mail.username, 선택)<input value={form.username} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          autoComplete="off" placeholder="비우면 인증 없이 보냅니다" onChange={event => update({username: event.target.value})}/></label>
+        <label>비밀번호 (mail.password, 선택)<input type="password" value={password} disabled={!canWrite || clearPassword} aria-disabled={!canWrite}
+          title={mutationTitle} autoComplete="new-password"
+          placeholder={saved.password_configured ? "설정됨 · 바꿀 때만 입력" : "설정 안 됨"} onChange={event => setPassword(event.target.value)}/></label>
+        {saved.password_configured && <label className="toggle-row"><input type="checkbox" checked={clearPassword}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => { setClearPassword(event.target.checked); if (event.target.checked) setPassword(""); }}/>
+          <span><strong>저장된 비밀번호 지우기</strong><small>릴레이가 더는 인증을 요구하지 않을 때.</small></span></label>}
+        <label>보내는 주소 (mail.from_address)<input value={form.from_address} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder="invenqor@corp.example" onChange={event => update({from_address: event.target.value})}/></label>
+        <label>보내는 이름 (mail.from_name)<input value={form.from_name} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({from_name: event.target.value})}/></label>
+        <label>콘솔 주소 (mail.base_url)<input value={form.base_url} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder="https://invenqor.corp.example" onChange={event => update({base_url: event.target.value})}/></label>
+        <label>응답 제한 초 (mail.timeout_seconds)<input type="number" min={1} value={form.timeout_seconds} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => update({timeout_seconds: Number(event.target.value)})}/></label>
+      </div>
+      <div className="enrollment-network-policy">
+        <div className="section-heading">
+          <div>
+            <strong>보내는 이벤트</strong>
+            <small>이 메일이 오지 않으면 누군가 기다리는 일만 골랐습니다. 자기가 한 일은 자기에게 보내지 않습니다. 종류별로 끌 수 있습니다.</small>
+          </div>
+        </div>
+        {form.event_names.map(name => <label key={name} className="toggle-row">
+          <input type="checkbox" checked={form.events[name] !== false}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => update({events: {...form.events, [name]: event.target.checked}})}/>
+          <span><strong>{MAIL_EVENTS[name]?.title ?? name} <code>mail.notify_{name.replace(".", "_")}</code></strong>
+            <small>{MAIL_EVENTS[name]?.description ?? ""}</small></span>
+        </label>)}
+      </div>
+      <label className="enrollment-reason">변경 사유
+        <input value={reason} onChange={event => setReason(event.target.value)}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          placeholder="예: postra 릴레이 연결"/>
+      </label>
+      <div className="form-actions enrollment-actions">
+        <button className="secondary" disabled={busy} onClick={() => load().catch(reason => setError((reason as Error).message))}><RefreshCw size={16}/>새로고침</button>
+        <button className="primary compact" disabled={!canWrite || busy || !changed} aria-disabled={!canWrite || busy || !changed}
+          title={mutationTitle} onClick={save}><Save size={16}/>설정 적용</button>
+      </div>
+      <ActionMessage message={message} error={error}/>
+      <div className="enrollment-network-policy">
+        <div className="section-heading">
+          <div>
+            <strong>시험 발송</strong>
+            <small>저장한 설정으로 실제 한 통을 보내고 결과를 그 자리에서 보여 줍니다. 릴레이 설정은 한 번에 맞는 일이 드뭅니다. 저장하지 않은 변경은 반영되지 않습니다.</small>
+          </div>
+          <Mail size={18}/>
+        </div>
+        <div className="form-actions enrollment-actions">
+          <input value={recipient} onChange={event => setRecipient(event.target.value)} style={{flex: 1}}
+            disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            placeholder="받는 주소 · 비우면 내 계정의 메일 주소"/>
+          <button className="secondary" disabled={!canWrite || busy || !saved.enabled || changed}
+            aria-disabled={!canWrite || busy || !saved.enabled || changed}
+            title={changed ? "먼저 설정을 적용하십시오." : !saved.enabled ? "메일 알림이 꺼져 있습니다." : mutationTitle}
+            onClick={sendTest}><Mail size={16}/>시험 발송</button>
+        </div>
+      </div>
+      <div className="enrollment-network-policy">
+        <div className="section-heading">
+          <div>
+            <strong>발송 기록</strong>
+            <small>{deliveries ? `전체 ${deliveries.summary.total}건 · 성공 ${deliveries.summary.status.sent ?? 0} · 실패 ${deliveries.summary.status.failed ?? 0}` : "시도마다 남깁니다."} 본문은 담지 않으며 90일 뒤 지웁니다.</small>
+          </div>
+          <select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} aria-label="발송 상태 필터">
+            <option value="">전체</option><option value="sent">성공</option><option value="failed">실패</option><option value="queued">대기</option>
+          </select>
+        </div>
+        <MailDeliveryTable page={deliveries}/>
+      </div>
+    </div>
+  </AdminPanel>;
+}
+
 function AdminPanel({title, action, children}: {title: string; action: string; children: React.ReactNode}) {
   return <article className="panel"><div className="panel-head"><h3>{title}</h3><span>{action}</span></div>{children}</article>;
 }
