@@ -4,9 +4,13 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 version=${1:-0.2.34}
 output_dir=${2:-"$root/dist"}
-server_image="invenqor-server:$version"
+# 이미지 이름과 파일 이름을 다른 저장소와 맞춘다: 태그는 <서비스>:v<버전>,
+# 배포 파일은 <서비스>-v<버전>.tar.gz. 예전에는 invenqor-server:0.2.34 와
+# invenqor-0.2.34.tar.gz 였는데, 릴리즈 태그가 v0.2.34 라 파일 이름을 태그에서
+# 유추하면 어긋났다.
+server_image="invenqor:v$version"
 postgres_image="postgres:17-alpine"
-archive="$output_dir/invenqor-$version.tar.gz"
+archive="$output_dir/invenqor-v$version.tar.gz"
 archive_name=$(basename "$archive")
 
 mkdir -p "$output_dir"
@@ -21,7 +25,13 @@ if [ -z "${DOCKER_CONFIG:-}" ]; then
   export DOCKER_CONFIG="$docker_config"
   trap 'rm -rf "$docker_config"' EXIT
 fi
-docker build --platform linux/amd64 -t "$server_image" .
+# 버전·커밋·빌드 시각을 이미지에 새긴다. 넣지 않으면 떠 있는 컨테이너가
+# 언제나 Commit "unknown" 을 알린다.
+docker build --platform linux/amd64 \
+  --build-arg "VERSION=$version" \
+  --build-arg "COMMIT=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)" \
+  --build-arg "BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -t "$server_image" .
 
 # Refresh the base image, but do not fail the release build when the registry is
 # unreachable and the exact tag is already present locally - a broken credential
