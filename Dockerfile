@@ -11,21 +11,24 @@ WORKDIR /src
 # 넣지 않으면 이미지는 version.go 에 적힌 값을 그대로 들고 나가, Commit 과
 # BuildTime 이 언제나 "unknown" 이다 — 장애가 났을 때 무엇이 떠 있는지 알
 # 방법이 없다.
-ARG VERSION=dev
+# VERSION 의 기본값은 비워 둔다. "dev" 같은 값을 넣으면 인자 없이 빌드할 때
+# version.go 에 적힌 진짜 버전을 덮어쓴다 — e2e 가 web/package.json 의 버전과
+# 맞는지 보므로 그대로 깨진다. 비어 있으면 주입하지 않고 소스의 값을 쓴다.
+ARG VERSION=
 ARG COMMIT=unknown
 ARG BUILT_AT=unknown
 COPY server/ ./server/
 COPY --from=web /src/web/dist/ ./server/internal/webui/dist/
-RUN cd server && CGO_ENABLED=0 go build -trimpath \
-    -ldflags="-s -w \
-      -X github.com/hkjang/invenqor/server/internal/version.Version=${VERSION} \
-      -X github.com/hkjang/invenqor/server/internal/version.Commit=${COMMIT} \
-      -X github.com/hkjang/invenqor/server/internal/version.BuildTime=${BUILT_AT}" \
+RUN cd server && \
+    pkg=github.com/hkjang/invenqor/server/internal/version && \
+    ldflags="-s -w -X ${pkg}.Commit=${COMMIT} -X ${pkg}.BuildTime=${BUILT_AT}" && \
+    if [ -n "${VERSION}" ]; then ldflags="${ldflags} -X ${pkg}.Version=${VERSION}"; fi && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="${ldflags}" \
     -o /out/invenqor-server ./cmd/invenqor-server \
     && mkdir -p /out/state
 
 FROM gcr.io/distroless/static-debian12:nonroot
-ARG VERSION=dev
+ARG VERSION=unknown
 ARG COMMIT=unknown
 ARG BUILT_AT=unknown
 LABEL org.opencontainers.image.title="Invenqor" \
