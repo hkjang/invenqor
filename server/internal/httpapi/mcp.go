@@ -56,7 +56,7 @@ var mcpTools = []mcpTool{
 	},
 	{
 		Name: "asset_relations", Title: "Get asset relationships",
-		Description: "List active inbound and outbound relationships for an IT asset.",
+		Description: "List active inbound and outbound relationships for an IT asset. Each relation carries the name, type, and status of both ends and its direction relative to asset_id, so the other end does not need a separate asset_get.",
 		InputSchema: objectSchema(map[string]any{
 			"asset_id": map[string]any{"type": "string", "format": "uuid"},
 			"limit":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
@@ -716,12 +716,21 @@ func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (an
 	if err := arguments.Err(); err != nil {
 		return nil, err
 	}
+	// A row that carried only the two UUIDs made the model call asset_get once
+	// per edge just to learn what it was connected to, so a host with fifty
+	// children cost fifty-one round trips to answer "what runs here". Each end is
+	// named here, as the console's relation list already does, and the direction
+	// is spelled out relative to the asset asked about, since the model would
+	// otherwise have to compare UUIDs to work out which end is the other one.
 	rows, err := s.database.DB().QueryContext(r.Context(),
-		`SELECT id, source_asset_id, relation_type, target_asset_id,
-		 valid_from, valid_to, source, confidence
-		 FROM asset_relations
-		 WHERE (source_asset_id=$1 OR target_asset_id=$1) AND valid_to IS NULL
-		 ORDER BY relation_type, id LIMIT $2 OFFSET $3`,
+		`SELECT r.id, r.source_asset_id, r.relation_type, r.target_asset_id,
+		 r.valid_from, r.valid_to, r.source, r.confidence,
+		 sa.name, sa.type, sa.status, ta.name, ta.type, ta.status
+		 FROM asset_relations r
+		 JOIN assets sa ON sa.id=r.source_asset_id
+		 JOIN assets ta ON ta.id=r.target_asset_id
+		 WHERE (r.source_asset_id=$1 OR r.target_asset_id=$1) AND r.valid_to IS NULL
+		 ORDER BY r.relation_type, r.id LIMIT $2 OFFSET $3`,
 		input.AssetID,
 		// A host with thousands of runs_on edges used to answer with every one of
 		// them, and the model reading the reply is what had to cut it off. The
@@ -735,16 +744,33 @@ func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (an
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, sourceID, relationType, targetID, source string
+		var sourceName, sourceType, sourceStatus, targetName, targetType, targetStatus string
 		var validFrom, validTo any
 		var confidence float64
 		if err := rows.Scan(&id, &sourceID, &relationType, &targetID,
-			&validFrom, &validTo, &source, &confidence); err != nil {
+			&validFrom, &validTo, &source, &confidence,
+			&sourceName, &sourceType, &sourceStatus,
+			&targetName, &targetType, &targetStatus); err != nil {
 			return nil, err
 		}
+		direction := "outbound"
+		if sourceID != input.AssetID {
+			direction = "inbound"
+		}
+		// Deleting or merging an asset leaves its edges open, so the other end can
+		// be an asset asset_get no longer returns; its status says so up front
+		// instead of letting the follow-up call fail.
 		items = append(items, map[string]any{
 			"id": id, "source_asset_id": sourceID, "relation_type": relationType,
 			"target_asset_id": targetID, "valid_from": validFrom,
 			"valid_to": validTo, "source": source, "confidence": confidence,
+			"direction": direction,
+			"source_asset": map[string]any{
+				"id": sourceID, "name": sourceName, "type": sourceType, "status": sourceStatus,
+			},
+			"target_asset": map[string]any{
+				"id": targetID, "name": targetName, "type": targetType, "status": targetStatus,
+			},
 		})
 	}
 	if err := rows.Err(); err != nil {
