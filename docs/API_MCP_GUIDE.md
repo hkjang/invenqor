@@ -361,6 +361,32 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 새 연계는 멀티 Pod 단순성, 표준 Gateway routing과 향후 SDK 호환성을 위해
 `2026-07-28`을 사용하십시오.
 
+### 5.3 키 없이 SSO 로 연결
+
+관리자가 **설정 → Keycloak → MCP SSO (OAuth)** 를 켜 두었다면 API Key 없이
+Keycloak 계정으로 연결할 수 있습니다. 클라이언트 설정에는 **URL 하나만** 적습니다.
+
+```json
+{
+  "transport": "streamable-http",
+  "url": "https://invenqor.example.com:7070/mcp"
+}
+```
+
+클라이언트는 첫 요청의 401 에서 `WWW-Authenticate: Bearer …, resource_metadata="…"`
+를 읽고 `/.well-known/oauth-protected-resource/mcp` 에서 Keycloak 주소를 찾아 스스로
+로그인 화면을 띄웁니다. 이미 Keycloak 에 로그인돼 있으면 화면은 거의 보이지 않습니다.
+다음을 알아 두십시오.
+
+- **웹 콘솔로 먼저 한 번 로그인** 해야 합니다. 토큰은 이미 연결된 계정만 찾고 계정을
+  만들지 않습니다. 없으면 `MCP_OAUTH_ACCOUNT_UNKNOWN` 으로 거부됩니다.
+- 권한은 Key 보다 넓지 않습니다. 관리자가 정한 `mcp.oauth.scopes` 와 내 계정의 권한의
+  교집합만 받으며, 계정에 `mcp.access` 가 없으면 403 입니다.
+- 토큰은 `/mcp` 에서만 받습니다. REST(`/api/v1/external/...`)는 지금처럼 Key 만 받습니다.
+- 다른 앱용 토큰은 `MCP_OAUTH_AUDIENCE_REJECTED` 로 거부됩니다. 메시지에 적힌 값을
+  관리자에게 전달하면 됩니다.
+- 폐쇄망·자동화 스크립트처럼 로그인 화면을 띄울 수 없는 곳은 지금처럼 Key 를 쓰십시오.
+
 ## 6. 제공 MCP 도구
 
 | 도구 | Scope | 입력 | 결과 |

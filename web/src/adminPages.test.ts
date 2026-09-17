@@ -8,7 +8,9 @@ import {
   UsersPage,
   canAdmin,
   formatMappings,
+  mcpOAuthClientSnippet,
   normalizeKeycloakSettings,
+  normalizeMCPOAuthSettings,
   parseMappings,
   parseNetworkEntries,
 } from "./adminPages";
@@ -112,6 +114,23 @@ describe("Keycloak mapping editor", () => {
     // Silent SSO is opt-in; a settings document saved before the field
     // existed must not turn it on.
     expect(settings.auto_login).toBe(false);
+  });
+});
+
+describe("MCP SSO settings", () => {
+  it("is off and empty until an administrator saves, whatever the server omits", () => {
+    const settings = normalizeMCPOAuthSettings({audience: null, scopes: null} as never);
+    expect(settings.enabled).toBe(false);
+    expect(settings.active).toBe(false);
+    expect(settings.audience).toEqual([]);
+    expect(settings.scopes).toEqual([]);
+    expect(settings.effective_resource).toBe("");
+  });
+
+  it("gives the client the URL alone - no header - so it signs in by itself", () => {
+    const snippet = JSON.parse(mcpOAuthClientSnippet("https://invenqor.example.test/mcp"));
+    expect(snippet).toEqual({transport: "streamable-http", url: "https://invenqor.example.test/mcp"});
+    expect(snippet.headers).toBeUndefined();
   });
 });
 

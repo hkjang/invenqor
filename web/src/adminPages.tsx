@@ -232,7 +232,10 @@ export function SettingsPage({
         {tab === "postgresql" && <PostgresSettings csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "agents" && <AgentEnrollmentSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "classification" && <ClassificationSettingsPanel csrf={csrf} access={access}/>}
-        {tab === "keycloak" && <KeycloakSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
+        {tab === "keycloak" && <>
+          <KeycloakSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>
+          <MCPOAuthSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>
+        </>}
         {tab === "general" && <GeneralSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "tracking" && <TrackingSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
         {tab === "mail" && <MailSettingsPanel csrf={csrf} canWrite={canWriteSettings}/>}
@@ -1091,6 +1094,154 @@ function KeycloakSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolea
         <button className="secondary" disabled={!canWrite || busy || !settings.enabled}
           aria-disabled={!canWrite || busy || !settings.enabled} title={mutationTitle}
           onClick={test}><RefreshCw size={16}/>연결 테스트</button>
+        <button className="primary compact" disabled={!canWrite || busy}
+          aria-disabled={!canWrite || busy} title={mutationTitle}
+          onClick={save}><Save size={16}/>설정 저장</button>
+      </div>
+      <ActionMessage message={message} error={error}/>
+    </div>
+  </AdminPanel>;
+}
+
+export type MCPOAuthSettings = {
+  enabled: boolean;
+  resource: string;
+  audience: string[];
+  scopes: string[];
+  active: boolean;
+  inactive_reason: string;
+  oidc_issuer: string;
+  effective_resource: string;
+  metadata_url: string;
+};
+
+export const normalizeMCPOAuthSettings = (
+  value: Partial<MCPOAuthSettings> | null | undefined,
+): MCPOAuthSettings => ({
+  enabled: value?.enabled === true,
+  resource: value?.resource ?? "",
+  audience: Array.isArray(value?.audience) ? value.audience : [],
+  scopes: Array.isArray(value?.scopes) ? value.scopes : [],
+  active: value?.active === true,
+  inactive_reason: value?.inactive_reason ?? "",
+  oidc_issuer: value?.oidc_issuer ?? "",
+  effective_resource: value?.effective_resource ?? "",
+  metadata_url: value?.metadata_url ?? "",
+});
+
+// mcpOAuthClientSnippet is what a person pastes into an MCP client that
+// signs in by itself: the URL alone, no header, because the client reads the
+// 401 challenge and the metadata document and takes them to Keycloak.
+export const mcpOAuthClientSnippet = (mcpURL: string) =>
+  JSON.stringify({transport: "streamable-http", url: mcpURL}, null, 2);
+
+function MCPOAuthSettingsPanel({csrf, canWrite}: {csrf: string; canWrite: boolean}) {
+  const mutationTitle = canWrite ? undefined : SETTINGS_READ_ONLY_MESSAGE;
+  const [settings, setSettings] = React.useState<MCPOAuthSettings|null>(null);
+  const [audience, setAudience] = React.useState("");
+  const [scopes, setScopes] = React.useState("");
+  const [reason, setReason] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+  const load = React.useCallback(() =>
+    api<MCPOAuthSettings>("/api/v1/admin/settings/mcp-oauth").then(value => {
+      const normalized = normalizeMCPOAuthSettings(value);
+      setSettings(normalized);
+      setAudience(normalized.audience.join(" "));
+      setScopes(normalized.scopes.join(" "));
+    }),
+  []);
+  React.useEffect(() => {
+    load().catch(reason => setError((reason as Error).message));
+  }, [load]);
+  if (!settings) {
+    return <AdminPanel title="MCP SSO (OAuth)" action="Keycloak 액세스 토큰"><div className="settings-body">{error || "설정을 불러오는 중입니다."}</div></AdminPanel>;
+  }
+  const change = <K extends keyof MCPOAuthSettings>(key: K, value: MCPOAuthSettings[K]) => {
+    if (!canWrite) return;
+    setSettings(current => current ? {...current, [key]: value} : current);
+  };
+  const save = async () => {
+    if (!canWrite) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const saved = await api<MCPOAuthSettings>(
+        "/api/v1/admin/settings/mcp-oauth",
+        jsonRequest(csrf, {
+          enabled: settings.enabled,
+          resource: settings.resource,
+          audience: audience.split(/[\s,]+/).filter(Boolean),
+          scopes: scopes.split(/[\s,]+/).filter(Boolean),
+          reason,
+        }, "PATCH"),
+      );
+      setReason("");
+      setMessage(saved.active
+        ? "저장했습니다. 다음 요청부터 모든 Pod 에서 Keycloak 액세스 토큰을 받습니다."
+        : "저장했습니다. MCP SSO 는 꺼져 있습니다.");
+      await load();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const state = settings.active ? "켜짐" : settings.enabled ? "켜짐 · 비활성" : "꺼짐";
+  return <AdminPanel title="MCP SSO (OAuth)" action={state}>
+    <div className="settings-body">
+      <p className="settings-help">
+        개인 API 키 없이 Keycloak 액세스 토큰으로 <code>/mcp</code> 에 들어오게 합니다. MCP 클라이언트에
+        URL 하나만 주면 클라이언트가 스스로 로그인해 토큰을 받아 옵니다. 발급자·Client ID 는 위의 Keycloak
+        설정을 그대로 씁니다. 계정을 만들지 않으므로 사용자는 웹으로 한 번 먼저 로그인해야 하고,
+        토큰은 <code>/mcp</code> 에서만 받습니다.
+      </p>
+      {settings.enabled && !settings.active && <Notice tone="warning" title="켜져 있지만 동작하지 않습니다">
+        {settings.inactive_reason || "Keycloak 발급자를 먼저 구성하십시오."}
+      </Notice>}
+      <label className="toggle-row"><input type="checkbox" checked={settings.enabled}
+        disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+        onChange={event => change("enabled", event.target.checked)}/><span><strong>Keycloak 액세스 토큰으로 MCP 허용</strong><small>기본값은 꺼짐입니다. 켜면 <code>/.well-known/oauth-protected-resource</code> 가 열리고 <code>/mcp</code> 의 401 이 그 주소를 가리킵니다.</small></span></label>
+      <div className="admin-form">
+        <label className="wide">리소스 식별자
+          <input value={settings.resource} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => change("resource", event.target.value)}
+            placeholder={settings.effective_resource || "https://invenqor.example.com/mcp"}/>
+          <small>토큰의 <code>aud</code> 가 가리켜야 하는 공개 MCP 주소. 비우면 Keycloak Redirect URI 의 origin + <code>/mcp</code> 를 씁니다.</small>
+        </label>
+        <label className="wide">허용 대상 (aud 또는 azp)
+          <input value={audience} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => setAudience(event.target.value)} placeholder="claude-mcp cursor-mcp"/>
+          <small>공백으로 구분한 Keycloak MCP 클라이언트 ID. Audience 매퍼 없이 쓰는 호환 경로입니다.</small>
+        </label>
+        <label className="wide">부여 범위
+          <input value={scopes} disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+            onChange={event => setScopes(event.target.value)} placeholder="mcp.access assets.read relations.read agents.read"/>
+          <small>SSO 주체가 받는 API key scope. 계정이 가진 권한을 넘지 않으며 <code>mcp.access</code> 가 없으면 연결되지 않습니다.</small>
+        </label>
+        <label className="wide">변경 사유<input value={reason}
+          disabled={!canWrite} aria-disabled={!canWrite} title={mutationTitle}
+          onChange={event => setReason(event.target.value)}/></label>
+      </div>
+      <div className="secret-reveal enrollment-token-reveal">
+        <div>
+          <strong>MCP URL</strong>
+          <code>{settings.effective_resource}</code>
+        </div>
+        <button className="secondary" onClick={() => navigator.clipboard.writeText(settings.effective_resource)}>
+          <Copy size={16}/>복사
+        </button>
+      </div>
+      <div className="secret-reveal enrollment-token-reveal">
+        <div>
+          <strong>메타데이터 주소</strong>
+          <code>{settings.metadata_url}</code>
+        </div>
+        <button className="secondary" onClick={() => navigator.clipboard.writeText(settings.metadata_url)}>
+          <Copy size={16}/>복사
+        </button>
+      </div>
+      <div className="form-actions">
         <button className="primary compact" disabled={!canWrite || busy}
           aria-disabled={!canWrite || busy} title={mutationTitle}
           onClick={save}><Save size={16}/>설정 저장</button>

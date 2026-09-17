@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -223,6 +224,10 @@ type OIDCService struct {
 	bootstrapStore *bootstrap.Store
 	localAuth      *Service
 	audit          audit.Recorder
+	// providers caches discovery for MCP access-token verification; see
+	// AccessTokenProvider.
+	providerMutex sync.Mutex
+	providers     map[string]*oidc.Provider
 }
 
 func NewOIDCService(
