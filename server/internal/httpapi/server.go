@@ -200,6 +200,10 @@ func (s *Server) routes() {
 	s.router.Get("/v1/agent/updates", s.agentUpdateManifest)
 	s.router.Get("/v1/agent/updates/{artifact}/artifact", s.agentUpdateArtifact)
 	s.router.Post(cspReportPath, s.receiveCSPReport)
+	// RFC 9728: where an MCP client refused on /mcp goes to find Keycloak.
+	// Both forms, because clients differ on whether they append the path.
+	s.router.Get(protectedResourcePath, s.protectedResourceMetadata)
+	s.router.Get(protectedResourceMCPPath, s.protectedResourceMetadata)
 	s.router.Get(tracking.MomentoProxyPath+"/*", s.momentoProxy)
 	s.router.Post(tracking.MomentoProxyPath+"/*", s.momentoProxy)
 	s.router.Group(func(external chi.Router) {
@@ -323,6 +327,12 @@ func (s *Server) routes() {
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/mail/deliveries", s.listMailDeliveries,
+		)
+		protected.With(s.requirePermission("settings.read")).Get(
+			"/api/v1/admin/settings/mcp-oauth", s.getMCPOAuthSettings,
+		)
+		protected.With(s.requireCSRF, s.requirePermission("settings.write")).Patch(
+			"/api/v1/admin/settings/mcp-oauth", s.updateMCPOAuthSettings,
 		)
 		protected.With(s.requirePermission("settings.read")).Get(
 			"/api/v1/admin/settings/tracking/violations",

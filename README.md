@@ -72,6 +72,8 @@ Invenqor Agent는 외부 언어 런타임 없이 여러 Linux 배포판에서 �
   메일 알림 설정 화면(기본 꺼짐, 배경 발송, 시험 발송과 발송 기록)
 - 로그인 화면과 콘솔 상단의 실행 Server 버전 표시
 - scoped API key 수명주기와 stateless Streamable HTTP MCP 자산 도구
+- 개인 키 없이 Keycloak 액세스 토큰으로 `/mcp` 에 연결하는 MCP SSO(OAuth 2.1
+  리소스 서버 — RFC 9728 메타데이터·401 도전·대상 검사, 기본 꺼짐)
 - systemd, SysV init, OpenRC 서비스 정의
 - x86_64와 aarch64용 musl 정적 빌드 구성
 

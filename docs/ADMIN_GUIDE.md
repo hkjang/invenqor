@@ -1434,6 +1434,115 @@ bounded exponential backoff와 jitter를 사용할 수 있지만 전체 목록�
 그대로 재전송하면 다른 관리자의 변경을 덮어쓸 의도가 될 수 있으므로 항상 최신
 상태에서 다시 계산하십시오.
 
+### 16.4 MCP 를 SSO 로 — Keycloak 액세스 토큰으로 `/mcp` 열기
+
+개인 API Key 는 그대로 두고, **Keycloak 이 발급한 액세스 토큰** 으로도 `/mcp` 에
+들어올 수 있습니다. MCP 인가 규격(2025-06-18 이후)은 OAuth 2.1 이라 클라이언트에
+MCP URL 하나만 주면 클라이언트가 스스로 로그인 화면을 띄우고 토큰을 받아 옵니다.
+이 Server 는 **리소스 서버** 입니다 — 토큰을 발급하지 않고, `/authorize`·`/token`
+을 만들지 않으며, 토큰을 저장하지도 않습니다. 하는 일은 셋뿐입니다.
+
+1. `GET /.well-known/oauth-protected-resource` 와 `…/oauth-protected-resource/mcp` 에서
+   인증 없이 RFC 9728 메타데이터(리소스 식별자, Keycloak issuer, 범위)를 냅니다.
+2. `/mcp` 의 401 에 `WWW-Authenticate: Bearer …, resource_metadata="…"` 를 붙여
+   클라이언트가 갈 곳을 알려 줍니다(`/mcp` 에서만. REST 401 에는 붙지 않습니다).
+3. 같은 `Authorization: Bearer` 헤더에서 `ivq_sk_` 로 시작하면 Key, JWT 모양이면
+   Keycloak JWKS 로 서명·`iss`·`exp`·`nbf`·`typ`(ID 토큰 거부)·`cnf`(있으면 거부)·
+   **대상** 을 검사합니다.
+
+**기본값은 꺼짐** 입니다. 새로 설치한 곳에서는 메타데이터가 404 이고, 토큰을
+내밀어도 잘못된 Key 와 똑같이 거부됩니다. 켜는 조건은 Keycloak 발급자와 Client ID 가
+구성돼 있을 때뿐이며(16장), 그 전에는 저장 시점에 `MCP_OAUTH_OIDC_REQUIRED` 로
+거부합니다.
+
+#### 설정 항목
+
+**설정 → Keycloak** 의 **MCP SSO (OAuth)** 카드에서 바꿉니다. 값은 공용 DB 의
+`settings` 표에 사내 표준과 같은 키로 저장되어 모든 Pod 에 즉시 적용됩니다.
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `mcp.oauth.enabled` | `false` | 켜기 스위치 |
+| `mcp.oauth.resource` | 빈 값 | 리소스 식별자 — 클라이언트가 실제로 접속하는 공개 MCP 주소(`https://…/mcp`). 비우면 Keycloak Redirect URI 의 origin + `/mcp` 로 만들고, 그것도 없으면 요청의 `Host` 로 만듭니다(마지막 수단) |
+| `mcp.oauth.audience` | 빈 값 | 공백 구분 허용 대상. 토큰의 `aud` 또는 `azp` 와 비교합니다. Audience 매퍼 없이 쓰는 호환 경로 |
+| `mcp.oauth.scopes` | `agents.read assets.read mcp.access relations.read` | SSO 주체가 받는 API Key scope. 계정이 가진 권한을 넘지 않습니다 |
+| (재사용) Keycloak 설정의 발급자·Realm·Client ID·사설 CA | 16장 | 새로 만들지 않습니다 |
+
+**대상 검사가 핵심입니다.** 다른 앱에 로그인해 받은 토큰이 이 Server 의 `/mcp` 를
+열어서는 안 되므로 다음 중 하나는 맞아야 합니다.
+
+- 토큰의 `aud` 에 리소스 식별자(`https://…/mcp`)가 있다 — Keycloak Audience 매퍼를 둔 정식 경로
+- 토큰의 `aud` 또는 `azp` 가 `mcp.oauth.audience` 에 있다 — 실제 Keycloak 26 은 `aud` 에
+  `account` 만 싣고 클라이언트 ID 는 `azp` 에 담으므로, MCP 클라이언트 ID 를 여기 적으면 됩니다
+
+**계정은 만들지 않습니다.** 토큰의 `sub` 로, 웹으로 한 번 로그인할 때 연결된
+(`external_identities`) **활성** 계정만 찾습니다. 없으면 "웹 콘솔로 먼저 로그인하세요"
+로 거부하고, 비활성 계정은 되살리지 않으며, 토큰의 role claim 으로 권한을 올리지
+않습니다. SSO 주체는 그 사용자가 Key 로 들어왔을 때와 같은 문을 지납니다 — 계정에
+`mcp.access` 권한이 없으면(기본 역할 중에는 `super_admin` 만 가집니다) 403 입니다.
+super_admin 의 토큰도 `mcp.oauth.scopes` 를 넘지 않습니다. 감사 기록에는 행위자가
+`sso:<username>` 으로 남습니다.
+
+#### Keycloak 쪽 할 일
+
+1. MCP 클라이언트용 **공개(public) 클라이언트** 를 만듭니다(예: `claude-mcp`).
+   Standard Flow 켬, PKCE `S256`, Direct Access Grants·Implicit·Service accounts 끔.
+   웹 로그인 클라이언트(`invenqor`)와 **다른** 클라이언트입니다.
+2. Valid Redirect URIs 에 쓰는 MCP 클라이언트의 콜백을 정확히 적습니다 — Claude 는
+   `https://claude.ai/api/mcp/auth_callback`, 로컬 클라이언트는 `http://127.0.0.1:*/callback`
+   류. `*` 하나로 다 여는 것은 금지입니다.
+3. 정식 경로: 그 클라이언트(또는 전용 client scope)에 **Audience 매퍼** 를 둡니다.
+
+   | 매퍼 항목 | 값 |
+   |---|---|
+   | Mapper type | Audience |
+   | Included Custom Audience | 리소스 식별자(`https://invenqor.example.com/mcp`) |
+   | Add to access token | ON |
+   | Add to ID token | OFF |
+
+   호환 경로: 매퍼 없이 이 Server 의 `mcp.oauth.audience` 에 클라이언트 ID 를 적습니다.
+4. 액세스 토큰 수명은 짧게(5분 안팎). 이 Server 는 introspection 을 하지 않으므로
+   Keycloak 에서 로그아웃하거나 사용자를 끄더라도 **이미 발급된 토큰은 만료까지
+   삽니다.** 급하면 이 Server 의 사용자도 비활성화하십시오 — 다음 요청부터 막힙니다.
+
+#### curl 로 확인
+
+```bash
+# 메타데이터 — 켜져 있으면 200 맨 JSON, 꺼져 있으면 404 MCP_OAUTH_DISABLED
+curl -sS https://invenqor.example.com/.well-known/oauth-protected-resource/mcp
+# {"resource":"https://invenqor.example.com/mcp","authorization_servers":["https://sso.example.com/realms/corp"],
+#  "bearer_methods_supported":["header"],"scopes_supported":["agents.read","assets.read","mcp.access","relations.read"],
+#  "resource_name":"Invenqor MCP"}
+
+# 토큰 없는 /mcp — 401 과 갈 곳
+curl -sS -i -X POST https://invenqor.example.com/mcp -H 'Content-Type: application/json' -d '{}' | grep -i www-authenticate
+# WWW-Authenticate: Bearer realm="invenqor-api", resource_metadata="https://invenqor.example.com/.well-known/oauth-protected-resource/mcp"
+
+# 토큰으로 tools/list
+curl -sS -X POST https://invenqor.example.com/mcp \
+  -H "Authorization: Bearer $KEYCLOAK_ACCESS_TOKEN" -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/list' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"curl","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+관리 API: `GET /api/v1/admin/settings/mcp-oauth`(settings.read) 는 저장값과 함께
+실제 상태(`active`, `inactive_reason`, `effective_resource`, `metadata_url`)를 돌려주고,
+`PATCH /api/v1/admin/settings/mcp-oauth`(settings.write + CSRF) 는 있는 필드만 바꿉니다.
+변경은 감사 기록에 `settings.mcp_oauth.update` 로 남습니다.
+
+#### 거부 메시지별 조치
+
+| 응답 | 뜻 | 조치 |
+|---|---|---|
+| `404 MCP_OAUTH_DISABLED` (메타데이터) | 꺼져 있거나 Keycloak 발급자가 없음 | 스위치와 16장 Keycloak 설정 확인. 카드가 "켜짐 · 비활성" 이면 이유가 표시됩니다 |
+| `401 INVALID_API_KEY` (JWT 를 냈는데) | 꺼져 있거나 `/mcp` 가 아닌 경로 | OAuth 토큰은 `/mcp` 에서만 받습니다. REST 는 Key 를 쓰십시오 |
+| `401 MCP_OAUTH_TOKEN_REJECTED` | 서명·발급자·만료·`nbf`·ID 토큰·`cnf`·HS256 | 클라이언트에서 다시 로그인. 메시지에 "ID token" 이 있으면 클라이언트가 ID 토큰을 보내고 있습니다 |
+| `401 MCP_OAUTH_AUDIENCE_REJECTED` | 다른 앱용 토큰. 메시지에 본 `aud`/`azp` 와 고칠 값이 있습니다 | 메시지의 `azp` 값을 `mcp.oauth.audience` 에 적거나, Keycloak 클라이언트에 Audience 매퍼로 리소스 식별자를 넣습니다 |
+| `401 MCP_OAUTH_ACCOUNT_UNKNOWN` | 이 `sub` 로 연결된 계정이 없음 | 그 사용자가 웹 콘솔로 한 번 로그인한 뒤 다시 연결 |
+| `401 MCP_OAUTH_ACCOUNT_INACTIVE` | 연결된 계정이 비활성 | 사용자 관리에서 활성화(의도된 차단이면 그대로) |
+| `403 FORBIDDEN` | 계정에 `mcp.access` 또는 도구 scope 가 없음 | 역할을 부여하거나 `mcp.oauth.scopes` 를 확인 |
+| `503 MCP_OAUTH_ISSUER_UNREACHABLE` | Keycloak discovery/JWKS 를 읽지 못함 | Keycloak 접근성·사설 CA·DNS 확인. Server 로그 `mcp_oauth_discovery_failed` |
+
 ## 17. 운영 통계와 관리 콘솔 API 연결
 
 **운영 현황**은 브라우저에서 임의 합산하지 않고

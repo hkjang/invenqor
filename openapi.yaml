@@ -1355,6 +1355,52 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/MailDeliveryPage"}
         "401": {description: Authentication required}
+  /api/v1/admin/settings/mcp-oauth:
+    get:
+      operationId: getMcpOAuthSettings
+      summary: Read the MCP SSO (Keycloak access token) settings and their effective state
+      description: >-
+        Requires settings.read. Off on a fresh installation; nothing is stored until an administrator saves. The
+        settings live in the shared settings table under the company-standard mcp.oauth.* keys. The response also
+        reports whether SSO for MCP is actually live (active) and, when enabled but not live, why - the Keycloak
+        issuer and client ID are reused from the Keycloak settings and are required - plus the effective resource
+        identifier and metadata URL a client will see.
+      security: [{session: []}]
+      responses:
+        "200":
+          description: Current MCP SSO settings
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/McpOAuthSettings"}
+        "401": {description: Authentication required}
+    patch:
+      operationId: updateMcpOAuthSettings
+      summary: Turn MCP SSO on or off, or change the resource identifier, accepted audiences, or scopes
+      description: >-
+        Requires settings.write and X-CSRF-Token. Only the fields present are changed. Enabling is refused unless
+        the Keycloak issuer and client ID are configured. resource must be an absolute http(s) URL without query or
+        fragment (empty derives it from the Keycloak callback's origin plus /mcp). scopes must be known API-key
+        scopes and at least one. audience entries are compared with a token's aud values and azp claim.
+      security: [{session: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean, default: false}
+                resource: {type: string, format: uri, description: "Resource identifier the token's aud may name, e.g. https://invenqor.example.com/mcp"}
+                audience: {type: array, items: {type: string}, description: Client IDs (aud or azp) accepted without an Audience mapper}
+                scopes: {type: array, items: {type: string}, description: Scopes an SSO subject receives, capped by the account's own permissions}
+                reason: {type: string}
+      responses:
+        "200":
+          description: Settings applied to the next request on every pod
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/McpOAuthSettings"}
+        "400": {description: "INVALID_MCP_OAUTH_SETTINGS (bad resource or scope) or MCP_OAUTH_OIDC_REQUIRED (enabling without a Keycloak issuer)"}
   /api/v1/admin/settings/keycloak:
     get:
       operationId: getKeycloakSettings
@@ -1967,6 +2013,40 @@ paths:
         "400": {description: Invalid JSON or Query DSL expression}
         "401": {description: Invalid API key}
         "403": {description: Missing `queries.execute` scope}
+  /.well-known/oauth-protected-resource:
+    get:
+      operationId: getProtectedResourceMetadata
+      summary: RFC 9728 protected resource metadata for the MCP endpoint
+      description: >-
+        Public and unauthenticated. Bare JSON rather than the API envelope, because the reader is an OAuth client
+        library: it names the resource identifier, the Keycloak realm issuer as the authorization server, and the
+        scopes an SSO subject receives. Answers with Access-Control-Allow-Origin "*". 404 while mcp.oauth.enabled is
+        off or the Keycloak issuer is not configured, so a client is never sent through a login this server would refuse.
+      security: []
+      responses:
+        "200":
+          description: Protected resource metadata
+          headers: {Access-Control-Allow-Origin: {schema: {type: string, const: "*"}}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProtectedResourceMetadata"}
+        "404": {description: MCP SSO is off (MCP_OAUTH_DISABLED)}
+  /.well-known/oauth-protected-resource/mcp:
+    get:
+      operationId: getProtectedResourceMetadataForMcp
+      summary: The same RFC 9728 document under the path-suffixed well-known location
+      description: >-
+        Identical to /.well-known/oauth-protected-resource. Both forms exist because MCP clients differ on whether
+        they append the resource path; this one is what the 401 challenge on /mcp points at.
+      security: []
+      responses:
+        "200":
+          description: Protected resource metadata
+          headers: {Access-Control-Allow-Origin: {schema: {type: string, const: "*"}}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProtectedResourceMetadata"}
+        "404": {description: MCP SSO is off (MCP_OAUTH_DISABLED)}
   /mcp:
     get:
       operationId: rejectMcpSseTransport
@@ -1988,8 +2068,15 @@ paths:
         carry matching MCP-Protocol-Version, Mcp-Method and, for tools/call,
         Mcp-Name headers plus the protocol metadata envelope. Requires
         mcp.access; tool visibility and execution are filtered by API-key
-        scopes on every request.
-      security: [{externalBearer: []}]
+        scopes on every request. When the administrator has enabled MCP SSO
+        (mcp.oauth.enabled) the same Bearer header also accepts a Keycloak
+        access token issued for this server (aud names the resource, or aud/azp
+        is in mcp.oauth.audience); the token authenticates an existing linked
+        account with the administrator's mcp.oauth.scopes. A 401 on this path
+        carries WWW-Authenticate with resource_metadata pointing at
+        /.well-known/oauth-protected-resource/mcp so an MCP client can start
+        the OAuth flow itself.
+      security: [{externalBearer: []}, {ssoAccessToken: []}]
       parameters:
         - in: header
           name: MCP-Protocol-Version
@@ -2015,8 +2102,13 @@ paths:
         "200": {description: JSON-RPC response}
         "202": {description: Legacy notification accepted}
         "400": {description: "Invalid JSON-RPC, protocol metadata, version, or routing header contract"}
-        "401": {description: Invalid API key}
+        "401":
+          description: >-
+            Invalid API key, or a rejected SSO token (MCP_OAUTH_TOKEN_REJECTED, MCP_OAUTH_AUDIENCE_REJECTED,
+            MCP_OAUTH_ACCOUNT_UNKNOWN, MCP_OAUTH_ACCOUNT_INACTIVE). WWW-Authenticate carries resource_metadata when SSO is on.
+          headers: {WWW-Authenticate: {schema: {type: string}, description: 'Bearer realm="invenqor-api"[, resource_metadata="…/.well-known/oauth-protected-resource/mcp"][, error="invalid_token"]'}}
         "403": {description: Missing scope or rejected Origin}
+        "503": {description: MCP_OAUTH_ISSUER_UNREACHABLE - Keycloak discovery or key set could not be read, so the token could not be verified}
         "404": {description: RPC method is unavailable in the modern protocol lifecycle}
   /api/v1/assets:
     get:
@@ -2484,6 +2576,7 @@ components:
     bootstrapToken: {type: apiKey, in: header, name: X-Invenqor-Bootstrap-Token}
     session: {type: apiKey, in: cookie, name: invenqor_session}
     externalBearer: {type: http, scheme: bearer, bearerFormat: Invenqor scoped API key}
+    ssoAccessToken: {type: http, scheme: bearer, bearerFormat: JWT, description: Keycloak access token issued for this server; accepted on /mcp only when mcp.oauth.enabled is on}
   parameters:
     AgentId: {in: path, name: agentId, required: true, schema: {type: string, format: uuid}}
     AssetId: {in: path, name: assetId, required: true, schema: {type: string, format: uuid}}
@@ -2691,6 +2784,28 @@ components:
         updated_at: {type: string, format: date-time}
         updated_by: {type: string}
         source: {type: string, const: database}
+    ProtectedResourceMetadata:
+      type: object
+      required: [resource, authorization_servers, bearer_methods_supported, scopes_supported]
+      properties:
+        resource: {type: string, format: uri, description: The identifier a token's aud may name; the public MCP URL}
+        authorization_servers: {type: array, items: {type: string, format: uri}, description: The Keycloak realm issuer}
+        bearer_methods_supported: {type: array, items: {type: string, const: header}}
+        scopes_supported: {type: array, items: {type: string}}
+        resource_name: {type: string}
+    McpOAuthSettings:
+      type: object
+      required: [enabled, resource, audience, scopes, active, inactive_reason, oidc_issuer, effective_resource, metadata_url]
+      properties:
+        enabled: {type: boolean}
+        resource: {type: string, description: Stored resource identifier; empty when derived}
+        audience: {type: array, items: {type: string}}
+        scopes: {type: array, items: {type: string}}
+        active: {type: boolean, description: Enabled and the Keycloak issuer is configured, so metadata is published and tokens are checked}
+        inactive_reason: {type: string, description: Why enabled did not become active; empty otherwise}
+        oidc_issuer: {type: string, description: The Keycloak realm issuer reused from the Keycloak settings}
+        effective_resource: {type: string, format: uri}
+        metadata_url: {type: string, format: uri}
     MailSettings:
       type: object
       required: [enabled, ready, smtp_host, smtp_port, security, securities, skip_tls_verify, username, password_configured, from_address, from_name, base_url, timeout_seconds, events, event_names]
