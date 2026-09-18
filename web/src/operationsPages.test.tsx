@@ -5,9 +5,11 @@ import {
   Breakdown,
   DailyBars,
   DiagnosticDetail,
+  QueryResultPanel,
   RiskSummary,
   type Asset,
   type DiagnosticLog,
+  type QueryResult,
   type Statistics,
 } from "./operationsPages";
 
@@ -202,5 +204,94 @@ describe("DiagnosticDetail", () => {
     clean(markup);
     // No request ID means no cross-link to events sharing one.
     expect(markup).not.toContain("같은 request ID");
+  });
+});
+
+// Shaped like a reply from POST /api/v1/query/execute: the page the Server
+// read plus the size of the whole answer and whether rows exist past it.
+const page = (result: Partial<QueryResult>): QueryResult => ({
+  items: [asset, bare], total: 2, offset: 0, limit: 100, has_more: false, ...result,
+});
+
+describe("QueryResultPanel", () => {
+  it("renders before the first run", () => {
+    const markup = renderToStaticMarkup(
+      <QueryResultPanel result={page({items: [], total: 0})} ran={false} failed={false}
+        onPrevious={noop} onNext={noop}/>,
+    );
+    clean(markup);
+    expect(markup).not.toContain("조건에 맞는 자산이 없습니다");
+    expect(markup).not.toContain("다음");
+  });
+
+  it("renders a result that fits in one page", () => {
+    const markup = renderToStaticMarkup(
+      <QueryResultPanel result={page({})} ran={true} failed={false}
+        onPrevious={noop} onNext={noop}/>,
+    );
+    clean(markup);
+    expect(markup).toContain("결과 2건");
+    expect(markup).toContain("1–2 표시 · limit 100");
+    expect(markup).not.toContain("만 표시합니다");
+    expect(markup).not.toContain("다음");
+  });
+
+  // 1,200 stale hosts and a limit of 100: the title used to say 100 and the
+  // only advice was to narrow the expression.
+  it("names the whole answer and offers the next page when rows exist past the limit", () => {
+    const markup = renderToStaticMarkup(
+      <QueryResultPanel result={page({total: 1200, limit: 100, has_more: true})}
+        ran={true} failed={false} onPrevious={noop} onNext={noop}/>,
+    );
+    clean(markup);
+    expect(markup).toContain("결과 1,200건");
+    expect(markup).toContain("1–2 표시 · limit 100");
+    expect(markup).toContain("1,200건 중 1–2번째만 표시합니다");
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>이전<\/button>/);
+    expect(markup).toMatch(/<button class="secondary">다음<\/button>/);
+  });
+
+  it("counts from the Server's offset on a later page and lets the reader go back", () => {
+    const markup = renderToStaticMarkup(
+      <QueryResultPanel result={page({total: 1200, offset: 1198, limit: 100, has_more: false})}
+        ran={true} failed={false} onPrevious={noop} onNext={noop}/>,
+    );
+    clean(markup);
+    expect(markup).toContain("결과 1,200건");
+    expect(markup).toContain("1,199–1,200 표시");
+    expect(markup).toMatch(/<button class="secondary">이전<\/button>/);
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>다음<\/button>/);
+  });
+
+  it("tells an empty page past the end apart from no match at all", () => {
+    const beyond = renderToStaticMarkup(
+      <QueryResultPanel result={page({items: [], total: 3, offset: 100, limit: 100})}
+        ran={true} failed={false} onPrevious={noop} onNext={noop}/>,
+    );
+    clean(beyond);
+    expect(beyond).toContain("결과 3건");
+    expect(beyond).toContain("이 페이지에는 자산이 없습니다");
+    expect(beyond).not.toContain("조건에 맞는 자산이 없습니다");
+    expect(beyond).toMatch(/<button class="secondary">이전<\/button>/);
+
+    const none = renderToStaticMarkup(
+      <QueryResultPanel result={page({items: [], total: 0})}
+        ran={true} failed={false} onPrevious={noop} onNext={noop}/>,
+    );
+    clean(none);
+    expect(none).toContain("결과 0건");
+    expect(none).toContain("조건에 맞는 자산이 없습니다");
+    expect(none).not.toContain("이 페이지에는 자산이 없습니다");
+    expect(none).not.toContain("이전");
+  });
+
+  it("shows no count for a run the Server rejected", () => {
+    const markup = renderToStaticMarkup(
+      <QueryResultPanel result={page({items: [], total: 0})} ran={true} failed={true}
+        onPrevious={noop} onNext={noop}/>,
+    );
+    clean(markup);
+    expect(markup).not.toContain("결과 0건");
+    expect(markup).not.toContain("조건에 맞는 자산이 없습니다");
   });
 });
