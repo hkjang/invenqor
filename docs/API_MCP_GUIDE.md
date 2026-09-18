@@ -366,7 +366,7 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 | 도구 | Scope | 입력 | 결과 |
 |---|---|---|---|
 | `asset_get` | `assets.read` | `asset_id` | 자산 상세 |
-| `asset_relations` | `relations.read` | `asset_id`, `limit`, `offset` | 활성 inbound/outbound 관계 |
+| `asset_relations` | `relations.read` | `asset_id`, `limit`, `offset` | 활성 inbound/outbound 관계. 양 끝 자산의 이름·종류·상태와 방향 포함 |
 | `asset_search` | `assets.read` | `q`, `type`, `status`, `include_observations`, `limit`, `offset` | 정규화 자산 목록. 원시 process는 기본 제외 |
 | `software_inventory` | `assets.read` | `q`, `role`, `vendor`, `runtime_state`, `confidence`, `limit`, `offset` | 제품 요약·host·상태·확신도·evidence |
 | `agents_list` | `agents.read` | `limit`, `offset` | Agent 상태·버전·최근 수신 |
@@ -393,6 +393,25 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 돌려줍니다. `runs_on` 관계를 수천 개 가진 host 하나가 응답 하나로 모델의 context를
 차지하지 않도록 한 것이며, 전체 관계가 필요하면 `next_offset`으로 이어서
 조회하십시오. 관계 목록 자체는 이전과 같은 `relations` 키에 담겨 옵니다.
+
+관계 행마다 양 끝 자산이 `source_asset`·`target_asset`에 `id`, `name`, `type`,
+`status`로 함께 들어 있고, `direction`이 질문한 `asset_id` 기준으로
+`outbound`(이 자산이 source) 또는 `inbound`(이 자산이 target)인지를 말해 줍니다.
+이전에는 행에 두 UUID만 있어 상대 자산의 이름을 알려면 edge 하나마다 `asset_get`을
+한 번씩 더 불러야 했습니다. 삭제·병합된 자산의 edge는 그대로 남아 있으므로 상대의
+`status`가 `deleted`·`merged`이면 `asset_get`은 그 자산을 찾지 못합니다. 기존
+`source_asset_id`·`target_asset_id` 열은 그대로 유지됩니다.
+
+```json
+{
+  "id": "…", "relation_type": "runs_on", "direction": "outbound",
+  "source_asset_id": "3f1c…", "target_asset_id": "9a7e…",
+  "source_asset": {"id": "3f1c…", "name": "db-01", "type": "host", "status": "active"},
+  "target_asset": {"id": "9a7e…", "name": "postgres", "type": "process", "status": "active"},
+  "valid_from": "2026-09-17T01:00:00Z", "valid_to": null,
+  "source": "agent", "confidence": 1
+}
+```
 
 ```bash
 curl -H "Authorization: Bearer $INVENQOR_API_KEY" \

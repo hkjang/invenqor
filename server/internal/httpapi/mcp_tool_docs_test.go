@@ -25,10 +25,16 @@ func TestMCPToolTableMatchesDeclaredSchemas(t *testing.T) {
 		)
 	}
 	for _, tool := range mcpTools {
-		inputs, listed := documented[tool.Name]
+		row, listed := documented[tool.Name]
 		if !listed {
 			t.Fatalf("the guide's tool table omits %q", tool.Name)
 		}
+		// A key is issued from this table, and a scope wrong there means the key
+		// never sees the tool in tools/list, with nothing to say why.
+		if row.scope != tool.Scope {
+			t.Fatalf("%s scope: guide=%q server=%q", tool.Name, row.scope, tool.Scope)
+		}
+		inputs := row.inputs
 		declared := make([]string, 0)
 		if properties, ok := tool.InputSchema["properties"].(map[string]any); ok {
 			for name := range properties {
@@ -47,12 +53,19 @@ func TestMCPToolTableMatchesDeclaredSchemas(t *testing.T) {
 }
 
 var mcpToolTableRow = regexp.MustCompile(
-	`^\|\s*` + "`" + `([a-z_]+)` + "`" + `\s*\|[^|]*\|([^|]*)\|`,
+	`^\|\s*` + "`" + `([a-z_]+)` + "`" + `\s*\|([^|]*)\|([^|]*)\|`,
 )
 
-// readMCPToolTable returns each documented tool and the input names its row
-// lists, read from the tool table in the API/MCP guide.
-func readMCPToolTable(t *testing.T) map[string][]string {
+// mcpToolTableEntry is one row of the guide's tool table: the scope the row
+// says the tool needs and the input names it lists.
+type mcpToolTableEntry struct {
+	scope  string
+	inputs []string
+}
+
+// readMCPToolTable returns each documented tool's row, read from the tool
+// table in the API/MCP guide.
+func readMCPToolTable(t *testing.T) map[string]mcpToolTableEntry {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -69,7 +82,7 @@ func readMCPToolTable(t *testing.T) map[string][]string {
 	for _, tool := range mcpTools {
 		known[tool.Name] = struct{}{}
 	}
-	documented := make(map[string][]string)
+	documented := make(map[string]mcpToolTableEntry)
 	for _, line := range strings.Split(string(raw), "\n") {
 		match := mcpToolTableRow.FindStringSubmatch(strings.TrimSpace(line))
 		if match == nil {
@@ -82,10 +95,13 @@ func readMCPToolTable(t *testing.T) map[string][]string {
 		}
 		inputs := make([]string, 0)
 		for _, name := range regexp.MustCompile("`([a-z_]+)`").
-			FindAllStringSubmatch(match[2], -1) {
+			FindAllStringSubmatch(match[3], -1) {
 			inputs = append(inputs, name[1])
 		}
-		documented[match[1]] = inputs
+		documented[match[1]] = mcpToolTableEntry{
+			scope:  strings.Trim(strings.TrimSpace(match[2]), "`"),
+			inputs: inputs,
+		}
 	}
 	return documented
 }
