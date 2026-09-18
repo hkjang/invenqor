@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=${1:-0.2.36}
+version=${1:-0.2.37}
 output_dir=${2:-"$root/dist"}
 # 이미지 이름과 파일 이름을 다른 저장소와 맞춘다: 태그는 <서비스>:v<버전>,
 # 배포 파일은 <서비스>-v<버전>.tar.gz. 예전에는 invenqor-server:0.2.34 와
