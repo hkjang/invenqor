@@ -786,14 +786,23 @@ const queryExamples: {label: string; query: string}[] = [
   {label: "특정 운영체제", query: 'attributes.os_name = "Ubuntu"'},
 ];
 
+// What the Server said about the page it handed over. offset is echoed back
+// rather than kept from the request so that the page shown is the one that
+// was actually read.
+export type QueryResult = {
+  items: Asset[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+};
+
+const emptyQueryResult: QueryResult = {items: [], total: 0, offset: 0, limit: 100, has_more: false};
+
 export function QueryPage({csrf}: {csrf: string}) {
   const [query, setQuery] = React.useState('type = "host" AND environment = "production"');
   const [limit, setLimit] = React.useState(100);
-  const [result, setResult] = React.useState<Asset[]>([]);
-  // The Server says whether the limit cut the result short. This used to be
-  // guessed from the row count landing on the limit, which called a result
-  // that ended exactly there truncated as well.
-  const [truncated, setTruncated] = React.useState(false);
+  const [result, setResult] = React.useState<QueryResult>(emptyQueryResult);
   const [ran, setRan] = React.useState(false);
   const [grammar, setGrammar] = React.useState<QueryGrammar|null>(null);
   const [validation, setValidation] = React.useState<{valid: boolean; error?: string; ast?: unknown}|null>(null);
@@ -809,14 +818,22 @@ export function QueryPage({csrf}: {csrf: string}) {
       setError("");
     } catch (reason) { setError((reason as Error).message); }
   };
-  const run = async () => {
+  // The Server has paged this endpoint since v0.2.31, but the console kept
+  // reading only the first page and telling the operator to narrow the
+  // expression. 질의 실행 starts over at offset 0; 이전·다음 walk the same
+  // expression with the offset the Server echoed back.
+  const run = async (offset = 0) => {
     try {
-      const value = await api<{items: Asset[]; ast: unknown; truncated?: boolean}>("/api/v1/query/execute",
-        jsonRequest(csrf, {query, limit}));
-      setResult(value.items); setTruncated(Boolean(value.truncated));
+      const value = await api<QueryResult & {ast: unknown}>("/api/v1/query/execute",
+        jsonRequest(csrf, {query, limit, offset}));
+      setResult({
+        items: value.items, total: value.total ?? value.items.length,
+        offset: value.offset ?? offset, limit: value.limit ?? limit,
+        has_more: Boolean(value.has_more),
+      });
       setValidation({valid: true, ast: value.ast});
       setRan(true); setError("");
-    } catch (reason) { setError((reason as Error).message); setTruncated(false); setRan(true); }
+    } catch (reason) { setError((reason as Error).message); setResult(emptyQueryResult); setRan(true); }
   };
   const insert = (text: string) => {
     setQuery(current => current.trim() ? `${current.trim()} AND ${text}` : text);
@@ -833,7 +850,7 @@ export function QueryPage({csrf}: {csrf: string}) {
           {validation.valid ? "구문이 유효합니다." : validation.error}</span>}
         {error && <span className="error-text">{error}</span>}
         <button className="secondary" onClick={validate}>구문 검증</button>
-        <button className="primary compact" onClick={run}>질의 실행</button>
+        <button className="primary compact" onClick={() => run()}>질의 실행</button>
       </div>
     </div>
     <div className="query-aids">
@@ -854,16 +871,46 @@ export function QueryPage({csrf}: {csrf: string}) {
       </Panel>
     </div>
     {validation?.ast != null && <details className="json-details"><summary>파싱된 AST</summary><pre>{pretty(validation.ast)}</pre></details>}
-    <Panel title={`결과 ${number(result.length)}건${truncated ? " 이상" : ""}`}
-      action={truncated ? `limit ${limit}에서 잘림` : `limit ${limit}`}>
-      <AssetTable items={result}/>
-      {truncated && <p className="hint">
-        조건에 맞는 자산이 limit {number(limit)}건보다 많아 결과가 잘렸습니다.
-        조건을 좁히거나 limit을 올려 다시 실행하십시오.</p>}
-      {ran && !result.length && !error && <p className="hint">
-        구문은 유효하지만 조건에 맞는 자산이 없습니다.</p>}
-    </Panel>
+    <QueryResultPanel result={result} ran={ran} failed={Boolean(error)}
+      onPrevious={() => run(Math.max(0, result.offset - result.limit))}
+      onNext={() => run(result.offset + result.items.length)}/>
   </section>;
+}
+
+// The result panel of the Query DSL page. Pure so that the counts it shows
+// can be checked against a Server reply without a browser.
+export function QueryResultPanel({result, ran, failed, onPrevious, onNext}: {
+  result: QueryResult;
+  ran: boolean;
+  failed: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  const {items, total, offset, limit, has_more: hasMore} = result;
+  // "결과 100건" used to be the size of the page, which read as the size of
+  // the answer. The title is now how many assets match; the range says
+  // which of them are on screen.
+  const first = items.length ? offset + 1 : 0;
+  const last = offset + items.length;
+  const shown = items.length
+    ? `${number(first)}–${number(last)} 표시 · limit ${number(limit)}`
+    : `limit ${number(limit)}`;
+  return <Panel title={ran && !failed ? `결과 ${number(total)}건` : "결과"} action={shown}>
+    <AssetTable items={items}/>
+    {hasMore && <p className="hint">
+      조건에 맞는 자산 {number(total)}건 중 {number(first)}–{number(last)}번째만 표시합니다.
+      <strong>다음</strong>을 눌러 이어서 읽거나, 조건을 좁히거나 limit을 올려 다시 실행하십시오.</p>}
+    {/* A page past the end: the assets that filled it were deleted or merged
+        between two clicks. Not the same as "nothing matches". */}
+    {ran && !failed && !items.length && total > 0 && <p className="hint">
+      이 페이지에는 자산이 없습니다. <strong>이전</strong>을 눌러 앞 페이지로 돌아가거나 다시 실행하십시오.</p>}
+    {ran && !failed && !total && <p className="hint">
+      구문은 유효하지만 조건에 맞는 자산이 없습니다.</p>}
+    {ran && !failed && (offset > 0 || hasMore) && <div className="pagination">
+      <button className="secondary" disabled={!offset} onClick={onPrevious}>이전</button>
+      <button className="secondary" disabled={!hasMore} onClick={onNext}>다음</button>
+    </div>}
+  </Panel>;
 }
 
 const auditPageSize = 100;
