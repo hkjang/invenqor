@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hkjang/invenqor/server/internal/apitime"
 	"github.com/hkjang/invenqor/server/internal/storage"
 	"github.com/hkjang/invenqor/server/internal/version"
 )
@@ -47,7 +48,8 @@ type mcpTool struct {
 var mcpTools = []mcpTool{
 	{
 		Name: "asset_get", Title: "Get IT asset",
-		Description: "Get one Invenqor IT asset by UUID.",
+		Description: "Get one Invenqor IT asset by UUID. An asset that was merged " +
+			"into another answers with merged_into naming the primary to call instead.",
 		InputSchema: objectSchema(map[string]any{
 			"asset_id": map[string]any{"type": "string", "format": "uuid"},
 		}, []string{"asset_id"}),
@@ -698,9 +700,74 @@ func (s *Server) mcpAssetGet(r *http.Request, arguments *mcpArguments) (any, err
 		input.AssetID,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
+		hint, err := s.mcpMergedAssetHint(r, input.AssetID)
+		if err != nil {
+			return nil, err
+		}
+		if hint != nil {
+			return hint, nil
+		}
 		return nil, errors.New("asset not found")
 	}
 	return map[string]any{"asset": asset}, err
+}
+
+// mcpMergedAssetHint answers for an asset the console merged into another one.
+// The merge leaves the secondary with status 'merged' and a deleted_at, so the
+// live-asset lookup above misses it and used to answer `asset not found` - the
+// same words a UUID that never existed gets. A model that still holds the old
+// id from an earlier turn, a search page or a relation edge concluded the
+// asset was gone, when REST GET and the console both still report it as
+// merged. Naming the primary lets the next call reach the right asset. Only
+// one hop is resolved: if the primary was merged again later, its own lookup
+// hands out the next hint, so no chain is walked and no cycle can form.
+//
+// A nil hint with a nil error means the asset was not merged - it is unknown,
+// or soft-deleted for another reason - and the caller keeps its old answer. A
+// failing statement is returned, not folded into `asset not found`: that is
+// how a dialect mistake would hide in production while every SQLite test
+// passed.
+func (s *Server) mcpMergedAssetHint(r *http.Request, assetID string) (map[string]any, error) {
+	var mergedAt apitime.Time
+	err := s.database.DB().QueryRowContext(r.Context(),
+		`SELECT deleted_at FROM assets WHERE id=$1 AND status='merged'`, assetID,
+	).Scan(&mergedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The primary is only recorded on the merge's change row, whose after_json
+	// lists the secondaries. after_json is JSONB on PostgreSQL and TEXT on the
+	// SQLite fallback, so membership is asked in each engine's own JSON form -
+	// a text operator on the JSONB column fails with 42883.
+	lookup := `SELECT asset_id FROM asset_changes
+		 WHERE change_type='merged'
+		   AND EXISTS (SELECT 1 FROM json_each(after_json, '$.secondary_ids') WHERE value = $1)
+		 ORDER BY occurred_at DESC LIMIT 1`
+	if s.database.Mode() != storage.ModeSQLiteFallback {
+		lookup = `SELECT asset_id FROM asset_changes
+		 WHERE change_type='merged'
+		   AND after_json @> jsonb_build_object('secondary_ids', jsonb_build_array($1::text))
+		 ORDER BY occurred_at DESC LIMIT 1`
+	}
+	var primaryID string
+	err = s.database.DB().QueryRowContext(r.Context(), lookup, assetID).Scan(&primaryID)
+	// Status says merged but no merge row names it: data written outside
+	// mergeAssets. There is no primary to point at, so the old answer stands.
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"merged_into": primaryID,
+		"merged_at":   mergedAt,
+		"message": "This asset was merged into " + primaryID +
+			"; call asset_get with that id.",
+	}, nil
 }
 
 func (s *Server) mcpAssetRelations(r *http.Request, arguments *mcpArguments) (any, error) {

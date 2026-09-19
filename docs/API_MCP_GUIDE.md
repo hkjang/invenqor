@@ -365,7 +365,7 @@ curl -H "Authorization: Bearer $INVENQOR_API_KEY" \
 
 | 도구 | Scope | 입력 | 결과 |
 |---|---|---|---|
-| `asset_get` | `assets.read` | `asset_id` | 자산 상세 |
+| `asset_get` | `assets.read` | `asset_id` | 자산 상세. 다른 자산으로 병합된 자산은 `asset` 없이 `merged_into`(primary UUID)·`merged_at`·`message`로 안내하며, 그 primary 로 다시 부르면 상세가 옴. 존재하지 않는 UUID 는 `asset not found` 오류 |
 | `asset_relations` | `relations.read` | `asset_id`, `limit`, `offset` | 활성 inbound/outbound 관계 |
 | `asset_search` | `assets.read` | `q`, `type`, `status`, `include_observations`, `limit`, `offset` | 정규화 자산 목록. 원시 process는 기본 제외 |
 | `software_inventory` | `assets.read` | `q`, `role`, `vendor`, `runtime_state`, `confidence`, `limit`, `offset` | 제품 요약·host·상태·확신도·evidence |
