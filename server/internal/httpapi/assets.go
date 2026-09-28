@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -644,6 +645,39 @@ func (s *Server) deleteAssetRelation(response http.ResponseWriter, request *http
 	writeJSON(response, 200, map[string]any{"deleted": true})
 }
 
+// missingAssetID returns the first id that is not an asset, or "" when they all
+// are. A merge rewrites asset_sources, flips assets.status and records the
+// result in asset_changes and audit_logs, none of which means anything for an
+// id that names no asset: a secondary that does not exist updated no rows yet
+// still answered 200 with a "merged" change row behind it, and a primary that
+// does not exist only surfaced when the asset_changes foreign key rejected it
+// mid-transaction. openapi.yaml documents a 400 here, so both sides are looked
+// up before anything is written.
+//
+// Merged secondaries are deliberately still found: re-merging an asset that
+// already carries status='merged' and a deleted_at is existing behaviour, so
+// the lookup asks only whether the row is there.
+func missingAssetID(ctx context.Context, tx *sql.Tx, ids []string) (string, error) {
+	for _, id := range ids {
+		// assets.id is a UUID column on PostgreSQL and TEXT on the SQLite
+		// fallback, where an id that is not a UUID would make the lookup itself
+		// an error on one dialect only. Checking the shape first keeps both
+		// answering the same code for the same request.
+		if _, err := uuid.Parse(id); err != nil {
+			return id, nil
+		}
+		var found string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM assets WHERE id=$1`, id).Scan(&found)
+		if errors.Is(err, sql.ErrNoRows) {
+			return id, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", nil
+}
+
 func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request) {
 	var input struct {
 		PrimaryID    string   `json:"primary_id"`
@@ -661,6 +695,23 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		return
 	}
 	defer tx.Rollback()
+	missing, err := missingAssetID(
+		request.Context(), tx, append([]string{input.PrimaryID}, input.SecondaryIDs...),
+	)
+	if err != nil {
+		// The SQLite fallback runs on a single connection, so reporting an
+		// error while this transaction still holds it would block forever in
+		// the diagnostics write internalError makes. Give the connection back
+		// first; the deferred rollback then finds the transaction already done.
+		_ = tx.Rollback()
+		s.internalError(response, request, err)
+		return
+	}
+	if missing != "" {
+		writeAPIError(response, request, 400, "INVALID_MERGE",
+			"primary_id and secondary_ids must name existing assets.")
+		return
+	}
 	moved := make([]string, 0)
 	for _, secondaryID := range input.SecondaryIDs {
 		if secondaryID == input.PrimaryID {
