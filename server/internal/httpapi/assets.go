@@ -789,6 +789,23 @@ func (s *Server) splitAsset(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	originalID := chi.URLParam(request, "assetID")
+	// asset_sources.id and asset_sources.asset_id are UUID columns on PostgreSQL
+	// and TEXT on the SQLite fallback, so an id that is not a UUID made the
+	// UPDATE below fail with SQLSTATE 22P02 — a 500 openapi never promises —
+	// while the fallback merely matched no rows and answered 400. Checking the
+	// shape before the transaction opens keeps both dialects answering the same
+	// code for the same request, and writes nothing on the way out.
+	if _, err := uuid.Parse(originalID); err != nil {
+		writeAPIError(response, request, 400, "INVALID_SPLIT", "assetID must be a valid asset id.")
+		return
+	}
+	for _, sourceID := range input.SourceIDs {
+		if _, err := uuid.Parse(sourceID); err != nil {
+			writeAPIError(response, request, 400, "INVALID_SOURCE",
+				"A source does not belong to the original asset.")
+			return
+		}
+	}
 	newID := uuid.NewString()
 	now := time.Now().UTC()
 	tx, err := s.database.DB().BeginTx(request.Context(), nil)
