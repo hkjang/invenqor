@@ -645,6 +645,27 @@ func (s *Server) deleteAssetRelation(response http.ResponseWriter, request *http
 	writeJSON(response, 200, map[string]any{"deleted": true})
 }
 
+// canonicalUUID accepts only the 36-character hyphenated form openapi declares
+// for asset and source ids (`format: uuid`) and returns it lower-cased.
+//
+// uuid.Parse on its own is not a shape check — its godoc says so outright — and
+// it also accepts `urn:uuid:`-prefixed, brace-wrapped and unhyphenated
+// spellings. Those three diverge by dialect: PostgreSQL's uuid input rejects the
+// urn: one with SQLSTATE 22P02, which surfaces as a 500 openapi never promises,
+// and silently normalises the other two, so a query matched the row and the
+// write went through where the TEXT columns of the SQLite fallback matched
+// nothing and answered 400. Returning the parsed form rather than the caller's
+// also keeps an upper-case id — which is the declared form, and which PostgreSQL
+// folds but SQLite's comparison would not — behaving the same on both dialects
+// and recorded canonically in asset_changes.after_json.
+func canonicalUUID(value string) (string, bool) {
+	parsed, err := uuid.Parse(value)
+	if err != nil || len(value) != 36 {
+		return "", false
+	}
+	return parsed.String(), true
+}
+
 // missingAssetID returns the first id that is not an asset, or "" when they all
 // are. A merge rewrites asset_sources, flips assets.status and records the
 // result in asset_changes and audit_logs, none of which means anything for an
@@ -788,23 +809,25 @@ func (s *Server) splitAsset(response http.ResponseWriter, request *http.Request)
 		writeAPIError(response, request, 400, "INVALID_SPLIT", "source_ids, name and type are required.")
 		return
 	}
-	originalID := chi.URLParam(request, "assetID")
 	// asset_sources.id and asset_sources.asset_id are UUID columns on PostgreSQL
-	// and TEXT on the SQLite fallback, so an id that is not a UUID made the
-	// UPDATE below fail with SQLSTATE 22P02 — a 500 openapi never promises —
-	// while the fallback merely matched no rows and answered 400. Checking the
-	// shape before the transaction opens keeps both dialects answering the same
-	// code for the same request, and writes nothing on the way out.
-	if _, err := uuid.Parse(originalID); err != nil {
+	// and TEXT on the SQLite fallback, so the spelling of an id has to be settled
+	// before the transaction opens or the same request gets a different answer per
+	// dialect. Only the canonical form reaches SQL, and nothing is written on the
+	// way out.
+	originalID, ok := canonicalUUID(chi.URLParam(request, "assetID"))
+	if !ok {
 		writeAPIError(response, request, 400, "INVALID_SPLIT", "assetID must be a valid asset id.")
 		return
 	}
+	sourceIDs := make([]string, 0, len(input.SourceIDs))
 	for _, sourceID := range input.SourceIDs {
-		if _, err := uuid.Parse(sourceID); err != nil {
+		canonical, ok := canonicalUUID(sourceID)
+		if !ok {
 			writeAPIError(response, request, 400, "INVALID_SOURCE",
 				"A source does not belong to the original asset.")
 			return
 		}
+		sourceIDs = append(sourceIDs, canonical)
 	}
 	newID := uuid.NewString()
 	now := time.Now().UTC()
@@ -826,7 +849,7 @@ func (s *Server) splitAsset(response http.ResponseWriter, request *http.Request)
 		s.internalError(response, request, err)
 		return
 	}
-	for _, sourceID := range input.SourceIDs {
+	for _, sourceID := range sourceIDs {
 		result, err := tx.ExecContext(
 			request.Context(),
 			`UPDATE asset_sources SET asset_id=$1
@@ -842,7 +865,7 @@ func (s *Server) splitAsset(response http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	metadata, _ := json.Marshal(input.SourceIDs)
+	metadata, _ := json.Marshal(sourceIDs)
 	_, err = tx.ExecContext(
 		request.Context(),
 		`INSERT INTO asset_changes(
@@ -856,7 +879,7 @@ func (s *Server) splitAsset(response http.ResponseWriter, request *http.Request)
 			ActorType: "user", ActorID: principalFromContext(request.Context()).User.ID,
 			Action: "asset.split", ResourceType: "asset", ResourceID: originalID,
 			Result: "success", Reason: input.Reason,
-			After: map[string]any{"new_asset_id": newID, "source_ids": input.SourceIDs},
+			After: map[string]any{"new_asset_id": newID, "source_ids": sourceIDs},
 		})
 	}
 	if err != nil {
