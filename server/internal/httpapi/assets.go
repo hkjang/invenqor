@@ -679,14 +679,11 @@ func canonicalUUID(value string) (string, bool) {
 // already carries status='merged' and a deleted_at is existing behaviour, so
 // the lookup asks only whether the row is there.
 func missingAssetID(ctx context.Context, tx *sql.Tx, ids []string) (string, error) {
+	// assets.id is a UUID column on PostgreSQL and TEXT on the SQLite fallback,
+	// where a spelling the one dialect folds and the other does not would make
+	// the same lookup answer differently. The caller passes only ids
+	// canonicalUUID has accepted, so the shape is already settled here.
 	for _, id := range ids {
-		// assets.id is a UUID column on PostgreSQL and TEXT on the SQLite
-		// fallback, where an id that is not a UUID would make the lookup itself
-		// an error on one dialect only. Checking the shape first keeps both
-		// answering the same code for the same request.
-		if _, err := uuid.Parse(id); err != nil {
-			return id, nil
-		}
 		var found string
 		err := tx.QueryRowContext(ctx, `SELECT id FROM assets WHERE id=$1`, id).Scan(&found)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -710,6 +707,28 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		writeAPIError(response, request, 400, "INVALID_MERGE", "primary_id and secondary_ids are required.")
 		return
 	}
+	// assets.id and asset_sources.asset_id are UUID columns on PostgreSQL and
+	// TEXT on the SQLite fallback, so the spelling of an id has to be settled
+	// before the transaction opens or the same request gets a different answer
+	// per dialect. Only the canonical form reaches SQL and asset_changes from
+	// here on, which is also what the MCP merged_into lookup matches on, and
+	// nothing is written on the way out.
+	primaryID, ok := canonicalUUID(input.PrimaryID)
+	if !ok {
+		writeAPIError(response, request, 400, "INVALID_MERGE",
+			"primary_id and secondary_ids must name existing assets.")
+		return
+	}
+	secondaryIDs := make([]string, 0, len(input.SecondaryIDs))
+	for _, secondaryID := range input.SecondaryIDs {
+		canonical, ok := canonicalUUID(secondaryID)
+		if !ok {
+			writeAPIError(response, request, 400, "INVALID_MERGE",
+				"primary_id and secondary_ids must name existing assets.")
+			return
+		}
+		secondaryIDs = append(secondaryIDs, canonical)
+	}
 	tx, err := s.database.DB().BeginTx(request.Context(), nil)
 	if err != nil {
 		s.internalError(response, request, err)
@@ -717,7 +736,7 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 	}
 	defer tx.Rollback()
 	missing, err := missingAssetID(
-		request.Context(), tx, append([]string{input.PrimaryID}, input.SecondaryIDs...),
+		request.Context(), tx, append([]string{primaryID}, secondaryIDs...),
 	)
 	if err != nil {
 		// The SQLite fallback runs on a single connection, so reporting an
@@ -734,8 +753,8 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		return
 	}
 	moved := make([]string, 0)
-	for _, secondaryID := range input.SecondaryIDs {
-		if secondaryID == input.PrimaryID {
+	for _, secondaryID := range secondaryIDs {
+		if secondaryID == primaryID {
 			continue
 		}
 		rows, err := tx.QueryContext(
@@ -753,7 +772,7 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		rows.Close()
 		if _, err := tx.ExecContext(
 			request.Context(), `UPDATE asset_sources SET asset_id=$1 WHERE asset_id=$2`,
-			input.PrimaryID, secondaryID,
+			primaryID, secondaryID,
 		); err != nil {
 			s.internalError(response, request, err)
 			return
@@ -768,14 +787,14 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 		}
 	}
 	metadata, _ := json.Marshal(map[string]any{
-		"secondary_ids": input.SecondaryIDs, "source_ids": moved,
+		"secondary_ids": secondaryIDs, "source_ids": moved,
 	})
 	_, err = tx.ExecContext(
 		request.Context(),
 		`INSERT INTO asset_changes(
 			id,asset_id,change_type,after_json,actor_type,actor_id,reason
 		) VALUES($1,$2,'merged',$3,'user',$4,$5)`,
-		uuid.NewString(), input.PrimaryID, string(metadata),
+		uuid.NewString(), primaryID, string(metadata),
 		principalFromContext(request.Context()).User.ID, input.Reason,
 	)
 	if err != nil {
@@ -784,7 +803,7 @@ func (s *Server) mergeAssets(response http.ResponseWriter, request *http.Request
 	}
 	if err := (audit.Recorder{}).Record(request.Context(), tx, audit.Entry{
 		ActorType: "user", ActorID: principalFromContext(request.Context()).User.ID,
-		Action: "asset.merge", ResourceType: "asset", ResourceID: input.PrimaryID,
+		Action: "asset.merge", ResourceType: "asset", ResourceID: primaryID,
 		Result: "success", Reason: input.Reason, After: json.RawMessage(metadata),
 	}); err != nil {
 		s.internalError(response, request, err)
