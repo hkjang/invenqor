@@ -259,10 +259,15 @@ func (s *Server) exportAssets(response http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) getAsset(response http.ResponseWriter, request *http.Request) {
+	id, ok := assetIDParam(request)
+	if !ok {
+		writeAPIError(response, request, 404, "ASSET_NOT_FOUND", "The asset does not exist.")
+		return
+	}
 	asset, err := scanAsset(s.database.DB().QueryRowContext(
 		request.Context(),
 		`SELECT `+assetColumns+` FROM assets WHERE id = $1`,
-		chi.URLParam(request, "assetID"),
+		id,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAPIError(response, request, 404, "ASSET_NOT_FOUND", "The asset does not exist.")
@@ -368,7 +373,11 @@ func (s *Server) createAsset(response http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) updateAsset(response http.ResponseWriter, request *http.Request) {
-	id := chi.URLParam(request, "assetID")
+	id, ok := assetIDParam(request)
+	if !ok {
+		writeAPIError(response, request, 404, "ASSET_NOT_FOUND", "The asset does not exist.")
+		return
+	}
 	before, err := scanAsset(s.database.DB().QueryRowContext(
 		request.Context(), `SELECT `+assetColumns+` FROM assets WHERE id = $1`, id,
 	))
@@ -489,7 +498,11 @@ func (s *Server) restoreAsset(response http.ResponseWriter, request *http.Reques
 func (s *Server) setAssetDeleted(
 	response http.ResponseWriter, request *http.Request, deleted bool,
 ) {
-	id := chi.URLParam(request, "assetID")
+	id, ok := assetIDParam(request)
+	if !ok {
+		writeAPIError(response, request, 404, "ASSET_NOT_FOUND", "The asset does not exist.")
+		return
+	}
 	now := time.Now().UTC()
 	var deletedAt any
 	status, action, change := "active", "asset.restore", "restored"
@@ -521,12 +534,20 @@ func (s *Server) setAssetDeleted(
 }
 
 func (s *Server) assetHistory(response http.ResponseWriter, request *http.Request) {
+	// openapi declares 200 as the only outcome here, so an id that names no
+	// asset — including one that cannot, for want of the declared shape — is an
+	// empty history rather than a new error code.
+	id, ok := assetIDParam(request)
+	if !ok {
+		writeJSON(response, 200, map[string]any{"items": []any{}})
+		return
+	}
 	rows, err := s.database.DB().QueryContext(
 		request.Context(),
 		`SELECT id, change_type, before_json, after_json, actor_type,
 		 actor_id, reason, occurred_at FROM asset_changes
 		 WHERE asset_id=$1 ORDER BY occurred_at DESC`,
-		chi.URLParam(request, "assetID"),
+		id,
 	)
 	if err != nil {
 		s.internalError(response, request, err)
@@ -551,7 +572,12 @@ func (s *Server) assetHistory(response http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) assetRelations(response http.ResponseWriter, request *http.Request) {
-	id := chi.URLParam(request, "assetID")
+	// As for the history above: this path declares 200 alone.
+	id, ok := assetIDParam(request)
+	if !ok {
+		writeJSON(response, 200, map[string]any{"items": []any{}})
+		return
+	}
 	rows, err := s.database.DB().QueryContext(
 		request.Context(),
 		`SELECT r.id,r.source_asset_id,r.relation_type,r.target_asset_id,
@@ -664,6 +690,23 @@ func canonicalUUID(value string) (string, bool) {
 		return "", false
 	}
 	return parsed.String(), true
+}
+
+// assetIDParam returns the {assetID} path parameter in the canonical form
+// openapi declares for it (`format: uuid`), and false for anything else.
+//
+// Every handler below reaches a UUID column with it — assets.id,
+// asset_changes.asset_id, asset_relations.source_asset_id and
+// target_asset_id — on PostgreSQL, where the SQLite fallback has TEXT. So a
+// spelling that is not the declared one diverged by dialect twice over:
+// PostgreSQL rejected the `urn:uuid:` form and anything that is no UUID at all
+// with SQLSTATE 22P02, surfacing as a 500 none of these paths declares, and it
+// silently folded the brace-wrapped and unhyphenated forms into a hit, so a
+// PATCH or a DELETE addressed that way really did rename and delete the asset
+// where the fallback matched nothing and answered 404. Refusing both here
+// settles it before any query runs.
+func assetIDParam(request *http.Request) (string, bool) {
+	return canonicalUUID(chi.URLParam(request, "assetID"))
 }
 
 // missingAssetID returns the first id that is not an asset, or "" when they all
