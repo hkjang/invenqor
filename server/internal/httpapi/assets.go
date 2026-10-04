@@ -631,6 +631,17 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 		writeAPIError(response, request, 400, "INVALID_RELATION", "target_asset_id and relation_type are required.")
 		return
 	}
+	sourceID, ok := assetIDParam(request)
+	if !ok {
+		writeAPIError(response, request, 400, "INVALID_RELATION", "assetID must be a hyphenated UUID.")
+		return
+	}
+	targetID, ok := canonicalUUID(input.TargetID)
+	if !ok {
+		writeAPIError(response, request, 400, "INVALID_RELATION", "target_asset_id must be a hyphenated UUID.")
+		return
+	}
+	input.TargetID = targetID
 	if input.Confidence == 0 {
 		input.Confidence = 1
 	}
@@ -640,7 +651,7 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 		`INSERT INTO asset_relations(
 			id,source_asset_id,relation_type,target_asset_id,source,confidence
 		) VALUES($1,$2,$3,$4,'manual',$5)`,
-		id, chi.URLParam(request, "assetID"), input.RelationType,
+		id, sourceID, input.RelationType,
 		input.TargetID, input.Confidence,
 	)
 	if err != nil {
@@ -652,7 +663,11 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 }
 
 func (s *Server) deleteAssetRelation(response http.ResponseWriter, request *http.Request) {
-	id := chi.URLParam(request, "relationID")
+	id, ok := canonicalUUID(chi.URLParam(request, "relationID"))
+	if !ok {
+		writeAPIError(response, request, 404, "RELATION_NOT_FOUND", "The relation does not exist.")
+		return
+	}
 	result, err := s.database.DB().ExecContext(
 		request.Context(),
 		`UPDATE asset_relations SET valid_to=$1
