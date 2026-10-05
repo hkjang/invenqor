@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,28 @@ func relationValidationAssets(t *testing.T, server *Server) (string, string) {
 func relationValidationBody(targetID, relationType string) string {
 	body, _ := json.Marshal(map[string]string{"target_asset_id": targetID, "relation_type": relationType})
 	return string(body)
+}
+
+// relationValidationBody cannot carry a numeric confidence, so range cases
+// build their own body and omit the field entirely when confidence is nil.
+func relationConfidenceBody(targetID, relationType string, confidence *float64) string {
+	payload := map[string]any{"target_asset_id": targetID, "relation_type": relationType}
+	if confidence != nil {
+		payload["confidence"] = *confidence
+	}
+	body, _ := json.Marshal(payload)
+	return string(body)
+}
+
+func relationConfidence(t *testing.T, server *Server, id string) float64 {
+	t.Helper()
+	var confidence float64
+	if err := server.database.DB().QueryRow(
+		`SELECT confidence FROM asset_relations WHERE id=$1`, id,
+	).Scan(&confidence); err != nil {
+		t.Fatalf("read relation confidence: %v", err)
+	}
+	return confidence
 }
 
 func assertRelationResponse(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {
@@ -228,6 +251,74 @@ func TestRelationUpperCaseIDsAreCanonicalInRowsAndAudit(t *testing.T) {
 			}
 			if resourceID != id {
 				t.Errorf("delete audit resource_id = %q, want %q", resourceID, id)
+			}
+		})
+	}
+}
+
+// openapi declares `confidence: {minimum: 0, maximum: 1}` on both create paths
+// and on the GET /relations response, but neither dialect has a CHECK on
+// asset_relations.confidence, so an out-of-range write would make the read path
+// answer with a value its own schema forbids.
+func TestRelationCreateRejectsConfidenceOutsideDeclaredRange(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		name := "console"
+		if external {
+			name = "external"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, request := relationValidationClient(t, external)
+			for _, confidence := range []float64{-0.5, 1.5, -1, 42} {
+				t.Run(strconv.FormatFloat(confidence, 'f', -1, 64), func(t *testing.T) {
+					source, target := relationValidationAssets(t, server)
+					before := countRows(t, server, `SELECT COUNT(*) FROM asset_relations`)
+					audits := countRows(t, server, `SELECT COUNT(*) FROM audit_logs WHERE action='relation.create'`)
+					body := relationConfidenceBody(target, "depends_on", &confidence)
+					assertRelationResponse(t, request(http.MethodPost, source+"/relations", body), http.StatusBadRequest, "INVALID_RELATION")
+					if got := countRows(t, server, `SELECT COUNT(*) FROM asset_relations`); got != before {
+						t.Errorf("relations after rejected create = %d, want unchanged %d", got, before)
+					}
+					if got := countRows(t, server, `SELECT COUNT(*) FROM audit_logs WHERE action='relation.create'`); got != audits {
+						t.Errorf("create audits after rejected create = %d, want unchanged %d", got, audits)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The boundaries and an omitted field stay accepted. An explicit 0 is still
+// promoted to 1 — openapi's `default: 1` only covers a missing value, so that
+// promotion is wrong, but telling "absent" from 0 needs a *float64 input and is
+// a separate change; this pins today's behaviour so it cannot drift silently.
+func TestRelationCreateStoresConfidenceWithinDeclaredRange(t *testing.T) {
+	zero, one, fractional := 0.0, 1.0, 0.8
+	for _, external := range []bool{false, true} {
+		name := "console"
+		if external {
+			name = "external"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, request := relationValidationClient(t, external)
+			for _, testCase := range []struct {
+				name       string
+				confidence *float64
+				want       float64
+			}{
+				{"omitted defaults to one", nil, 1},
+				{"explicit zero is promoted to one", &zero, 1},
+				{"upper boundary", &one, 1},
+				{"fractional", &fractional, 0.8},
+			} {
+				t.Run(testCase.name, func(t *testing.T) {
+					source, target := relationValidationAssets(t, server)
+					body := relationConfidenceBody(target, "depends_on", testCase.confidence)
+					id := createdRelationID(t, request(http.MethodPost, source+"/relations", body))
+					assertRelationState(t, server, id, source, target, false)
+					if got := relationConfidence(t, server, id); got != testCase.want {
+						t.Errorf("stored confidence = %v, want %v", got, testCase.want)
+					}
+				})
 			}
 		})
 	}
