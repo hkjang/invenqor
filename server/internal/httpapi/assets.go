@@ -642,6 +642,16 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 		return
 	}
 	input.TargetID = targetID
+	// openapi declares confidence as `minimum: 0, maximum: 1` here and on the
+	// GET /relations response, but asset_relations.confidence is a bare
+	// DOUBLE PRECISION in PostgreSQL and a bare REAL in SQLite with no CHECK on
+	// either, so -5 or 42 was stored verbatim and the read path then answered
+	// with a value its own schema forbids. Both create paths already declare
+	// 400, so refusing the write here does not widen the response code set.
+	if input.Confidence < 0 || input.Confidence > 1 {
+		writeAPIError(response, request, 400, "INVALID_RELATION", "confidence must be between 0 and 1.")
+		return
+	}
 	if input.Confidence == 0 {
 		input.Confidence = 1
 	}
