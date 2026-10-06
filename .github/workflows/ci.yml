@@ -41,6 +41,13 @@ jobs:
             echo 'A release PDF contains a local file:// link.' >&2
             exit 1
           fi
+      # docs/ is the GitHub Pages publishing source, and that deployment runs
+      # in its own workflow that nothing here gates on. v0.2.45 quoted '{%' in
+      # a SQL example, which Jekyll read as an unterminated Liquid tag, and the
+      # whole documentation site stopped deploying while this suite stayed
+      # green. See scripts/check-docs-liquid.sh.
+      - name: Verify published documents contain no Liquid tag openers
+        run: ./scripts/check-docs-liquid.sh
       - run: go test ./...
         working-directory: server
       - run: go vet ./...
