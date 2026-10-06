@@ -147,7 +147,7 @@ PostgreSQL 에서는 계약에 없는 500 이 되거나 **거절해야 할 요�
 
   이 질의는 대문자 철자로 남은 기록을 찾습니다. 중괄호형·하이픈 없는 철자는
   `resource_id` 에 그 모양대로 남아 있으므로
-  `WHERE resource_id LIKE '{%'` 와 `WHERE length(resource_id) = 32` 로 함께
+  `WHERE substr(resource_id, 1, 1) = '{'` 와 `WHERE length(resource_id) = 32` 로 함께
   찾아보십시오. 행이 나오면 그 관계의 `status` 가 의도한 결정인지 확인해야
   합니다. 0행이면 할 일이 없습니다.
 - **자동 분류가 만드는 제안은 이번 변경에 닿지 않습니다.** `classify` 는 자기가
