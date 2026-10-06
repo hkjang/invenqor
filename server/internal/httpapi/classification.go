@@ -422,12 +422,34 @@ func (s *Server) reviewProposedRelation(
 	response http.ResponseWriter,
 	request *http.Request,
 ) {
-	relationID := chi.URLParam(request, "relationID")
+	rawRelationID := chi.URLParam(request, "relationID")
 	decision := chi.URLParam(request, "decision")
-	if relationID == "" || (decision != "approve" && decision != "reject") {
+	if rawRelationID == "" || (decision != "approve" && decision != "reject") {
 		writeAPIError(
 			response, request, http.StatusBadRequest,
 			"INVALID_REQUEST", "The decision must be approve or reject.",
+		)
+		return
+	}
+	// openapi.yaml declares {relationId} as `format: uuid` and promises 200, 400
+	// and 404 here. asset_relations.id is a UUID column on PostgreSQL and TEXT on
+	// the SQLite fallback, so any other spelling ended the same request
+	// differently per dialect: PostgreSQL's uuid input rejected `not-a-uuid` and
+	// the `urn:uuid:` form with SQLSTATE 22P02, surfacing as a 500 this path never
+	// declares, and it folded the brace-wrapped and unhyphenated forms into a hit
+	// — so a review addressed that way really did approve or reject the proposal
+	// and record an audit entry — where the fallback matched nothing and answered
+	// 404. An upper-case id, which is the declared form, diverged the other way:
+	// PostgreSQL folded it into a hit and SQLite's comparison did not.
+	//
+	// Refusing before the UPDATE settles it with the 404 an unknown proposal
+	// already gets, and the normalised id is what reaches the SQL and the audit
+	// trail, so no non-canonical spelling is stored or re-exported.
+	relationID, ok := canonicalUUID(rawRelationID)
+	if !ok {
+		writeAPIError(
+			response, request, http.StatusNotFound,
+			"PROPOSAL_NOT_FOUND", "The proposal does not exist or was already reviewed.",
 		)
 		return
 	}
