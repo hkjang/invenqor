@@ -626,6 +626,7 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 		Confidence   float64 `json:"confidence"`
 		Reason       string  `json:"reason"`
 	}
+	input.Confidence = 1
 	if err := decodeJSON(request, &input); err != nil ||
 		input.TargetID == "" || input.RelationType == "" {
 		writeAPIError(response, request, 400, "INVALID_RELATION", "target_asset_id and relation_type are required.")
@@ -651,9 +652,6 @@ func (s *Server) createAssetRelation(response http.ResponseWriter, request *http
 	if input.Confidence < 0 || input.Confidence > 1 {
 		writeAPIError(response, request, 400, "INVALID_RELATION", "confidence must be between 0 and 1.")
 		return
-	}
-	if input.Confidence == 0 {
-		input.Confidence = 1
 	}
 	id := uuid.NewString()
 	_, err := s.database.DB().ExecContext(

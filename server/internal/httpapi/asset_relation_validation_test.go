@@ -23,7 +23,7 @@ func relationValidationClient(t *testing.T, external bool) (*Server, func(string
 	var secret string
 	if external {
 		prefix = "/api/v1/external/assets/"
-		secret = createAPIKeySecret(t, server, cookie, csrf, "relation-validation", "relations.write")
+		secret = createAPIKeySecret(t, server, cookie, csrf, "relation-validation", "relations.read", "relations.write")
 	}
 	return server, func(method, path, body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, prefix+path, strings.NewReader(body))
@@ -287,10 +287,8 @@ func TestRelationCreateRejectsConfidenceOutsideDeclaredRange(t *testing.T) {
 	}
 }
 
-// The boundaries and an omitted field stay accepted. An explicit 0 is still
-// promoted to 1 — openapi's `default: 1` only covers a missing value, so that
-// promotion is wrong, but telling "absent" from 0 needs a *float64 input and is
-// a separate change; this pins today's behaviour so it cannot drift silently.
+// Explicit confidence values, including zero, survive storage, reads and audit.
+// Omission defaults to one as declared by openapi; null keeps that same default.
 func TestRelationCreateStoresConfidenceWithinDeclaredRange(t *testing.T) {
 	zero, one, fractional := 0.0, 1.0, 0.8
 	for _, external := range []bool{false, true} {
@@ -303,20 +301,57 @@ func TestRelationCreateStoresConfidenceWithinDeclaredRange(t *testing.T) {
 			for _, testCase := range []struct {
 				name       string
 				confidence *float64
+				null       bool
 				want       float64
 			}{
-				{"omitted defaults to one", nil, 1},
-				{"explicit zero is promoted to one", &zero, 1},
-				{"upper boundary", &one, 1},
-				{"fractional", &fractional, 0.8},
+				{name: "omitted defaults to one", want: 1},
+				{name: "null defaults to one", null: true, want: 1},
+				{name: "explicit zero is preserved", confidence: &zero, want: 0},
+				{name: "upper boundary", confidence: &one, want: 1},
+				{name: "fractional", confidence: &fractional, want: 0.8},
 			} {
 				t.Run(testCase.name, func(t *testing.T) {
 					source, target := relationValidationAssets(t, server)
 					body := relationConfidenceBody(target, "depends_on", testCase.confidence)
+					if testCase.null {
+						body = `{"target_asset_id":"` + target + `","relation_type":"depends_on","confidence":null}`
+					}
 					id := createdRelationID(t, request(http.MethodPost, source+"/relations", body))
 					assertRelationState(t, server, id, source, target, false)
 					if got := relationConfidence(t, server, id); got != testCase.want {
 						t.Errorf("stored confidence = %v, want %v", got, testCase.want)
+					}
+					response := request(http.MethodGet, source+"/relations", "")
+					assertRelationResponse(t, response, http.StatusOK, "")
+					var listed struct {
+						Items []map[string]any `json:"items"`
+					}
+					if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+						t.Fatalf("decode relations: %v", err)
+					}
+					found := false
+					for _, item := range listed.Items {
+						if item["id"] != id {
+							continue
+						}
+						found = true
+						if got, ok := item["confidence"].(float64); !ok || got != testCase.want {
+							t.Errorf("GET confidence = %#v, want number %v", item["confidence"], testCase.want)
+						}
+					}
+					if !found {
+						t.Errorf("created relation %s missing from GET relations", id)
+					}
+					var afterJSON string
+					if err := server.database.DB().QueryRow(`SELECT after_json FROM audit_logs WHERE action='relation.create' AND resource_id=$1`, id).Scan(&afterJSON); err != nil {
+						t.Fatalf("read create audit: %v", err)
+					}
+					var after map[string]any
+					if err := json.Unmarshal([]byte(afterJSON), &after); err != nil {
+						t.Fatalf("decode create audit: %v", err)
+					}
+					if got, ok := after["confidence"].(float64); !ok || got != testCase.want {
+						t.Errorf("audit confidence = %#v, want number %v", after["confidence"], testCase.want)
 					}
 				})
 			}
